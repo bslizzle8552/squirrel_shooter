@@ -1,0 +1,47 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Builds and installed package metadata
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Editors, operating systems, and local Codex workspace metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+.agents/
+.codex/
+
+# Camera output and OpenCV test artifacts
+captures/
+recordings/
+data/captures/
+data/videos/
+camera-test-*.avi
+camera-test-*.mp4
+camera-still-*.jpg
+*.h264
+*.log
+core.*
+
+# Raspberry Pi removable-media trash
+.Trash-*/
+lost+found/

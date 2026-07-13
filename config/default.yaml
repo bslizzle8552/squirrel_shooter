@@ -1,0 +1,8 @@
+# Start at 720p while validating stability and frame rate on the Pi 4.
+# The camera may support 1080p, but that is deliberately not tonight's target.
+camera:
+  device_index: 0
+  requested_width: 1280
+  requested_height: 720
+  requested_fps: 30
+  output_directory: captures
