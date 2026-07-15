@@ -3,23 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from squirrel_shooter.config import ConfigError, load_config
+from conftest import PROJECT_ROOT
 
 
 def test_loads_camera_config(tmp_path: Path) -> None:
     config_path = tmp_path / "camera.yaml"
-    config_path.write_text(
-        """
-camera:
-  device_index: 2
-  requested_width: 1280
-  requested_height: 720
-  requested_fps: 30
-  output_directory: captures
-""".strip(),
-        encoding="utf-8",
-    )
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["camera"]["device_index"] = 2
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     config = load_config(config_path)
 
@@ -40,17 +34,24 @@ def test_rejects_missing_camera_setting(tmp_path: Path) -> None:
 
 def test_rejects_boolean_device_index(tmp_path: Path) -> None:
     config_path = tmp_path / "camera.yaml"
-    config_path.write_text(
-        """
-camera:
-  device_index: false
-  requested_width: 1280
-  requested_height: 720
-  requested_fps: 30
-  output_directory: captures
-""".strip(),
-        encoding="utf-8",
-    )
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["camera"]["device_index"] = False
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     with pytest.raises(ConfigError, match="device_index"):
+        load_config(config_path)
+
+
+def test_rejects_invalid_roi_and_even_blur_kernel(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["motion"]["roi"].update(enabled=True, x=0.8, width=0.5)
+    config_path = tmp_path / "bad-roi.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ConfigError, match="ROI|roi"):
+        load_config(config_path)
+
+    raw["motion"]["roi"].update(x=0.0, width=1.0)
+    raw["motion"]["blur_kernel"] = 4
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ConfigError, match="odd"):
         load_config(config_path)

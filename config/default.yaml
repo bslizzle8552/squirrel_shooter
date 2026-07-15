@@ -1,8 +1,53 @@
-# Start at 720p while validating stability and frame rate on the Pi 4.
-# The camera may support 1080p, but that is deliberately not tonight's target.
+# Conservative defaults for a Raspberry Pi 4 and a 720p USB camera.
 camera:
   device_index: 0
   requested_width: 1280
   requested_height: 720
   requested_fps: 30
   output_directory: captures
+
+motion:
+  enabled: true
+  processing_width: 640
+  learning_frames: 90
+  history: 300
+  variance_threshold: 25
+  detect_shadows: true
+  blur_kernel: 7
+  morphology_kernel: 5
+  open_iterations: 1
+  close_iterations: 2
+  min_blob_area: 450
+  max_blob_area: 90000
+  persistence_frames: 3
+  persistence_max_distance: 80
+  cooldown_seconds: 8
+  lighting_change_percent: 65
+  recent_event_limit: 100
+  roi:
+    enabled: false
+    x: 0.0
+    y: 0.0
+    width: 1.0
+    height: 1.0
+  debug_outputs:
+    directory: debug
+    min_interval_seconds: 5
+    foreground_mask: false
+    cleaned_mask: false
+    annotated_frame: false
+    roi_visualization: false
+    rejected_candidate_frame: false
+
+health:
+  camera_stale_seconds: 3
+  detector_stale_seconds: 5
+
+storage:
+  max_event_captures: 500
+  max_debug_images: 200
+  max_log_files: 14
+
+logging:
+  level: INFO
+  directory: logs

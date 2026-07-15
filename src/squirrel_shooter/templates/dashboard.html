@@ -2,78 +2,40 @@
 
 {% block content %}
   <section class="hero">
-    <div>
-      <p class="eyebrow">Private camera monitor</p>
-      <h1>Squirrel Squirter</h1>
-      <p class="subtitle">A live view of the garden camera and its latest saved captures.</p>
-    </div>
-    <div class="camera-badge {{ 'online' if camera.online else 'offline' }}" id="camera-badge">
-      <span class="status-dot" aria-hidden="true"></span>
-      <span id="camera-status-text">Camera {{ 'online' if camera.online else 'offline' }}</span>
-    </div>
+    <div><p class="eyebrow">Private vision monitor</p><h1>Squirrel Squirter</h1><p class="subtitle">Motion detection, event snapshots, and camera health&mdash;no physical outputs.</p></div>
+    <div class="camera-badge {{ camera.state|lower }}" id="camera-badge"><span class="status-dot" aria-hidden="true"></span><span id="camera-status-text">Camera {{ camera.state }}</span></div>
   </section>
 
-  <section class="status-grid" aria-label="System status">
-    <article class="status-card">
-      <span>Resolution</span>
-      <strong id="camera-resolution">{{ camera.resolution.label }}</strong>
-      <small>Current camera mode</small>
-    </article>
-    <article class="status-card">
-      <span>Stream rate</span>
-      <strong><span id="camera-fps">{{ '%.1f'|format(camera.fps) }}</span> FPS</strong>
-      <small>Approximate</small>
-    </article>
-    <article class="status-card">
-      <span>Pi CPU</span>
-      <strong id="cpu-temperature">{{ ('%.1f °C'|format(cpu_temperature)) if cpu_temperature is not none else 'Unavailable' }}</strong>
-      <small>Temperature sensor</small>
-    </article>
-    <article class="status-card">
-      <span>Camera device</span>
-      <strong>{{ camera.configured_device.label }}</strong>
-      <small>Configured Pi video device</small>
-    </article>
+  <section class="status-grid diagnostics-grid" aria-label="System status">
+    <article class="status-card"><span>Detector state</span><strong id="detector-state">{{ detector.state }}</strong><small>Background model</small></article>
+    <article class="status-card"><span>Motion enabled</span><strong id="motion-enabled">{{ 'Yes' if detector.enabled else 'No' }}</strong><small>Read-only configuration</small></article>
+    <article class="status-card"><span>Processing rate</span><strong><span id="processing-fps">{{ '%.1f'|format(detector.processing_fps) }}</span> FPS</strong><small>Reduced-resolution vision</small></article>
+    <article class="status-card"><span>Current blobs</span><strong id="blob-count">{{ detector.blob_count }}</strong><small>Cleaned contours</small></article>
+    <article class="status-card"><span>Total events</span><strong id="total-events">{{ detector.accepted_events }}</strong><small>Accepted motion</small></article>
+    <article class="status-card"><span>Total snapshots</span><strong id="total-snapshots">{{ total_captures }}</strong><small>Gallery JPEGs</small></article>
+    <article class="status-card"><span>Last event</span><strong class="compact-value" id="last-event">{{ detector.last_event or 'None yet' }}</strong><small>Accepted candidate</small></article>
+    <article class="status-card"><span>Last snapshot</span><strong class="compact-value" id="last-snapshot">{{ detector.last_snapshot or 'None yet' }}</strong><small>Saved successfully</small></article>
+    <article class="status-card"><span>Application uptime</span><strong id="app-uptime">{{ '%.0f'|format(uptime_seconds) }}s</strong><small>Current process</small></article>
+    <article class="status-card"><span>Pi CPU</span><strong id="cpu-temperature">{{ ('%.1f &deg;C'|format(cpu_temperature)) if cpu_temperature is not none else 'Unavailable' }}</strong><small>Temperature sensor</small></article>
+    <article class="status-card"><span>Camera mode</span><strong id="camera-resolution">{{ camera.resolution.label }}</strong><small><span id="camera-fps">{{ '%.1f'|format(camera.fps) }}</span> capture FPS</small></article>
+    <article class="status-card"><span>Persistence</span><strong id="persistence-count">{{ detector.persistence_count }}</strong><small>Consecutive frames</small></article>
   </section>
 
-  <section class="notice" aria-label="Development mode notice">
+  <section class="notice {{ 'learning' if detector.state == 'LEARNING' else '' }}" id="detector-notice" aria-label="Detector notice">
     <span class="notice-icon" aria-hidden="true">i</span>
-    <div>
-      <strong>Development mode · {{ application_mode|replace('-', ' ')|title }}</strong>
-      <p>Detection, aiming, and water controls are not active. This dashboard is observational only.</p>
-    </div>
+    <div><strong id="notice-title">{{ 'LEARNING background' if detector.state == 'LEARNING' else 'Vision-only diagnostics' }}</strong><p id="notice-detail">{{ 'Events and snapshots are suppressed until the detector reaches READY.' if detector.state == 'LEARNING' else 'Motion events can create snapshots. Aiming, servos, GPIO, and water controls do not exist in this phase.' }}</p></div>
   </section>
 
   <section class="panel live-panel">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Live feed</p>
-        <h2>Garden camera</h2>
-      </div>
-      <span class="live-label {{ 'online' if camera.online else 'offline' }}" id="stream-label">
-        <span class="stream-dot" aria-hidden="true"></span>
-        <span id="stream-label-text">{{ 'Live' if camera.online else 'Offline' }}</span>
-      </span>
-    </div>
+    <div class="section-heading"><div><p class="eyebrow">Live debug feed</p><h2>What the detector sees</h2></div><span class="live-label {{ camera.state|lower }}" id="stream-label"><span class="stream-dot" aria-hidden="true"></span><span id="stream-label-text">{{ camera.state }}</span></span></div>
     <div class="video-frame" id="video-frame" data-online="{{ 'true' if camera.online else 'false' }}">
-      <img id="live-stream" src="{{ url_for('video_feed') }}" alt="Live garden camera stream">
-      <div class="offline-message" id="offline-message">
-        <span aria-hidden="true">⌁</span>
-        <strong>Camera offline</strong>
-        <p id="camera-error">{{ camera.error or 'The dashboard will remain available while the camera is offline.' }}</p>
-      </div>
+      <img id="live-stream" src="{{ url_for('video_feed') }}" alt="Annotated live garden camera stream">
+      <div class="offline-message" id="offline-message"><span aria-hidden="true">!</span><strong id="offline-title">Camera {{ camera.state|lower }}</strong><p id="camera-error">{{ camera.error or 'No fresh frames are available. The dashboard and diagnostics remain online.' }}</p></div>
     </div>
   </section>
 
   <section class="panel gallery-panel">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Saved locally</p>
-        <h2>Recent captures</h2>
-        <p>{{ total_captures }} supported image{{ '' if total_captures == 1 else 's' }} in the capture directory</p>
-      </div>
-      <a class="text-link" href="{{ url_for('captures') }}">View all captures <span aria-hidden="true">→</span></a>
-    </div>
+    <div class="section-heading"><div><p class="eyebrow">Event evidence</p><h2>Recent captures</h2><p><span id="gallery-count">{{ total_captures }}</span> JPEG snapshot{{ '' if total_captures == 1 else 's' }} in the capture directory</p></div><a class="text-link" href="{{ url_for('captures') }}">View all captures <span aria-hidden="true">&rarr;</span></a></div>
     {% include "_gallery.html" %}
   </section>
 {% endblock %}
@@ -81,41 +43,26 @@
 {% block scripts %}
   <script>
     (() => {
-      const badge = document.querySelector('#camera-badge');
-      const statusText = document.querySelector('#camera-status-text');
-      const resolution = document.querySelector('#camera-resolution');
-      const fps = document.querySelector('#camera-fps');
-      const temperature = document.querySelector('#cpu-temperature');
-      const videoFrame = document.querySelector('#video-frame');
-      const cameraError = document.querySelector('#camera-error');
-      const streamLabel = document.querySelector('#stream-label');
-      const streamLabelText = document.querySelector('#stream-label-text');
-
+      const byId = (id) => document.getElementById(id);
+      const displayTime = (value) => value ? new Date(value).toLocaleString() : 'None yet';
+      const displayUptime = (seconds) => { const total = Math.floor(seconds); const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); return hours ? `${hours}h ${minutes}m` : `${minutes}m ${total % 60}s`; };
       async function refreshStatus() {
         try {
           const response = await fetch('{{ url_for("api_status") }}', { cache: 'no-store' });
           if (!response.ok) return;
-          const data = await response.json();
-          const online = data.camera.online;
-          badge.classList.toggle('online', online);
-          badge.classList.toggle('offline', !online);
-          statusText.textContent = `Camera ${online ? 'online' : 'offline'}`;
-          resolution.textContent = data.camera.resolution.label;
-          fps.textContent = data.camera.fps.toFixed(1);
-          temperature.textContent = data.cpu_temperature_c === null
-            ? 'Unavailable'
-            : `${data.cpu_temperature_c.toFixed(1)} °C`;
-          videoFrame.dataset.online = online ? 'true' : 'false';
-          streamLabel.classList.toggle('online', online);
-          streamLabel.classList.toggle('offline', !online);
-          streamLabelText.textContent = online ? 'Live' : 'Offline';
-          cameraError.textContent = data.camera.error || 'The dashboard will remain available while the camera is offline.';
-        } catch (_) {
-          // Keep the last known state if the private dashboard is temporarily unreachable.
-        }
+          const data = await response.json(); const camera = data.camera; const detector = data.detector;
+          byId('camera-badge').className = `camera-badge ${camera.state.toLowerCase()}`; byId('camera-status-text').textContent = `Camera ${camera.state}`;
+          byId('camera-resolution').textContent = camera.resolution.label; byId('camera-fps').textContent = camera.fps.toFixed(1);
+          byId('detector-state').textContent = detector.state; byId('motion-enabled').textContent = detector.enabled ? 'Yes' : 'No'; byId('processing-fps').textContent = detector.processing_fps.toFixed(1);
+          byId('blob-count').textContent = detector.blob_count; byId('persistence-count').textContent = detector.persistence_count; byId('total-events').textContent = data.total_events; byId('total-snapshots').textContent = data.total_snapshots; byId('gallery-count').textContent = data.total_snapshots;
+          byId('last-event').textContent = displayTime(data.last_event_time); byId('last-snapshot').textContent = displayTime(data.last_snapshot_time); byId('app-uptime').textContent = displayUptime(data.application_uptime_seconds);
+          byId('cpu-temperature').textContent = data.cpu_temperature_c === null ? 'Unavailable' : `${data.cpu_temperature_c.toFixed(1)} °C`;
+          byId('video-frame').dataset.online = camera.online ? 'true' : 'false'; byId('stream-label').className = `live-label ${camera.state.toLowerCase()}`; byId('stream-label-text').textContent = camera.state;
+          byId('offline-title').textContent = `Camera ${camera.state.toLowerCase()}`; byId('camera-error').textContent = camera.error || 'No fresh frames are available. The dashboard and diagnostics remain online.';
+          const learning = detector.state === 'LEARNING'; byId('detector-notice').classList.toggle('learning', learning); byId('notice-title').textContent = learning ? 'LEARNING background' : 'Vision-only diagnostics'; byId('notice-detail').textContent = learning ? 'Events and snapshots are suppressed until the detector reaches READY.' : 'Motion events can create snapshots. Aiming, servos, GPIO, and water controls do not exist in this phase.';
+        } catch (_) { /* A later poll will recover; never replace diagnostics with guessed state. */ }
       }
-
-      window.setInterval(refreshStatus, 5000);
+      window.setInterval(refreshStatus, 3000);
     })();
   </script>
 {% endblock %}

@@ -130,6 +130,8 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
 
 .status-card > span, .status-card small { display: block; color: var(--muted); font-size: 0.78rem; }
 .status-card strong { display: block; margin: 8px 0 2px; font-size: 1.35rem; letter-spacing: -0.025em; }
+.status-card .compact-value { font-size: 0.86rem; line-height: 1.35; overflow-wrap: anywhere; }
+.diagnostics-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .notice {
   margin: 18px 0 26px;
@@ -156,6 +158,8 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
 
 .notice strong { color: #f7d99c; font-size: 0.9rem; }
 .notice p { margin: 2px 0 0; color: #cabd9f; font-size: 0.88rem; }
+.notice.learning { border-color: rgba(240, 192, 107, 0.62); box-shadow: 0 0 0 3px rgba(240, 192, 107, 0.08); }
+.camera-badge.stale .status-dot, .live-label.stale .stream-dot { background: var(--amber); box-shadow: 0 0 0 5px rgba(240, 192, 107, 0.1); }
 
 .panel {
   margin-bottom: 26px;
@@ -262,7 +266,7 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
 }
 
 @media (min-width: 761px) and (max-width: 980px) {
-  .status-grid { grid-template-columns: repeat(2, 1fr); }
+  .status-grid, .diagnostics-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 440px) {

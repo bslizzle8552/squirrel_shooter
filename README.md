@@ -1,248 +1,109 @@
 # Squirrel Squirter
 
-Squirrel Squirter is a DIY Raspberry Pi garden sprinkler deterrent. The long-term
-sequence is:
+Squirrel Squirter is a Raspberry Pi 4 garden-camera project. The current build is
+strictly the robot's **eyes**:
 
-**see → detect → aim → dry-fire → spray**
+**camera -> motion detection -> debug visualization -> event snapshots -> diagnostics**
 
-The current version deliberately stops at **see**. It brings up a UVC USB camera,
-offers local camera diagnostics and test recording, and adds a private web
-dashboard for the live feed and saved JPEG captures. Detection, aiming, GPIO,
-servos, and water control are not active.
+It does not recognize squirrels, aim, move servos, access GPIO/I2C/PCA9685, or
+control water. The disabled valve placeholder still defaults to closed and refuses
+to open.
 
-## What works now
+## What works
 
-- YAML camera configuration with a conservative 1280×720 target at 30 FPS
-- One shared background camera service for the dashboard and future detection work
-- Private Flask dashboard with an MJPEG live stream and camera/Pi status
-- Recent-capture gallery plus a paginated captures page
-- Live OpenCV preview and headless MJPG/AVI test recording
-- A diagnostic that lists `/dev/video*` devices and reads one frame
-- Safe interface placeholders for detection, motion, modes, and valve control
-- Camera-independent tests for configuration, filenames, dashboard routes, gallery
-  safety, and single-camera ownership
+- One shared camera service owns the physical camera; every browser and the vision
+  worker consume shared frames.
+- Lightweight OpenCV MOG2 detection runs at a configurable reduced resolution.
+- Blur, shadow removal, morphological cleanup, contour sizing, rectangular ROI,
+  multi-frame persistence, cooldown, and frame-wide lighting reset are configurable.
+- The live MJPEG feed shows boxes, centers, areas, decision reasons, detector state,
+  processing FPS, blob count, persistence, and the ROI.
+- Startup remains in **LEARNING** with events suppressed until the background model
+  is ready.
+- Accepted motion saves one annotated JPEG, subject to cooldown, into the existing
+  capture gallery.
+- The read-only dashboard and APIs report camera, detector, storage, event, uptime,
+  and Pi-temperature health. Stale camera frames are hidden rather than presented
+  as live.
+- JSON logs explain startup, shutdown, camera details/failures, detector decisions,
+  warm-up, cooldown, lighting resets, snapshots, retention, and exceptions.
+- Optional rate-limited debug images are off by default.
+- Old event captures, debug images, and log files are deleted oldest-first according
+  to configured limits.
 
-There is no squirrel detection, tracking, servo movement, GPIO, I2C, PCA9685,
-MOSFET, or valve output in this version. The placeholder valve controller defaults
-to closed and refuses to open. The dashboard has no capture or hardware-control
-buttons.
+## Raspberry Pi deployment
 
-## Raspberry Pi setup
-
-These commands assume 64-bit Raspberry Pi OS with Python 3.11 or newer. On the Pi,
-install the system tools used by OpenCV and the camera checks:
+For a new Pi, install system packages and clone once:
 
 ```bash
 sudo apt update
 sudo apt install -y git python3 python3-venv python3-pip v4l-utils libgl1 libglib2.0-0
-```
-
-Clone and enter the repository:
-
-```bash
-git clone https://github.com/bslizzle8552/squirrel_shooter.git
-cd squirrel_shooter
-```
-
-Create an isolated Python environment, activate it, and install the project:
-
-```bash
+git clone https://github.com/bslizzle8552/squirrel_shooter.git ~/squirrel_shooter
+cd ~/squirrel_shooter
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-Every new terminal session needs the repository and environment activated before
-running a project command:
+For each deployment to the existing Pi checkout:
 
 ```bash
-cd squirrel_shooter
-source .venv/bin/activate
-```
-
-## Run the private dashboard through Tailscale
-
-The dashboard listens on all Pi interfaces at port 5000, but it is intended to be
-opened only from another device on the same Tailnet. Do not configure router port
-forwarding for it.
-
-### Pull and launch on the Pi
-
-The exact Pi username and existing checkout location are not stored in this
-repository. Replace the uppercase placeholders below with their real values. If
-you used the clone commands above, `PI_REPOSITORY_PATH` is typically
-`~/squirrel_shooter`.
-
-From another device connected to the Tailnet:
-
-```bash
-ssh PI_USER@PI_TAILSCALE_HOSTNAME
-cd PI_REPOSITORY_PATH
-git pull --ff-only
+cd ~/squirrel_shooter
+git pull --ff-only origin main
 source .venv/bin/activate
 python -m pip install -e .
 python -m squirrel_shooter.web_dashboard
 ```
 
-The exact dashboard start command is:
+If the repository was cloned somewhere else, change only the first `cd`. Keep that
+terminal open; `Ctrl+C` stops both workers and releases the camera cleanly.
+
+In a second SSH session, verify the private listener and read-only health APIs:
 
 ```bash
-python -m squirrel_shooter.web_dashboard
-```
-
-It runs Flask without debug mode on `0.0.0.0:5000`. Leave that terminal open while
-using the dashboard. Press `Ctrl+C` to stop it; the shared camera is then released.
-
-In a second SSH session on the Pi, confirm the process is listening on every
-network interface at the required private dashboard port:
-
-```bash
+cd ~/squirrel_shooter
+source .venv/bin/activate
 ss -ltnp | grep ':5000'
-```
-
-The listener should show `0.0.0.0:5000`. This does not make the dashboard public
-by itself. Keep router port forwarding, public DNS, and internet-facing reverse
-proxies disabled.
-
-### Find the Pi's Tailscale name or IP
-
-On the Pi, either before starting the dashboard or in a second SSH session:
-
-```bash
-tailscale status
+curl --fail http://127.0.0.1:5000/api/status
+curl --fail http://127.0.0.1:5000/api/health
+curl --fail http://127.0.0.1:5000/api/recent-events
 tailscale ip -4
 ```
 
-`tailscale status` shows Tailnet machine names and addresses. `tailscale ip -4`
-prints the Pi's Tailscale IPv4 address. You can also find the same machine name and
-address in the Tailscale admin console or client application.
-
-### Open the dashboard
-
-On a desktop or phone connected to the same Tailnet, open one of:
+From a device on the same Tailnet, open:
 
 ```text
-http://PI_TAILSCALE_HOSTNAME:5000
 http://PI_TAILSCALE_IP:5000
 ```
 
-If the hostname does not resolve, use the IP printed by `tailscale ip -4`. A camera
-failure does not stop the server: the page will show **Camera offline** and remain
-available for status and saved captures. The offline detail explains whether the
-configured device failed or camera capture was intentionally disabled because the
-command was launched somewhere other than Raspberry Pi hardware.
+Do not expose port 5000 through router forwarding or a public proxy.
 
-From another device on the same Tailnet, these read-only checks confirm the page
-and status endpoint are reachable:
+## Camera checks on the Pi
+
+The physical camera is expected to be attached only to the Pi. Identify and verify
+it there before running the dashboard:
 
 ```bash
-curl --fail http://PI_TAILSCALE_HOSTNAME:5000/
-curl --fail http://PI_TAILSCALE_HOSTNAME:5000/api/status
-```
-
-Open the page in a browser to verify that the live image updates continuously.
-The stream is MJPEG, so a successful `/video-feed` request remains open while
-frames arrive. If the page and status work but the stream does not, check the
-camera device and make sure no other process owns it.
-
-## Capture gallery directory
-
-The dashboard reads the `camera.output_directory` value from `config/default.yaml`.
-The default is:
-
-```yaml
-camera:
-  output_directory: captures
-```
-
-Relative paths are resolved from the directory where the command is launched, so
-start the dashboard from the repository root. With the default configuration the
-gallery reads `PI_REPOSITORY_PATH/captures`. It lists `.jpg` and `.jpeg` files only,
-newest first. New files appear after a page refresh; AVI recordings and other file
-types are ignored. To compare the Pi directory with the gallery without creating
-test images, run:
-
-```bash
-find captures -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' \) -printf '%T@ %p\n' | sort -nr | head -12
-```
-
-Refresh the landing page and confirm those newest files appear in the same order.
-If `camera.output_directory` was changed, use that configured directory instead of
-`captures`.
-
-## Connect and identify the USB camera
-
-Plug the camera directly into the Pi for the first test, activate the virtual
-environment, and run:
-
-```bash
+cd ~/squirrel_shooter
+source .venv/bin/activate
+v4l2-ctl --list-devices
+ls -l /dev/video*
 python -m squirrel_shooter.camera_diagnostic
 ```
 
-The diagnostic lists Linux video nodes, tries the configured camera index, reads
-one frame, and reports the mode the camera actually accepted.
-
-If `/dev/video0` is not the UVC camera, inspect the devices without guessing:
-
-```bash
-v4l2-ctl --list-devices
-ls -l /dev/video*
-```
-
-A single USB camera can expose more than one `/dev/video*` node. Use the node that
-supports video capture. For example, `/dev/video2` corresponds to
-`device_index: 2`. Edit `config/default.yaml`, change `device_index`, and rerun the
-diagnostic. For more detail about a candidate device:
-
-```bash
-v4l2-ctl --device=/dev/video2 --all
-v4l2-ctl --device=/dev/video2 --list-formats-ext
-```
-
-If the Pi reports a permission error, add the current user to the video group,
-then log out and back in:
-
-```bash
-sudo usermod -aG video "$USER"
-```
-
-Stop any other process using the selected camera before starting the dashboard.
-Only one process can reliably own a UVC camera at a time.
-
-## Live preview
-
-From a Raspberry Pi desktop session, run:
+Only one process should own the USB camera. The existing preview and recorder remain
+available when the dashboard is stopped:
 
 ```bash
 python -m squirrel_shooter.camera_preview
-```
-
-- Press `q` to quit.
-- Press `s` to save the current annotated frame.
-- Still images go to `captures/camera-still-<timestamp>.jpg`.
-
-The overlay shows the local timestamp, frame resolution, and measured FPS. Camera
-settings are requests: the diagnostic or overlay may reveal that the camera
-negotiated a different mode.
-
-## Headless recording
-
-SSH sessions and Raspberry Pi OS Lite do not have a preview window. Record a
-10-second annotated test video instead:
-
-```bash
 python -m squirrel_shooter.camera_capture --seconds 10
 ```
 
-The result goes to `captures/camera-test-<timestamp>.avi` relative to the
-repository root. The AVI uses the widely supported MJPG codec.
-
 ## Configuration
 
-The initial camera target is intentionally **720p**, even though a camera may
-support 1080p. This lowers USB, CPU, storage, and thermal pressure while proving
-the complete capture path on a Raspberry Pi 4.
+All detector tuning lives in `config/default.yaml`; there are no hidden detection
+thresholds in the worker.
 
 ```yaml
 camera:
@@ -251,67 +112,81 @@ camera:
   requested_height: 720
   requested_fps: 30
   output_directory: captures
+
+motion:
+  enabled: true
+  processing_width: 640
+  learning_frames: 90
+  history: 300
+  variance_threshold: 25
+  detect_shadows: true
+  blur_kernel: 7
+  morphology_kernel: 5
+  open_iterations: 1
+  close_iterations: 2
+  min_blob_area: 450
+  max_blob_area: 90000
+  persistence_frames: 3
+  persistence_max_distance: 80
+  cooldown_seconds: 8
+  lighting_change_percent: 65
+  recent_event_limit: 100
+  roi:
+    enabled: false
+    x: 0.0
+    y: 0.0
+    width: 1.0
+    height: 1.0
 ```
 
-Every camera command, including the dashboard, accepts another file with
-`--config path/to/settings.yaml`.
+ROI values are normalized from `0.0` to `1.0`, so they do not depend on the camera
+resolution. Blob areas and persistence distance are measured in the internally
+processed image, whose width is `processing_width`.
 
-## Run the tests
+Optional debug outputs are individually configurable under
+`motion.debug_outputs`. Their defaults are all `false`. Storage limits and health
+staleness thresholds are under `storage` and `health`. Set `logging.level: DEBUG`
+temporarily when every rejected frame-level candidate is needed in the JSON logs.
 
-The tests do not open a real camera or touch hardware:
+### Outdoor starting ranges
+
+The checked-in values are safe initial estimates, not camera-specific calibration.
+For the first daylight garden test, adjust one value at a time:
+
+- `learning_frames`: 90-180 (3-6 seconds at 30 FPS)
+- `variance_threshold`: 25-40; higher rejects more subtle pixel change
+- `min_blob_area`: 450-1,500 at 640-pixel processing width
+- `max_blob_area`: 60,000-120,000; lower it if sky/shadow changes dominate
+- `persistence_frames`: 3-5
+- `persistence_max_distance`: 60-120 pixels
+- `cooldown_seconds`: 8-15
+- `lighting_change_percent`: 55-70
+
+Enable and tighten the ROI as soon as the fixed garden framing is known. Windy
+foliage, rain, insects near the lens, moving shadows, automatic exposure changes,
+and night infrared behavior will require real-camera tuning.
+
+## Read-only APIs
+
+- `/api/status` - dashboard summary
+- `/api/health` - worker, frame, event, storage, and error counters
+- `/api/recent-events` - newest accepted/rejected candidate decisions
+
+There are no control endpoints or manual capture button.
+
+## Tests
+
+The automated suite never opens a real camera. It uses generated frames, synthetic
+masks, and injected services/failures:
 
 ```bash
-python -m pip install -e ".[test]"
-python -m pytest
-```
-
-The web tests inject offline and generated-frame camera services. They do not
-enumerate or open a development computer webcam.
-
-## Development machine Git workflow
-
-GitHub is the source of truth. Make and test changes in the development checkout,
-then review and push them before updating the Pi. Do not maintain a separate copy
-of source changes on the Pi.
-
-```bash
-git status --short --branch
-git diff --check
-git diff --stat
-python -m pip install -e ".[test]"
-python -m pytest
-git add README.md pyproject.toml src/squirrel_shooter tests
-git commit -m "Add private Raspberry Pi camera dashboard"
-git push origin "$(git branch --show-current)"
-```
-
-After connecting to the Pi, confirm it pulled the expected GitHub revision before
-launching the dashboard:
-
-```bash
-ssh PI_USER@PI_TAILSCALE_HOSTNAME
-cd PI_REPOSITORY_PATH
-git pull --ff-only
-git status --short --branch
-git log -1 --oneline
+cd ~/squirrel_shooter
 source .venv/bin/activate
-python -m pip install -e .
-python -m squirrel_shooter.web_dashboard
+python -m pip install -e ".[test]"
+python -m pytest
 ```
 
-The source layout remains intentionally small:
-
-```text
-config/                         Camera settings
-docs/ROADMAP.md                 Staged build and safety plan
-src/squirrel_shooter/           Python package and camera commands
-src/squirrel_shooter/templates/ Flask page templates
-src/squirrel_shooter/static/    Dashboard styles
-tests/                          Camera-independent tests
-captures/                       Local output, created at runtime and ignored by Git
-```
-
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged path from camera validation
-through conservative water testing. Servos and the valve remain later-phase work;
-they must not be connected to runnable code until their power and safety setup is
-ready.
+Real verification still belongs on the Raspberry Pi: actual resolution/FPS,
+lighting warm-up, outdoor false positives, ROI geometry, long-running CPU and
+temperature, USB-camera recovery, snapshot permissions, storage retention, and
+Tailscale browser behavior.

@@ -1,46 +1,35 @@
-# Squirrel Shooter roadmap
+# Squirrel Squirter roadmap
 
-The intended sequence is **see → detect → aim → dry-fire → spray**. Each phase
-must be proven before the next phase is allowed to control physical hardware.
+The intended sequence is **see -> detect -> aim -> dry-fire -> spray**. Each phase
+must be proven before the next phase can control physical hardware.
 
-## Phase 1: Pi + USB camera validation
+## Completed foundation: camera and private dashboard
 
-- Set up Raspberry Pi OS, Python, and the project environment.
-- Identify the UVC camera and confirm reliable 720p capture at a useful frame rate.
-- Verify both desktop preview and headless recording.
+- Validate the Pi USB camera at a conservative 720p target.
+- Own the camera in one shared service.
+- Provide local diagnostics, recordings, an MJPEG feed, and a private read-only
+  Tailnet dashboard.
 
-## Phase 2: Camera recording and garden footage collection
+## Current phase: motion vision and diagnostics
 
-- Collect daytime, evening, weather, shadow, plant-motion, and squirrel footage.
-- Review framing and choose the fixed camera position.
-- Keep recordings local and establish sensible retention limits.
+- Detect motion locally with MOG2, cleanup, configurable size limits, persistence,
+  cooldown, lighting resets, and a rectangular garden ROI.
+- Make detector decisions visible in the stream, structured logs, health APIs, and
+  bounded recent-event data.
+- Save only annotated accepted-event snapshots and bound local storage.
+- Tune and validate against real outdoor footage before advancing.
 
-## Phase 3: Motion detection inside a defined garden zone
+## Future phase: pan/tilt dry-fire
 
-- Define an inclusion zone so roads, neighbors, and irrelevant movement are ignored.
-- Begin with lightweight local motion detection rather than cloud or heavy ML services.
-- Measure false positives before anything can aim.
-
-## Phase 4: Pan/tilt servo zeroing and dry-fire aiming
-
-- Add the PCA9685 only after a proper separate servo power supply is available.
+- Add the PCA9685 only after a separate servo power supply is ready.
 - Establish conservative mechanical limits and a repeatable neutral position.
-- Test aiming with the valve disconnected and water disabled.
+- Map image-space targets to calibrated positions with the valve disconnected.
 
-## Phase 5: Calibration from camera pixels to pan/tilt position
-
-- Map positions in the camera image to safe pan and tilt targets.
-- Clamp every target to the established mechanical and garden-zone limits.
-- Verify repeatability with dry-fire tests only.
-
-## Phase 6: Valve control and conservative water testing
+## Future phase: conservative water testing
 
 - Add the MOSFET and 12 V solenoid only after electrical review.
-- Default the valve to closed/off at startup, shutdown, exceptions, and signal loss.
+- Default the valve closed at startup, shutdown, exceptions, and signal loss.
 - Use short, manually supervised pulses with hard duration and cooldown limits.
 
-## Phase 7: Event snapshots and a simple private dashboard
-
-- Save useful local event snapshots and basic metadata.
-- Add a small private status/history view only after the core behavior is dependable.
-- Keep remote control out of scope until authentication and physical safety are designed.
+Squirrel recognition, tracking, calibration, aiming, GPIO, servos, and water remain
+outside the current vision phase.

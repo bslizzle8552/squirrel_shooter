@@ -1,32 +1,36 @@
-"""Private, observational Flask dashboard for the shared camera service."""
+"""Read-only Flask dashboard for camera, motion, events, and diagnostics."""
 
 from __future__ import annotations
 
 import argparse
 import atexit
+import logging
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
+from werkzeug.exceptions import HTTPException
 
 from .camera_service import CameraService, CameraStatus
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
+from .diagnostics import configure_logging
+from .vision_service import VisionService, VisionStatus
 
 
+LOGGER = logging.getLogger(__name__)
 SUPPORTED_CAPTURE_SUFFIXES = frozenset({".jpg", ".jpeg"})
 RECENT_CAPTURE_LIMIT = 12
 CAPTURES_PER_PAGE = 24
-APPLICATION_MODE = "observation-only"
+APPLICATION_MODE = "motion-diagnostics"
 
 
 @dataclass(frozen=True)
 class CaptureImage:
-    """A gallery-safe image entry derived from the configured directory."""
-
     filename: str
     timestamp: str
 
@@ -36,21 +40,19 @@ def list_capture_images(directory: Path) -> list[CaptureImage]:
 
     try:
         candidates = [
-            path
-            for path in directory.iterdir()
+            path for path in directory.iterdir()
             if path.is_file()
             and path.suffix.lower() in SUPPORTED_CAPTURE_SUFFIXES
             and _resolve_capture_path(directory, path.name) is not None
         ]
-    except (FileNotFoundError, NotADirectoryError, PermissionError):
+    except OSError:
         return []
 
     def sort_key(path: Path) -> tuple[float, str]:
         try:
-            modified = path.stat().st_mtime
+            return path.stat().st_mtime, path.name.lower()
         except OSError:
-            modified = 0.0
-        return modified, path.name.lower()
+            return 0.0, path.name.lower()
 
     images: list[CaptureImage] = []
     for path in sorted(candidates, key=sort_key, reverse=True):
@@ -58,18 +60,11 @@ def list_capture_images(directory: Path) -> list[CaptureImage]:
             timestamp = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
         except OSError:
             continue
-        images.append(
-            CaptureImage(
-                filename=path.name,
-                timestamp=timestamp.strftime("%b %d, %Y at %I:%M:%S %p"),
-            )
-        )
+        images.append(CaptureImage(path.name, timestamp.strftime("%b %d, %Y at %I:%M:%S %p")))
     return images
 
 
 def read_cpu_temperature() -> float | None:
-    """Read the Pi CPU temperature from Linux sysfs when it is available."""
-
     temperature_path = Path("/sys/class/thermal/thermal_zone0/temp")
     try:
         value = float(temperature_path.read_text(encoding="utf-8").strip())
@@ -79,36 +74,39 @@ def read_cpu_temperature() -> float | None:
 
 
 def _camera_status_dict(status: CameraStatus, app_config: AppConfig) -> dict[str, Any]:
+    stale = status.online and status.last_frame_age_seconds is not None and status.last_frame_age_seconds > app_config.health.camera_stale_seconds
+    state = "STALE" if stale else ("ONLINE" if status.online else "OFFLINE")
     device_index = app_config.camera.device_index
     return {
-        "online": status.online,
-        "configured_device": {
-            "index": device_index,
-            "label": f"/dev/video{device_index}",
-        },
-        "resolution": {
-            "width": status.width,
-            "height": status.height,
-            "label": f"{status.width}×{status.height}",
-        },
+        "state": state,
+        "online": state == "ONLINE",
+        "alive": state == "ONLINE" and status.thread_alive,
+        "configured_device": {"index": device_index, "label": f"/dev/video{device_index}"},
+        "resolution": {"width": status.width, "height": status.height, "label": f"{status.width}x{status.height}"},
         "fps": round(status.fps, 1),
         "error": status.error,
+        "last_frame_received": status.last_frame_at,
+        "last_frame_age_seconds": None if status.last_frame_age_seconds is None else round(status.last_frame_age_seconds, 2),
+        "frames_received": status.frames_received,
+        "thread_alive": status.thread_alive,
     }
+
+
+def _vision_status_dict(status: VisionStatus, config: AppConfig) -> dict[str, Any]:
+    fresh = status.last_detector_age_seconds is None or status.last_detector_age_seconds <= config.health.detector_stale_seconds
+    data = asdict(status)
+    data["processing_fps"] = round(status.processing_fps, 1)
+    data["last_detector_age_seconds"] = None if status.last_detector_age_seconds is None else round(status.last_detector_age_seconds, 2)
+    data["alive"] = status.thread_alive and fresh
+    return data
 
 
 def _safe_capture_filename(filename: str) -> bool:
     path = Path(filename)
-    return (
-        bool(filename)
-        and path.name == filename
-        and filename not in {".", ".."}
-        and path.suffix.lower() in SUPPORTED_CAPTURE_SUFFIXES
-    )
+    return bool(filename) and path.name == filename and filename not in {".", ".."} and path.suffix.lower() in SUPPORTED_CAPTURE_SUFFIXES
 
 
 def _resolve_capture_path(directory: Path, filename: str) -> Path | None:
-    """Resolve one supported capture while containing symlinks to the gallery root."""
-
     if not _safe_capture_filename(filename):
         return None
     try:
@@ -125,47 +123,65 @@ def create_app(
     config_path: str | Path = DEFAULT_CONFIG_PATH,
     *,
     camera_service: CameraService | None = None,
+    vision_service: VisionService | None = None,
     temperature_reader: Callable[[], float | None] = read_cpu_temperature,
     start_camera: bool = True,
+    start_vision: bool = True,
 ) -> Flask:
-    """Build the dashboard with injectable hardware boundaries for testing."""
+    """Build the dashboard with injectable camera and detector boundaries."""
 
-    app_config: AppConfig = load_config(config_path)
+    app_config = load_config(config_path)
     app = Flask(__name__)
-    service = camera_service or CameraService(app_config.camera)
-    app.extensions["camera_service"] = service
-    app.extensions["squirrel_config"] = app_config
-    app.extensions["temperature_reader"] = temperature_reader
+    camera = camera_service or CameraService(app_config.camera, encode_jpeg=False)
+    vision = vision_service or VisionService(camera, app_config)
+    started_at = monotonic()
+    app.extensions.update(
+        camera_service=camera,
+        vision_service=vision,
+        squirrel_config=app_config,
+        temperature_reader=temperature_reader,
+    )
 
     if start_camera:
-        service.start()
-    if camera_service is None:
-        atexit.register(service.stop)
+        camera.start()
+    if start_vision:
+        vision.start()
+    if camera_service is None or vision_service is None:
+        atexit.register(vision.stop)
+        atexit.register(camera.stop)
 
-    def page_status() -> tuple[dict[str, Any], float | None]:
-        status = _camera_status_dict(service.status(), app_config)
-        temperature = temperature_reader()
-        if temperature is not None:
-            temperature = round(temperature, 1)
-        return status, temperature
+    def page_status() -> tuple[dict[str, Any], dict[str, Any], float | None, float]:
+        camera_status = _camera_status_dict(camera.status(), app_config)
+        detector_status = _vision_status_dict(vision.status(), app_config)
+        try:
+            temperature = temperature_reader()
+            temperature = None if temperature is None else round(temperature, 1)
+            if temperature is None:
+                LOGGER.warning("Pi temperature unavailable", extra={"structured_data": {"event": "pi_temperature_failure"}})
+        except Exception as exc:
+            temperature = None
+            LOGGER.warning("Pi temperature read failed", extra={"structured_data": {"event": "pi_temperature_failure", "error": str(exc)}})
+        return camera_status, detector_status, temperature, monotonic() - started_at
 
     @app.get("/")
     def dashboard() -> str:
         captures = list_capture_images(app_config.camera.output_directory)
-        status, temperature = page_status()
+        camera_data, detector, temperature, uptime = page_status()
         return render_template(
             "dashboard.html",
-            camera=status,
+            camera=camera_data,
+            detector=detector,
             cpu_temperature=temperature,
             captures=captures[:RECENT_CAPTURE_LIMIT],
             total_captures=len(captures),
             application_mode=APPLICATION_MODE,
+            uptime_seconds=uptime,
         )
 
     @app.get("/video-feed")
     def video_feed() -> Any:
         return app.response_class(
-            service.mjpeg_frames(),
+            vision.mjpeg_frames(),
             mimetype="multipart/x-mixed-replace; boundary=frame",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
@@ -173,19 +189,12 @@ def create_app(
     @app.get("/captures")
     def captures() -> str:
         all_captures = list_capture_images(app_config.camera.output_directory)
-        page = request.args.get("page", default=1, type=int) or 1
-        page = max(page, 1)
+        page = max(request.args.get("page", default=1, type=int) or 1, 1)
         total_pages = max(1, math.ceil(len(all_captures) / CAPTURES_PER_PAGE))
         if page > total_pages and all_captures:
             abort(404)
         start = (page - 1) * CAPTURES_PER_PAGE
-        return render_template(
-            "captures.html",
-            captures=all_captures[start : start + CAPTURES_PER_PAGE],
-            page=page,
-            total_pages=total_pages,
-            total_captures=len(all_captures),
-        )
+        return render_template("captures.html", captures=all_captures[start : start + CAPTURES_PER_PAGE], page=page, total_pages=total_pages, total_captures=len(all_captures))
 
     @app.get("/captures/<path:filename>")
     def capture_file(filename: str) -> Any:
@@ -196,19 +205,60 @@ def create_app(
 
     @app.get("/api/status")
     def api_status() -> Any:
-        status, temperature = page_status()
+        camera_data, detector, temperature, uptime = page_status()
+        captures = list_capture_images(app_config.camera.output_directory)
         return jsonify(
-            camera=status,
-            cpu_temperature_c=temperature,
-            capture_count=len(list_capture_images(app_config.camera.output_directory)),
             application_mode=APPLICATION_MODE,
+            application_uptime_seconds=round(uptime, 1),
+            camera=camera_data,
+            detector=detector,
+            cpu_temperature_c=temperature,
+            total_events=detector["accepted_events"],
+            total_snapshots=len(captures),
+            last_event_time=detector["last_event"],
+            last_snapshot_time=detector["last_snapshot"],
         )
+
+    @app.get("/api/health")
+    def api_health() -> Any:
+        camera_data, detector, _, uptime = page_status()
+        return jsonify(
+            application_uptime_seconds=round(uptime, 1),
+            camera_alive=camera_data["alive"],
+            detector_alive=detector["alive"],
+            last_frame_received=camera_data["last_frame_received"],
+            last_detector_update=detector["last_detector_update"],
+            last_event=detector["last_event"],
+            last_snapshot=detector["last_snapshot"],
+            processing_fps=detector["processing_fps"],
+            frames_processed=detector["frames_processed"],
+            candidates_seen=detector["candidates_seen"],
+            accepted_events=detector["accepted_events"],
+            rejected_events=detector["rejected_events"],
+            snapshots_saved=detector["snapshots_saved"],
+            last_error=detector["last_error"] or camera_data["error"],
+            capture_directory_writable=detector["capture_directory_writable"],
+            camera_state=camera_data["state"],
+            detector_state=detector["state"],
+        )
+
+    @app.get("/api/recent-events")
+    def api_recent_events() -> Any:
+        events = vision.recent_events()
+        return jsonify(events=events, count=len(events))
+
+    @app.errorhandler(Exception)
+    def report_flask_error(exc: Exception) -> Any:
+        if isinstance(exc, HTTPException):
+            return exc
+        LOGGER.error("Flask request failed", extra={"structured_data": {"event": "flask_error", "error": str(exc)}}, exc_info=True)
+        return jsonify(error="Internal server error"), 500
 
     return app
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the private camera dashboard")
+    parser = argparse.ArgumentParser(description="Run the private motion diagnostics dashboard")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
@@ -217,12 +267,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    config = load_config(args.config)
+    configure_logging(config.logging, config.storage.max_log_files)
+    LOGGER.info("Squirrel Squirter starting", extra={"structured_data": {"event": "startup", "config": str(config.source_path)}})
     app = create_app(args.config)
-    service: CameraService = app.extensions["camera_service"]
+    camera: CameraService = app.extensions["camera_service"]
+    vision: VisionService = app.extensions["vision_service"]
     try:
         app.run(host=args.host, port=args.port, debug=False, threaded=True)
     finally:
-        service.stop()
+        vision.stop()
+        camera.stop()
+        LOGGER.info("Squirrel Squirter shutdown complete", extra={"structured_data": {"event": "shutdown"}})
     return 0
 
 
