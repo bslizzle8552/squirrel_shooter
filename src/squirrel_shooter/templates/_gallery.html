@@ -1,0 +1,23 @@
+{% if captures %}
+  <div class="capture-grid" data-testid="capture-grid">
+    {% for capture in captures %}
+      <a class="capture-card" href="{{ url_for('capture_file', filename=capture.filename) }}" target="_blank" rel="noopener">
+        <img
+          src="{{ url_for('capture_file', filename=capture.filename) }}"
+          alt="Saved camera capture {{ capture.filename }}"
+          loading="lazy"
+        >
+        <span class="capture-details">
+          <strong>{{ capture.filename }}</strong>
+          <time>{{ capture.timestamp }}</time>
+        </span>
+      </a>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="empty-state" data-testid="empty-captures">
+    <span aria-hidden="true">○</span>
+    <p>No captures yet</p>
+    <small>Saved JPEG captures will appear here after a refresh.</small>
+  </div>
+{% endif %}

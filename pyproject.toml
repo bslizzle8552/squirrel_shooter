@@ -9,6 +9,7 @@ description = "Camera-first foundation for a Raspberry Pi garden squirrel deterr
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "Flask>=3.0,<4",
     "numpy>=1.24,<3",
     "opencv-python>=4.8,<5",
     "PyYAML>=6,<7",
@@ -19,6 +20,9 @@ test = ["pytest>=8,<9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+squirrel_shooter = ["templates/*.html", "static/*.css"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

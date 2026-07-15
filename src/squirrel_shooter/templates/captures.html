@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}Captures · Squirrel Squirter{% endblock %}
+
+{% block content %}
+  <section class="hero compact">
+    <div>
+      <p class="eyebrow">Saved locally</p>
+      <h1>Camera captures</h1>
+      <p class="subtitle">Newest first · {{ total_captures }} supported image{{ '' if total_captures == 1 else 's' }}</p>
+    </div>
+    <a class="button" href="{{ url_for('dashboard') }}">Back to live camera</a>
+  </section>
+
+  <section class="panel gallery-panel standalone">
+    {% include "_gallery.html" %}
+
+    {% if total_pages > 1 %}
+      <nav class="pagination" aria-label="Capture pages">
+        {% if page > 1 %}
+          <a href="{{ url_for('captures', page=page - 1) }}">← Newer</a>
+        {% else %}
+          <span></span>
+        {% endif %}
+        <span>Page {{ page }} of {{ total_pages }}</span>
+        {% if page < total_pages %}
+          <a href="{{ url_for('captures', page=page + 1) }}">Older →</a>
+        {% else %}
+          <span></span>
+        {% endif %}
+      </nav>
+    {% endif %}
+  </section>
+{% endblock %}
