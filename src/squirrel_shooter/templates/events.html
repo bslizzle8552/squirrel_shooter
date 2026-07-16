@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Event archive · Squirrel Squirter{% endblock %}
+
+{% block content %}
+  <section class="hero compact">
+    <div>
+      <p class="eyebrow">Saved grouped motion</p>
+      <h1>Event archive</h1>
+      <p class="subtitle">Newest first · {{ total_events }} event{{ '' if total_events == 1 else 's' }}, each with a snapshot and video clip</p>
+    </div>
+    <a class="button" href="{{ url_for('dashboard') }}">Back to live camera</a>
+  </section>
+
+  <section class="panel gallery-panel standalone">
+    <div class="section-heading">
+      <p>These are grouped motion events. Standalone and manual pictures remain in the separate <a class="text-link" href="{{ url_for('captures') }}">picture archive</a>.</p>
+      <a class="text-link" href="{{ url_for('latest_report') }}">Generated review report</a>
+    </div>
+    {% if events %}
+      <div class="capture-grid">
+        {% for event in events %}
+          <article class="capture-card event-card">
+            {% if event.snapshot_path_relative %}<a href="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}"><img src="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}" alt="Event {{ event.event_id }}" loading="lazy"></a>{% endif %}
+            <span class="capture-details"><strong>{{ event.provisional_category }}</strong><time>{{ event.start_timestamp }}</time><small>{{ event.movement_attributes|join(', ') }}</small>{% if event.clip_path_relative %}<a class="clip-link" href="{{ url_for('output_file', relative_path=event.clip_path_relative) }}">Open video clip</a>{% endif %}</span>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}<div class="empty-state"><p>No completed grouped events yet.</p></div>{% endif %}
+
+    {% if total_pages > 1 %}
+      <nav class="pagination" aria-label="Event pages">
+        {% if page > 1 %}<a href="{{ url_for('events', page=page - 1) }}">← Newer</a>{% else %}<span></span>{% endif %}
+        <span>Page {{ page }} of {{ total_pages }}</span>
+        {% if page < total_pages %}<a href="{{ url_for('events', page=page + 1) }}">Older →</a>{% else %}<span></span>{% endif %}
+      </nav>
+    {% endif %}
+  </section>
+{% endblock %}

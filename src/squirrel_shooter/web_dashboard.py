@@ -17,14 +17,16 @@ from werkzeug.exceptions import HTTPException
 
 from .camera_service import CameraService, CameraStatus
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
+from .event_report import load_events
 from .motion_runtime import MotionProcessingService
 from .vision_service import VisionService, VisionStatus
 
 
 LOGGER = logging.getLogger(__name__)
 SUPPORTED_CAPTURE_SUFFIXES = frozenset({".jpg", ".jpeg"})
-RECENT_CAPTURE_LIMIT = 12
+RECENT_EVENT_LIMIT = 5
 CAPTURES_PER_PAGE = 24
+EVENTS_PER_PAGE = 20
 APPLICATION_MODE = "shared-camera-motion-watch"
 
 
@@ -204,7 +206,6 @@ def create_app(
 
     @app.get("/")
     def dashboard() -> str:
-        captures = list_capture_images(app_config.camera.output_directory)
         events = _dashboard_events(vision.recent_events(), app_config)
         camera_data, detector, temperature, uptime = page_status()
         return render_template(
@@ -212,9 +213,7 @@ def create_app(
             camera=camera_data,
             detector=detector,
             cpu_temperature=temperature,
-            captures=captures[:RECENT_CAPTURE_LIMIT],
-            events=events[:RECENT_CAPTURE_LIMIT],
-            total_captures=len(captures) + len(events),
+            events=events[:RECENT_EVENT_LIMIT],
             application_mode=APPLICATION_MODE,
             uptime_seconds=uptime,
             status_refresh_ms=round(app_config.dashboard.status_refresh_interval_seconds * 1000),
@@ -245,6 +244,23 @@ def create_app(
         if capture_path is None:
             abort(404)
         return send_file(capture_path, conditional=True)
+
+    @app.get("/events")
+    def events() -> str:
+        saved_events = load_events(app_config.camera.output_directory / "events")
+        all_events = _dashboard_events(list(reversed(saved_events)), app_config)
+        page = max(request.args.get("page", default=1, type=int) or 1, 1)
+        total_pages = max(1, math.ceil(len(all_events) / EVENTS_PER_PAGE))
+        if page > total_pages and all_events:
+            abort(404)
+        start = (page - 1) * EVENTS_PER_PAGE
+        return render_template(
+            "events.html",
+            events=all_events[start : start + EVENTS_PER_PAGE],
+            page=page,
+            total_pages=total_pages,
+            total_events=len(all_events),
+        )
 
     @app.get("/files/<path:relative_path>")
     def output_file(relative_path: str) -> Any:

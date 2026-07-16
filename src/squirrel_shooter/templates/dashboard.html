@@ -1,63 +1,55 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section class="hero">
-    <div><p class="eyebrow">Private shared-camera monitor</p><h1>Squirrel Squirter</h1><p class="subtitle">One camera runtime powers motion events and this dashboard&mdash;no physical outputs.</p></div>
-    <div class="camera-badge {{ camera.state|lower }}" id="camera-badge"><span class="status-dot" aria-hidden="true"></span><span id="camera-status-text">Camera {{ camera.state }}</span></div>
+  <section class="hero dashboard-hero">
+    <img class="hero-art" src="{{ url_for('static', filename='squirrel-squirter-logo.png') }}" alt="The Squirrel Squirter artwork">
+    <div class="hero-copy">
+      <p class="eyebrow">Private shared-camera monitor</p>
+      <h1>Squirrel Squirter</h1>
+      <p class="subtitle">Motion-triggered garden evidence from one shared camera. No physical outputs.</p>
+    </div>
   </section>
 
-  <section class="status-grid diagnostics-grid" aria-label="System status">
-    <article class="status-card"><span>Detector state</span><strong id="detector-state">{{ detector.state }}</strong><small>Background model</small></article>
-    <article class="status-card"><span>Motion enabled</span><strong id="motion-enabled">{{ 'Yes' if detector.enabled else 'No' }}</strong><small>Read-only configuration</small></article>
-    <article class="status-card"><span>Processing rate</span><strong><span id="processing-fps">{{ '%.1f'|format(detector.processing_fps) }}</span> FPS</strong><small>Reduced-resolution vision</small></article>
-    <article class="status-card"><span>Current blobs</span><strong id="blob-count">{{ detector.blob_count }}</strong><small>Cleaned contours</small></article>
-    <article class="status-card"><span>Total events</span><strong id="total-events">{{ detector.accepted_events }}</strong><small>Accepted motion</small></article>
-    <article class="status-card"><span>Total snapshots</span><strong id="total-snapshots">{{ total_captures }}</strong><small>Gallery JPEGs</small></article>
-    <article class="status-card"><span>Last event</span><strong class="compact-value" id="last-event">{{ detector.last_event or 'None yet' }}</strong><small>Accepted candidate</small></article>
-    <article class="status-card"><span>Last snapshot</span><strong class="compact-value" id="last-snapshot">{{ detector.last_snapshot or 'None yet' }}</strong><small>Saved successfully</small></article>
-    <article class="status-card"><span>Application uptime</span><strong id="app-uptime">{{ '%.0f'|format(uptime_seconds) }}s</strong><small>Current process</small></article>
-    <article class="status-card"><span>Pi CPU</span><strong id="cpu-temperature">{{ ('%.1f &deg;C'|format(cpu_temperature)) if cpu_temperature is not none else 'Unavailable' }}</strong><small>Temperature sensor</small></article>
-    <article class="status-card"><span>Camera mode</span><strong id="camera-resolution">{{ camera.resolution.label }}</strong><small><span id="camera-fps">{{ '%.1f'|format(camera.fps) }}</span> capture FPS</small></article>
-    <article class="status-card"><span>Persistence</span><strong id="persistence-count">{{ detector.persistence_count }}</strong><small>Consecutive frames</small></article>
-    <article class="status-card"><span>Candidate groups</span><strong id="group-count">{{ detector.current_groups|length }}</strong><small>Grouped moving objects</small></article>
-    <article class="status-card"><span>Global rejections</span><strong id="global-rejections">{{ detector.global_motion_rejections }}</strong><small>Scene-wide changes</small></article>
-    <article class="status-card"><span>Camera read failures</span><strong id="read-failures">{{ camera.read_failures }}</strong><small>Reconnect-safe counter</small></article>
-    <article class="status-card"><span>Camera opens</span><strong id="camera-opens">{{ camera.camera_open_count }}</strong><small>One active owner</small></article>
-    <article class="status-card"><span>Leading candidate</span><strong class="compact-value" id="candidate-category">{{ detector.current_groups[0].provisional_category if detector.current_groups else 'None' }}</strong><small id="candidate-detail">{% if detector.current_groups %}{% if detector.current_groups[0].event_eligible %}{{ detector.current_groups[0].component_count }} blobs, {{ detector.current_groups[0].average_pixel_speed }} px/s{% else %}Filtered: {{ detector.current_groups[0].event_filter_reason }}{% endif %}{% else %}Waiting for motion{% endif %}</small></article>
-    <article class="status-card"><span>Last event category</span><strong class="compact-value" id="last-event-category">{{ detector.last_event_summary.provisional_category if detector.last_event_summary else 'None yet' }}</strong><small>Heuristic review label</small></article>
+  <section class="monitor-layout" aria-label="Live camera and essential status">
+    <section class="panel live-panel">
+      <div class="section-heading">
+        <div><p class="eyebrow">Live debug feed</p><h2>What the detector sees</h2></div>
+        <span class="live-label {{ camera.state|lower }}" id="stream-label"><span class="stream-dot" aria-hidden="true"></span><span id="stream-label-text">{{ camera.state }}</span></span>
+      </div>
+      <div class="video-frame" id="video-frame" data-online="{{ 'true' if camera.online else 'false' }}">
+        <img id="live-stream" src="{{ url_for('video_feed') }}" alt="Annotated live garden camera stream">
+        <div class="offline-message" id="offline-message"><span aria-hidden="true">!</span><strong id="offline-title">Camera {{ camera.state|lower }}</strong><p id="camera-error">{{ camera.error or 'No fresh frames are available. The dashboard and diagnostics remain online.' }}</p></div>
+      </div>
+    </section>
+
+    <aside class="status-sidebar" aria-label="Essential system status">
+      <article class="status-card"><span>State</span><strong id="detector-state">{{ detector.state }}</strong><small>Vision pipeline</small></article>
+      <article class="status-card"><span>Motion enabled</span><strong id="motion-enabled">{{ 'Yes' if detector.enabled else 'No' }}</strong><small>Read-only setting</small></article>
+      <article class="status-card"><span>Processing rate</span><strong><span id="processing-fps">{{ '%.1f'|format(detector.processing_fps) }}</span> FPS</strong><small>Motion analysis</small></article>
+      <article class="status-card"><span>Pi CPU</span><strong id="cpu-temperature">{{ ('%.1f &deg;C'|format(cpu_temperature)) if cpu_temperature is not none else 'Unavailable' }}</strong><small>Temperature</small></article>
+    </aside>
   </section>
 
   <section class="notice {{ 'learning' if detector.state in ('LEARNING', 'WARMING_UP') else '' }}" id="detector-notice" aria-label="Detector notice">
     <span class="notice-icon" aria-hidden="true">i</span>
-    <div><strong id="notice-title">{{ 'LEARNING background' if detector.state in ('LEARNING', 'WARMING_UP') else 'Vision-only diagnostics' }}</strong><p id="notice-detail">{{ 'Events and snapshots are suppressed until the detector reaches READY.' if detector.state in ('LEARNING', 'WARMING_UP') else 'Labels are heuristic, not squirrel recognition. Aiming, servos, GPIO, and water controls do not exist.' }}</p></div>
+    <div><strong id="notice-title">{{ 'LEARNING background' if detector.state in ('LEARNING', 'WARMING_UP') else 'Motion-only diagnostics' }}</strong><p id="notice-detail">{{ 'Events are suppressed until the detector reaches READY.' if detector.state in ('LEARNING', 'WARMING_UP') else 'Labels describe size and movement; they are not person, car, or squirrel recognition.' }}</p></div>
   </section>
 
-  <section class="panel gallery-panel">
-    <div class="section-heading"><div><p class="eyebrow">Motion event review</p><h2>Recent grouped events</h2><p>Heuristic labels require human review; they are not species recognition.</p></div><div><a class="text-link" href="{{ url_for('latest_report') }}">Latest report</a> &middot; <a class="text-link" href="{{ url_for('report_file', relative_path='review.csv') }}">Review CSV</a></div></div>
+  <section class="panel gallery-panel recent-events-panel">
+    <div class="section-heading">
+      <div><p class="eyebrow">Motion event review</p><h2>Five most recent clips</h2><p>Each grouped event stores one snapshot and one video clip. All older evidence remains recorded.</p></div>
+      <div class="archive-links"><a class="text-link" href="{{ url_for('events') }}">All event pictures and videos</a><a class="text-link" href="{{ url_for('captures') }}">Standalone pictures</a></div>
+    </div>
     {% if events %}
-      <div class="capture-grid">
+      <div class="capture-grid recent-event-grid">
         {% for event in events %}
-          <article class="capture-card">
-            {% if event.snapshot_path_relative %}<a href="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}"><img src="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}" alt="Event {{ event.event_id }}"></a>{% endif %}
-            <span class="capture-details"><strong>{{ event.provisional_category }}</strong><time>{{ event.start_timestamp }}</time><small>{{ event.movement_attributes|join(', ') }}</small>{% if event.clip_path_relative %}<a href="{{ url_for('output_file', relative_path=event.clip_path_relative) }}">Video clip</a>{% endif %}</span>
+          <article class="capture-card event-card">
+            {% if event.snapshot_path_relative %}<a href="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}"><img src="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}" alt="Event {{ event.event_id }}" loading="lazy"></a>{% endif %}
+            <span class="capture-details"><strong>{{ event.provisional_category }}</strong><time>{{ event.start_timestamp }}</time><small>{{ event.movement_attributes|join(', ') }}</small>{% if event.clip_path_relative %}<a class="clip-link" href="{{ url_for('output_file', relative_path=event.clip_path_relative) }}">Open video clip</a>{% endif %}</span>
           </article>
         {% endfor %}
       </div>
-    {% else %}<div class="empty-state"><p>No completed grouped events yet.</p></div>{% endif %}
-    <p><a class="text-link" href="{{ url_for('log_file', relative_path='events.csv') }}">Event CSV</a> &middot; <a class="text-link" href="{{ url_for('log_file', relative_path='events.jsonl') }}">Event JSONL</a> &middot; <a class="text-link" href="{{ url_for('log_file', relative_path='rejections.jsonl') }}">Rejection log</a></p>
-  </section>
-
-  <section class="panel live-panel">
-    <div class="section-heading"><div><p class="eyebrow">Live debug feed</p><h2>What the detector sees</h2></div><span class="live-label {{ camera.state|lower }}" id="stream-label"><span class="stream-dot" aria-hidden="true"></span><span id="stream-label-text">{{ camera.state }}</span></span></div>
-    <div class="video-frame" id="video-frame" data-online="{{ 'true' if camera.online else 'false' }}">
-      <img id="live-stream" src="{{ url_for('video_feed') }}" alt="Annotated live garden camera stream">
-      <div class="offline-message" id="offline-message"><span aria-hidden="true">!</span><strong id="offline-title">Camera {{ camera.state|lower }}</strong><p id="camera-error">{{ camera.error or 'No fresh frames are available. The dashboard and diagnostics remain online.' }}</p></div>
-    </div>
-  </section>
-
-  <section class="panel gallery-panel">
-    <div class="section-heading"><div><p class="eyebrow">Event evidence</p><h2>Recent captures</h2><p><span id="gallery-count">{{ total_captures }}</span> JPEG snapshot{{ '' if total_captures == 1 else 's' }} in the capture directory</p></div><a class="text-link" href="{{ url_for('captures') }}">View all captures <span aria-hidden="true">&rarr;</span></a></div>
-    {% include "_gallery.html" %}
+    {% else %}<div class="empty-state"><p>No completed grouped events yet.</p><small>Filtered motion remains visible in the live feed but does not create a clip.</small></div>{% endif %}
   </section>
 {% endblock %}
 
@@ -65,23 +57,24 @@
   <script>
     (() => {
       const byId = (id) => document.getElementById(id);
-      const displayTime = (value) => value ? new Date(value).toLocaleString() : 'None yet';
-      const displayUptime = (seconds) => { const total = Math.floor(seconds); const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); return hours ? `${hours}h ${minutes}m` : `${minutes}m ${total % 60}s`; };
       async function refreshStatus() {
         try {
           const response = await fetch('{{ url_for("api_status") }}', { cache: 'no-store' });
           if (!response.ok) return;
           const data = await response.json(); const camera = data.camera; const detector = data.detector;
-          byId('camera-badge').className = `camera-badge ${camera.state.toLowerCase()}`; byId('camera-status-text').textContent = `Camera ${camera.state}`;
-          byId('camera-resolution').textContent = camera.resolution.label; byId('camera-fps').textContent = camera.fps.toFixed(1);
-          byId('detector-state').textContent = detector.state; byId('motion-enabled').textContent = detector.enabled ? 'Yes' : 'No'; byId('processing-fps').textContent = detector.processing_fps.toFixed(1);
-          byId('blob-count').textContent = detector.blob_count; byId('persistence-count').textContent = detector.persistence_count; byId('group-count').textContent = detector.current_groups.length; byId('global-rejections').textContent = detector.global_motion_rejections; byId('read-failures').textContent = camera.read_failures; byId('camera-opens').textContent = camera.camera_open_count; byId('total-events').textContent = data.total_events; byId('total-snapshots').textContent = data.total_snapshots; byId('gallery-count').textContent = data.total_snapshots;
-          const lead = detector.current_groups[0]; byId('candidate-category').textContent = lead ? lead.provisional_category : 'None'; byId('candidate-detail').textContent = lead ? (lead.event_eligible ? `${lead.component_count} blobs, ${lead.average_pixel_speed} px/s` : `Filtered: ${lead.event_filter_reason}`) : 'Waiting for motion'; byId('last-event-category').textContent = detector.last_event_summary ? detector.last_event_summary.provisional_category : 'None yet';
-          byId('last-event').textContent = displayTime(data.last_event_time); byId('last-snapshot').textContent = displayTime(data.last_snapshot_time); byId('app-uptime').textContent = displayUptime(data.application_uptime_seconds);
+          byId('detector-state').textContent = detector.state;
+          byId('motion-enabled').textContent = detector.enabled ? 'Yes' : 'No';
+          byId('processing-fps').textContent = detector.processing_fps.toFixed(1);
           byId('cpu-temperature').textContent = data.cpu_temperature_c === null ? 'Unavailable' : `${data.cpu_temperature_c.toFixed(1)} °C`;
-          byId('video-frame').dataset.online = camera.online ? 'true' : 'false'; byId('stream-label').className = `live-label ${camera.state.toLowerCase()}`; byId('stream-label-text').textContent = camera.state;
-          byId('offline-title').textContent = `Camera ${camera.state.toLowerCase()}`; byId('camera-error').textContent = camera.error || 'No fresh frames are available. The dashboard and diagnostics remain online.';
-          const learning = detector.state === 'LEARNING' || detector.state === 'WARMING_UP'; byId('detector-notice').classList.toggle('learning', learning); byId('notice-title').textContent = learning ? 'LEARNING background' : 'Vision-only diagnostics'; byId('notice-detail').textContent = learning ? 'Events and snapshots are suppressed until the detector reaches READY.' : 'Labels are heuristic, not squirrel recognition. Aiming, servos, GPIO, and water controls do not exist.';
+          byId('video-frame').dataset.online = camera.online ? 'true' : 'false';
+          byId('stream-label').className = `live-label ${camera.state.toLowerCase()}`;
+          byId('stream-label-text').textContent = camera.state;
+          byId('offline-title').textContent = `Camera ${camera.state.toLowerCase()}`;
+          byId('camera-error').textContent = camera.error || 'No fresh frames are available. The dashboard and diagnostics remain online.';
+          const learning = detector.state === 'LEARNING' || detector.state === 'WARMING_UP';
+          byId('detector-notice').classList.toggle('learning', learning);
+          byId('notice-title').textContent = learning ? 'LEARNING background' : 'Motion-only diagnostics';
+          byId('notice-detail').textContent = learning ? 'Events are suppressed until the detector reaches READY.' : 'Labels describe size and movement; they are not person, car, or squirrel recognition.';
         } catch (_) { /* A later poll will recover; never replace diagnostics with guessed state. */ }
       }
       window.setInterval(refreshStatus, {{ status_refresh_ms }});

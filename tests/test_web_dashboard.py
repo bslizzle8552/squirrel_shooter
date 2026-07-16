@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -40,12 +41,17 @@ class OfflineCameraService:
 
 
 class StaticVisionService:
-    def __init__(self, status: VisionStatus | None = None) -> None:
+    def __init__(
+        self,
+        status: VisionStatus | MotionRuntimeStatus | None = None,
+        events: list[dict[str, object]] | None = None,
+    ) -> None:
         self.start_calls = 0
         self._status = status or VisionStatus(
             "LEARNING", True, 0.0, 0, 0, 0, 0, 0, 0, 0,
             None, None, None, None, None, True, True,
         )
+        self._events = events or []
 
     def start(self) -> None:
         self.start_calls += 1
@@ -53,11 +59,11 @@ class StaticVisionService:
     def stop(self, timeout: float = 3.0) -> None:
         del timeout
 
-    def status(self) -> VisionStatus:
+    def status(self) -> VisionStatus | MotionRuntimeStatus:
         return self._status
 
     def recent_events(self) -> list[dict[str, object]]:
-        return []
+        return list(self._events)
 
     def mjpeg_frames(self) -> Iterator[bytes]:
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\nmock\r\n"
@@ -93,9 +99,12 @@ def test_dashboard_loads_when_camera_is_unavailable(
     app, _, camera, vision = dashboard
     response = app.test_client().get("/")
     assert response.status_code == 200
-    assert b"Camera OFFLINE" in response.data
+    assert b"Camera offline" in response.data
     assert b"LEARNING background" in response.data
-    assert b"no physical outputs" in response.data
+    assert b"No physical outputs" in response.data
+    assert response.data.count(b'class="status-card"') == 4
+    assert b'id="blob-count"' not in response.data
+    assert b"squirrel-squirter-logo.png" in response.data
     assert camera.start_calls == 1
     assert vision.start_calls == 1
 
@@ -117,7 +126,7 @@ def test_status_health_and_recent_events_endpoints(
     assert recent.json == {"count": 0, "events": []}
 
 
-def test_dashboard_explains_filtered_candidate(tmp_path: Path) -> None:
+def test_status_api_explains_filtered_candidate(tmp_path: Path) -> None:
     config_path = write_test_config(tmp_path)
     filtered_group = {
         "provisional_category": "small_animal_candidate",
@@ -157,9 +166,9 @@ def test_dashboard_explains_filtered_candidate(tmp_path: Path) -> None:
     )
     app.config.update(TESTING=True)
 
-    response = app.test_client().get("/")
+    response = app.test_client().get("/api/status")
     assert response.status_code == 200
-    assert b"Filtered: small_motion_not_coherent" in response.data
+    assert response.json["detector"]["current_groups"][0]["event_filter_reason"] == "small_motion_not_coherent"
 
 
 def test_stale_camera_is_reported_in_health(tmp_path: Path) -> None:
@@ -172,7 +181,7 @@ def test_stale_camera_is_reported_in_health(tmp_path: Path) -> None:
     assert response.json["camera_alive"] is False
 
 
-def test_captures_are_sorted_and_gallery_is_limited(
+def test_captures_are_sorted_and_kept_on_separate_archive_page(
     dashboard: tuple[Flask, Path, OfflineCameraService, StaticVisionService],
 ) -> None:
     app, directory, _, _ = dashboard
@@ -181,9 +190,94 @@ def test_captures_are_sorted_and_gallery_is_limited(
     assert [item.filename for item in list_capture_images(directory)][:2] == ["capture-13.jpg", "capture-12.jpg"]
     landing = app.test_client().get("/").get_data(as_text=True)
     full = app.test_client().get("/captures").get_data(as_text=True)
-    assert landing.count('class="capture-card"') == 12
+    assert landing.count('class="capture-card"') == 0
     assert full.count('class="capture-card"') == 14
-    assert "capture-00.jpg" not in landing and "capture-00.jpg" in full
+    assert "capture-13.jpg" not in landing and "capture-00.jpg" in full
+
+
+def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) -> None:
+    config_path = write_test_config(tmp_path)
+    events: list[dict[str, object]] = []
+    for index in range(7):
+        event_id = f"event-{index}"
+        directory = tmp_path / "captures" / "events" / event_id
+        directory.mkdir(parents=True)
+        snapshot = directory / "snapshot.jpg"
+        clip = directory / "clip.avi"
+        snapshot.write_bytes(b"jpeg")
+        clip.write_bytes(b"avi")
+        events.append(
+            {
+                "event_id": event_id,
+                "start_timestamp": f"2026-07-16T17:0{index}:00-04:00",
+                "provisional_category": "small_animal_candidate",
+                "movement_attributes": ["coherent_travel"],
+                "snapshot_path": str(snapshot),
+                "clip_path": str(clip),
+            }
+        )
+    app = create_app(
+        config_path,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(events=events),  # type: ignore[arg-type]
+        temperature_reader=lambda: 44.0,
+    )
+    app.config.update(TESTING=True)
+
+    body = app.test_client().get("/").get_data(as_text=True)
+    assert body.count('class="capture-card event-card"') == 5
+    assert "Event event-0" in body and "Event event-4" in body
+    assert "Event event-5" not in body
+    assert "All event pictures and videos" in body and "Standalone pictures" in body
+
+
+def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> None:
+    config_path = write_test_config(tmp_path)
+    for index in range(21):
+        event_id = f"saved-event-{index:02}"
+        directory = tmp_path / "captures" / "events" / "2026-07-16" / event_id
+        directory.mkdir(parents=True)
+        snapshot = directory / "snapshot.jpg"
+        clip = directory / "clip.avi"
+        snapshot.write_bytes(b"jpeg")
+        clip.write_bytes(b"avi")
+        (directory / "event.json").write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "event_id": event_id,
+                    "start_timestamp": f"2026-07-16T17:{index:02}:00-04:00",
+                    "provisional_category": "small_animal_candidate",
+                    "movement_attributes": ["coherent_travel"],
+                    "snapshot_path": str(snapshot),
+                    "clip_path": str(clip),
+                }
+            ),
+            encoding="utf-8",
+        )
+    app = create_app(
+        config_path,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(),  # type: ignore[arg-type]
+        temperature_reader=lambda: 44.0,
+    )
+    app.config.update(TESTING=True)
+
+    first = app.test_client().get("/events").get_data(as_text=True)
+    second = app.test_client().get("/events?page=2").get_data(as_text=True)
+    assert first.count('class="capture-card event-card"') == 20
+    assert "Event saved-event-20" in first and "Event saved-event-00" not in first
+    assert second.count('class="capture-card event-card"') == 1
+    assert "Event saved-event-00" in second
+    assert "Generated review report" in first and "picture archive" in first
+
+
+def test_dashboard_logo_is_packaged_and_served(dashboard: tuple[Flask, Path, OfflineCameraService, StaticVisionService]) -> None:
+    app, _, _, _ = dashboard
+    response = app.test_client().get("/static/squirrel-squirter-logo.png")
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+    assert len(response.data) > 1_000_000
 
 
 def test_empty_unsupported_and_unsafe_captures_are_handled(

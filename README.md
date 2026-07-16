@@ -37,6 +37,8 @@ stops the dashboard, and finally releases the sole camera handle.
   is not used as the measurement.
 - Records an annotated JPEG and MJPG AVI with a time-based pre-event buffer and
   post-event tail.
+- Stores each confirmed tracked group as one event folder containing its snapshot,
+  clip, and metadata. Manual and standalone pictures remain separate captures.
 - Appends CSV, JSON Lines, rejection, and session logs and flushes completed events.
 - Preserves interrupted event folders for diagnosis on the next start.
 - Deletes the oldest **complete** events first according to age, count, and storage
@@ -130,7 +132,9 @@ port forwarding, a public reverse proxy, or public DNS for this dashboard.
 
 Useful read-only routes are:
 
-- `/` - live status, annotated feed, recent events, and review links;
+- `/` - compact live feed, four essential readings, and the five newest events;
+- `/events` - live paginated archive of all saved event pictures and clips;
+- `/captures` - standalone and manual picture archive;
 - `/video_feed` - shared annotated MJPEG stream;
 - `/api/status` and `/api/health` - camera/motion health and counters;
 - `/api/events` - recent completed events;

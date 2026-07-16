@@ -83,6 +83,23 @@ nav a:hover { color: var(--text); }
 
 .hero.compact { padding-bottom: 42px; }
 
+.dashboard-hero {
+  padding: 30px 0 22px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 24px;
+}
+
+.hero-art {
+  width: clamp(104px, 13vw, 154px);
+  height: clamp(104px, 13vw, 154px);
+  flex: 0 0 auto;
+  object-fit: contain;
+  filter: drop-shadow(0 16px 28px rgba(0, 0, 0, 0.3));
+}
+
+.dashboard-hero h1 { font-size: clamp(2.2rem, 5vw, 4rem); }
+
 .eyebrow {
   margin: 0 0 8px;
   color: var(--green);
@@ -132,6 +149,32 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
 .status-card strong { display: block; margin: 8px 0 2px; font-size: 1.35rem; letter-spacing: -0.025em; }
 .status-card .compact-value { font-size: 0.86rem; line-height: 1.35; overflow-wrap: anywhere; }
 .diagnostics-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.monitor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 5.5fr) minmax(180px, 1fr);
+  align-items: stretch;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.monitor-layout .live-panel { margin-bottom: 0; }
+
+.status-sidebar {
+  display: grid;
+  grid-template-rows: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.status-sidebar .status-card {
+  display: flex;
+  min-width: 0;
+  padding: 16px 18px;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.status-sidebar .status-card strong { font-size: 1.15rem; overflow-wrap: anywhere; }
 
 .notice {
   margin: 18px 0 26px;
@@ -199,6 +242,13 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
 .text-link { color: var(--green); font-weight: 700; text-decoration: none; white-space: nowrap; }
 .text-link:hover { text-decoration: underline; }
 
+.archive-links {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .capture-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -221,6 +271,10 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
 .capture-details strong, .capture-details time { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .capture-details strong { font-size: 0.82rem; }
 .capture-details time { margin-top: 4px; color: var(--muted); font-size: 0.72rem; }
+.capture-details small { display: block; margin-top: 3px; color: var(--muted); font-size: 0.72rem; }
+.clip-link { display: inline-block; margin-top: 9px; color: var(--green); font-size: 0.78rem; font-weight: 750; text-decoration: none; }
+.clip-link:hover { text-decoration: underline; }
+.recent-event-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 
 .empty-state {
   padding: 70px 24px;
@@ -257,19 +311,29 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
   .brand > span:last-child { display: none; }
   nav { gap: 14px; }
   .hero { padding-top: 44px; align-items: flex-start; flex-direction: column; }
+  .dashboard-hero { padding-top: 24px; align-items: center; flex-direction: row; }
+  .hero-art { width: 96px; height: 96px; }
   .hero.compact { padding-bottom: 28px; }
   .status-grid { grid-template-columns: 1fr; }
+  .monitor-layout { grid-template-columns: 1fr; }
+  .status-sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; }
   .panel { padding: 14px; border-radius: 16px; }
   .section-heading { align-items: flex-start; }
   .gallery-panel .section-heading { flex-direction: column; }
+  .archive-links { align-items: flex-start; }
   .capture-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 }
 
 @media (min-width: 761px) and (max-width: 980px) {
   .status-grid, .diagnostics-grid { grid-template-columns: repeat(2, 1fr); }
+  .monitor-layout { grid-template-columns: 1fr; }
+  .status-sidebar { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: none; }
 }
 
 @media (max-width: 440px) {
   .capture-grid { grid-template-columns: 1fr; }
+  .dashboard-hero { align-items: flex-start; }
+  .hero-art { width: 82px; height: 82px; }
+  .status-sidebar { grid-template-columns: 1fr; }
   .video-frame { aspect-ratio: 4 / 3; }
 }
