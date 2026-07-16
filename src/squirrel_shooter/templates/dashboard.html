@@ -38,14 +38,14 @@
   <section class="panel gallery-panel recent-events-panel">
     <div class="section-heading">
       <div><p class="eyebrow">Motion event review</p><h2>Five most recent clips</h2><p>Each grouped event stores one snapshot and one video clip. All older evidence remains recorded.</p></div>
-      <div class="archive-links"><a class="text-link" href="{{ url_for('events') }}">All event pictures and videos</a><a class="text-link" href="{{ url_for('classifier_review') }}">Classifier review queue</a><a class="text-link" href="{{ url_for('captures') }}">Standalone pictures</a></div>
+      <div class="archive-links"><a class="text-link" href="{{ url_for('events') }}">All event pictures and videos</a><a class="text-link" href="{{ url_for('classifier_review') }}">Object review and unknowns</a><a class="text-link" href="{{ url_for('captures') }}">Standalone pictures</a></div>
     </div>
     {% if events %}
       <div class="capture-grid recent-event-grid">
         {% for event in events %}
           <article class="capture-card event-card">
             {% if event.snapshot_path_relative %}<a href="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}"><img src="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}" alt="Event {{ event.event_id }}" loading="lazy"></a>{% endif %}
-            <span class="capture-details"><strong>{{ event.provisional_category }}</strong><time>{{ event.start_timestamp }}</time><small>{{ event.movement_attributes|join(', ') }}</small>{% if event.clip_path_relative %}<a class="clip-link" href="{{ url_for('output_file', relative_path=event.clip_path_relative) }}">Open video clip</a>{% endif %}</span>
+            <span class="capture-details"><strong>{{ event.display_label }}</strong><time>{{ event.start_timestamp }}</time><small>Motion: {{ event.motion_label|replace('_', ' ') }}</small>{% if event.classification_label_source %}<small>Label: {{ event.classification_label_source }}</small>{% endif %}{% if event.clip_path_relative %}<a class="clip-link" href="{{ url_for('output_file', relative_path=event.clip_path_relative) }}">Open video clip</a>{% endif %}</span>
           </article>
         {% endfor %}
       </div>

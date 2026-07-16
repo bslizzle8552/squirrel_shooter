@@ -80,42 +80,98 @@ def test_mobilenet_detector_returns_voc_person_detection(tmp_path: Path) -> None
     assert latency_ms >= 0
 
 
-def test_evidence_store_auto_accepts_person_and_queues_negative_for_review(tmp_path: Path) -> None:
+def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
-    accepted_task = task(tmp_path, "person-event")
-    pending_task = task(tmp_path, "negative-event")
+    person_task = task(tmp_path, "person-event")
+    unknown_task = task(tmp_path, "unknown-event")
+    other_class_task = task(tmp_path, "other-class-event")
+    review_task = task(tmp_path, "review-event")
 
-    accepted = store.save_classification(
-        accepted_task,
+    known = store.save_classification(
+        person_task,
         [ClassifierDetection("person", 0.92, (1, 2, 20, 21))],
         185.2,
         "test-model",
     )
-    pending = store.save_classification(pending_task, [], 172.1, "test-model")
+    unknown = store.save_classification(unknown_task, [], 172.1, "test-model")
+    other_class = store.save_classification(
+        other_class_task,
+        [ClassifierDetection("dog", 0.91, (2, 3, 12, 14))],
+        171.0,
+        "test-model",
+    )
+    review = store.save_classification(
+        review_task,
+        [ClassifierDetection("car", 0.42, (2, 3, 12, 14))],
+        170.0,
+        "test-model",
+    )
 
-    assert accepted["state"] == "accepted" and accepted["outcome"] == "auto_accepted"
-    assert accepted["decision_label"] == "person" and accepted["decision_confidence"] == 0.92
-    assert accepted["approved_label"] == "person"
-    assert pending["state"] == "pending" and pending["outcome"] == "negative"
-    assert (config.classifier.evidence_directory / "accepted" / "person-event.jpg").is_file()
-    assert (config.classifier.evidence_directory / "pending" / "negative-event.jpg").is_file()
-    assert json.loads((pending_task.event_directory / "classifier.json").read_text(encoding="utf-8"))["outcome"] == "negative"
+    assert known["classification_status"] == "known" and known["display_label"] == "Person"
+    assert known["label_source"] == "automatic" and known["decision_confidence"] == 0.92
+    assert unknown["classification_status"] == "unknown" and unknown["display_label"] == "Unknown"
+    assert other_class["classification_status"] == "unknown" and other_class["model_suggestion"] == "dog"
+    assert review["classification_status"] == "review" and review["review_suggestion_label"] == "car"
+    for classifier_task in (person_task, unknown_task, other_class_task, review_task):
+        assert (classifier_task.event_directory / "classifier-input.jpg").is_file()
+        assert (classifier_task.event_directory / "classification.json").is_file()
+    assert store.counts() == {"known": 1, "unknown": 2, "review": 1, "errors": 0, "false_positive": 0}
     audit = config.logging.directory / config.classifier.audit_log_filename
     assert [json.loads(line)["action"] for line in audit.read_text(encoding="utf-8").splitlines()] == [
+        "classified",
+        "classified",
         "classified",
         "classified",
     ]
 
     with pytest.raises(ValueError, match="car or person"):
-        store.review("negative-event", "approve")
-    reviewed = store.review("negative-event", "approve", "car")
+        store.review("review-event", "approve")
+    reviewed = store.review("review-event", "approve", "car")
 
-    assert reviewed["state"] == "accepted" and reviewed["outcome"] == "manual_approved"
-    assert reviewed["approved_label"] == reviewed["decision_label"] == "car"
-    assert not (config.classifier.evidence_directory / "pending" / "negative-event.jpg").exists()
-    assert (config.classifier.evidence_directory / "accepted" / "negative-event.jpg").is_file()
-    assert json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])["action"] == "manual_approve"
+    assert reviewed["classification_status"] == "known" and reviewed["display_label"] == "Car"
+    assert reviewed["human_label"] == "car" and reviewed["label_source"] == "human"
+    assert json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])["action"] == "human_labeled"
+
+    corrected = store.review("person-event", "unknown")
+    assert corrected["classification_status"] == "unknown" and corrected["display_label"] == "Unknown"
+    assert corrected["label_source"] == "human" and corrected["human_label"] == "unknown"
+
+
+def test_legacy_classifier_evidence_is_copied_without_deleting_originals(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    event_directory = tmp_path / "captures" / "events" / "2026-07-16" / "legacy-event"
+    event_directory.mkdir(parents=True)
+    legacy_directory = config.classifier.evidence_directory / "rejected"
+    legacy_directory.mkdir(parents=True)
+    legacy_image = legacy_directory / "legacy-event.jpg"
+    legacy_image.write_bytes(b"legacy classifier image")
+    legacy_metadata = legacy_directory / "legacy-event.json"
+    legacy_metadata.write_text(
+        json.dumps(
+            {
+                "item_id": "legacy-event",
+                "event_id": "legacy-event",
+                "source_event_directory": str(event_directory),
+                "classifier_timestamp": "2026-07-16T18:00:00-04:00",
+                "frame_number": 1,
+                "detections": [],
+                "top_label": None,
+                "outcome": "manual_rejected",
+                "image_path": str(legacy_image),
+                "error": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = ClassifierEvidenceStore(config)
+    store.prepare()
+
+    migrated = json.loads((event_directory / "classification.json").read_text(encoding="utf-8"))
+    assert migrated["classification_status"] == "unknown" and migrated["legacy_migrated"] is True
+    assert (event_directory / "classifier-input.jpg").read_bytes() == b"legacy classifier image"
+    assert legacy_image.exists() and legacy_metadata.exists()
 
 
 def test_classifier_worker_is_backgrounded_and_records_one_task(tmp_path: Path) -> None:
@@ -145,6 +201,56 @@ def test_classifier_worker_is_backgrounded_and_records_one_task(tmp_path: Path) 
     status = worker.status()
     assert status.submitted == status.completed == status.auto_accepted == 1
     assert status.queued_for_review == 0 and status.last_latency_ms == 12.5
+
+
+def test_failed_classification_can_retry_from_saved_input(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    model_available = False
+
+    class Detector:
+        model_name = "fake-detector"
+
+        def classify(self, image: np.ndarray):
+            assert image.ndim == 3
+            return [ClassifierDetection("person", 0.8, (0, 0, 10, 10))], 10.0
+
+    def detector_factory() -> Detector:
+        if not model_available:
+            raise FileNotFoundError("model unavailable")
+        return Detector()
+
+    worker = EventClassifier(config.classifier, store, detector_factory=detector_factory)  # type: ignore[arg-type]
+    event_directory = tmp_path / "captures" / "events" / "retry-event"
+    event_directory.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit(
+            "retry-event",
+            event_directory,
+            1,
+            np.zeros((40, 60, 3), dtype=np.uint8),
+            (20, 10, 20, 16),
+        )
+        deadline = time.monotonic() + 2
+        while not (event_directory / "classification.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert store.get_record("retry-event")["classification_status"] == "unclassified"
+        model_available = True
+        assert worker.retry("retry-event")
+        deadline = time.monotonic() + 2
+        while store.get_record("retry-event")["classification_status"] != "known" and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        worker.stop()
+
+    assert store.get_record("retry-event")["display_label"] == "Person"
+    audit = config.logging.directory / config.classifier.audit_log_filename
+    assert [json.loads(line)["action"] for line in audit.read_text(encoding="utf-8").splitlines()] == [
+        "classified",
+        "retry_requested",
+        "classified",
+    ]
 
 
 def test_model_installer_verifies_checksum_before_replacing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,8 +321,13 @@ def test_motion_submits_only_configured_event_frame_once(tmp_path: Path, configu
 def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
-    store.save_classification(task(tmp_path, "review-event"), [], 100.0, "test-model")
-    store.save_classification(task(tmp_path, "approval-event"), [], 100.0, "test-model")
+    store.save_classification(
+        task(tmp_path, "review-event"),
+        [ClassifierDetection("person", 0.4, (1, 1, 10, 10))],
+        100.0,
+        "test-model",
+    )
+    store.save_classification(task(tmp_path, "unknown-event"), [], 100.0, "test-model")
 
     camera = SimpleNamespace(
         start=lambda: None,
@@ -242,36 +353,36 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     client = app.test_client()
 
     page = client.get("/classifier-review")
-    assert page.status_code == 200 and b"review-event" in page.data and b"No detection" in page.data
-    assert client.get("/classifier-files/pending/review-event.jpg").status_code == 200
+    assert page.status_code == 200 and b"review-event" in page.data and b"Known-class possibility" in page.data
+    assert client.get("/classifier-files/review-event").status_code == 200
     assert client.post("/classifier-review/review-event/approve").status_code == 403
     token_match = re.search(rb'name="review_token" value="([^"]+)"', page.data)
     assert token_match is not None
     token = token_match.group(1).decode()
     assert client.post(
-        "/classifier-review/approval-event/approve",
+        "/classifier-review/review-event/approve",
         data={"review_token": token},
     ).status_code == 400
     assert client.post(
-        "/classifier-review/approval-event/approve",
+        "/classifier-review/review-event/approve",
         data={"review_token": token, "approval_label": "squirrel"},
     ).status_code == 400
     approved = client.post(
-        "/classifier-review/approval-event/approve",
+        "/classifier-review/review-event/approve",
         data={"review_token": token, "approval_label": "person"},
     )
     assert approved.status_code == 302
-    accepted_page = client.get("/classifier-review?state=accepted").data
-    assert b"approval-event" in accepted_page and b"Approved label" in accepted_page and b"person" in accepted_page
+    known_page = client.get("/classifier-review?state=known").data
+    assert b"review-event" in known_page and b"Person" in known_page and b"human" in known_page
 
     response = client.post(
-        "/classifier-review/review-event/reject",
+        "/classifier-review/unknown-event/false-positive",
         data={"review_token": token},
     )
 
     assert response.status_code == 302
-    assert client.get("/classifier-review?state=rejected").data.count(b"review-event") >= 1
-    assert client.get("/classifier-files/rejected/review-event.jpg").status_code == 200
+    false_positive_page = client.get("/classifier-review?state=false_positive").data
+    assert b"unknown-event" in false_positive_page and b"False Positive" in false_positive_page
 
 
 def test_classifier_config_rejects_frame_outside_first_two(tmp_path: Path) -> None:

@@ -206,6 +206,28 @@ def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) ->
         clip = directory / "clip.avi"
         snapshot.write_bytes(b"jpeg")
         clip.write_bytes(b"avi")
+        if index == 0:
+            (directory / "classification.json").write_text(
+                json.dumps(
+                    {
+                        "classification_status": "known",
+                        "display_label": "Car",
+                        "label_source": "automatic",
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif index == 1:
+            (directory / "classification.json").write_text(
+                json.dumps(
+                    {
+                        "classification_status": "unknown",
+                        "display_label": "Unknown",
+                        "label_source": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
         events.append(
             {
                 "event_id": event_id,
@@ -228,7 +250,10 @@ def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) ->
     assert body.count('class="capture-card event-card"') == 5
     assert "Event event-0" in body and "Event event-4" in body
     assert "Event event-5" not in body
+    assert "Car" in body and "Unknown" in body and "Motion: small animal candidate" in body
     assert "All event pictures and videos" in body and "Standalone pictures" in body
+    api_events = app.test_client().get("/api/events").json["events"]
+    assert api_events[0]["display_label"] == "Car" and api_events[1]["display_label"] == "Unknown"
 
 
 def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> None:
@@ -255,6 +280,17 @@ def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> No
             ),
             encoding="utf-8",
         )
+        if index == 20:
+            (directory / "classification.json").write_text(
+                json.dumps(
+                    {
+                        "classification_status": "known",
+                        "display_label": "Person",
+                        "label_source": "human",
+                    }
+                ),
+                encoding="utf-8",
+            )
     app = create_app(
         config_path,
         camera_service=OfflineCameraService(),  # type: ignore[arg-type]
@@ -267,6 +303,7 @@ def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> No
     second = app.test_client().get("/events?page=2").get_data(as_text=True)
     assert first.count('class="capture-card event-card"') == 20
     assert "Event saved-event-20" in first and "Event saved-event-00" not in first
+    assert "Person" in first and "Label: human" in first
     assert second.count('class="capture-card event-card"') == 1
     assert "Event saved-event-00" in second
     assert "Generated review report" in first and "picture archive" in first

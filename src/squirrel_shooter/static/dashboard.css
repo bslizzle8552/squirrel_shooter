@@ -293,15 +293,19 @@ h2 { margin-bottom: 4px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -
 .classifier-details dd { margin: 0; overflow-wrap: anywhere; }
 .approved-label strong { color: var(--text); text-transform: capitalize; }
 .decision-badge { display: inline-flex; padding: 5px 8px; border-radius: 999px; background: rgba(240, 192, 107, 0.13); color: var(--amber); font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
-.decision-badge.accepted { background: rgba(135, 210, 154, 0.13); color: var(--green); }
-.decision-badge.rejected { background: rgba(239, 141, 127, 0.13); color: var(--red); }
+.decision-badge.known { background: rgba(135, 210, 154, 0.13); color: var(--green); }
+.decision-badge.unclassified, .decision-badge.false_positive { background: rgba(239, 141, 127, 0.13); color: var(--red); }
+.decision-badge.review { background: rgba(94, 178, 255, 0.14); color: #8bc7ff; }
 .classifier-error { color: var(--red) !important; overflow-wrap: anywhere; }
+.evidence-links, .secondary-review-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.review-actions.stacked { display: grid; align-items: stretch; }
 .review-actions form { margin: 0; flex: 1; }
 .review-actions .approve-form { display: grid; gap: 7px; }
 .approve-form label { color: var(--muted); font-size: 0.72rem; font-weight: 700; }
 .approve-form select { width: 100%; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text); font: inherit; font-size: 0.8rem; }
-.review-actions button { width: 100%; padding: 9px 12px; border: 0; border-radius: 9px; font: inherit; font-size: 0.8rem; font-weight: 800; cursor: pointer; }
+.review-actions button, .classifier-details > form button { width: 100%; padding: 9px 12px; border: 0; border-radius: 9px; font: inherit; font-size: 0.8rem; font-weight: 800; cursor: pointer; }
 .approve-button { background: var(--green); color: #102017; }
+.unknown-button { background: rgba(240, 192, 107, 0.18); color: var(--amber); }
 .reject-button { background: rgba(239, 141, 127, 0.18); color: #ffc0b7; }
 
 .empty-state {

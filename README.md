@@ -83,7 +83,7 @@ python -m pytest
 The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
 weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
 installing them under the ignored `models/` directory. Expected test result for
-this revision: **78 passed** without opening the USB camera. Then stop any old
+this revision: **80 passed** without opening the USB camera. Then stop any old
 dashboard, preview, recorder, or watcher process that already owns the camera and
 start the complete system:
 
@@ -143,11 +143,11 @@ http://PI_MAGICDNS_HOSTNAME:5000
 Replace the placeholders with the values shown by Tailscale. Do not add router
 port forwarding, a public reverse proxy, or public DNS for this dashboard.
 
-Useful read-only routes are:
+Useful routes are:
 
 - `/` - compact live feed, four essential readings, and the five newest events;
 - `/events` - live paginated archive of all saved event pictures and clips;
-- `/classifier-review` - pending, accepted, and rejected classifier evidence;
+- `/classifier-review` - needs-review, unknown, known, error, and false-positive event views;
 - `/captures` - standalone and manual picture archive;
 - `/video_feed` - shared annotated MJPEG stream;
 - `/api/status` and `/api/health` - camera/motion health and counters;
@@ -174,13 +174,9 @@ captures/
         snapshot.jpg
         clip.avi
         event.json
-        classifier.json       # classifier result and current review state
-  classifier/
-    pending/                  # negative, edge-case, load-error, or overload result
-      <event-id>.jpg          # exact event crop submitted to the classifier
-      <event-id>.json
-    accepted/                 # automatic person/car and manually approved evidence
-    rejected/                 # manually rejected evidence
+        classifier-input.jpg  # exact crop submitted to the object model
+        classification.json   # model output, visible label, and human decision
+  classifier/                 # legacy evidence preserved during automatic migration
   manual/
   rejections/                 # only when rejection snapshots are enabled
   logs/
@@ -322,21 +318,35 @@ single background worker performs OpenCV DNN inference, so the motion loop never
 waits for the normal classifier path. The bounded queue also prevents inference
 work from accumulating when the Pi is busy.
 
-`person` and `car` detections at or above 60 percent go directly to
-`captures/classifier/accepted`. Other recognized classes are edge cases, and no
-detection is a negative result; both go to `pending` for Approve or Reject on the
-Classifier page. Manual approval requires a second answer identifying the item as
-either `car` or `person`; the server rejects an approval without one of those two
-labels. Model-load errors and the rare full-queue condition also go to pending
-instead of silently losing the event. The original event folder and clip are
-preserved regardless of the classifier decision.
+The motion event is always saved first. Classification can label it, but can never
+discard it. `person` and `car` detections at or above 60 percent are labeled
+automatically and remain editable. Weaker person/car detections go to Needs Review.
+Every other model class and no detection go to Unknown, where a rabbit, squirrel,
+or other unsupported animal remains visible for the normal 30-day event retention.
+A high-confidence `dog`, for example, remains Unknown because this MVP only trusts
+person and car as visible labels; the raw dog suggestion is still recorded.
+
+Human actions are Confirm Person, Confirm Car, Keep Unknown, and False Positive.
+Only a human can mark an event false positive. Model-load and queue errors appear
+as Classification unavailable in the Errors view and can be retried from the exact
+saved input after the model is available. Existing automatic person/car labels can
+also be corrected back to Unknown.
 
 Every attempt records the submitted frame number, crop and source boxes, model,
 all detections, confidence, inference time, automatic/manual decision, error, and
-exact submitted crop. `captures/logs/classifier.jsonl` is append-only, while the
-event's `classifier.json` always reflects the newest decision. This classifier
+exact submitted crop. `captures/logs/classifier.jsonl` is append-only, while each
+event's `classification.json` reflects the newest decision. The recent-clips and
+event-archive cards read that same file, so their headline becomes Person, Car,
+Unknown, Classification unavailable, or False Positive. The original motion label
+such as `small_animal_candidate` remains visible only as secondary diagnostic data.
+This classifier
 uses the VOC label set, which includes people, cars, birds, cats, and dogs but not
-squirrels.
+squirrels or rabbits.
+
+On first start after upgrading, legacy `captures/classifier/pending`, `accepted`,
+and `rejected` records are copied into their matching event folders. Old files are
+not deleted. A previous classifier rejection becomes Unknown rather than being
+lost or treated as proof that nothing useful was present.
 
 Watch `/api/status` during the supervised stress test. It reports classifier queue
 depth, completed count, last inference time, and last error. If motion processing

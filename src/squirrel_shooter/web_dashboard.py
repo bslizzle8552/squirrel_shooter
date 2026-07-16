@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import json
 import logging
 import math
 import secrets
@@ -18,7 +19,7 @@ from flask import Flask, abort, jsonify, redirect, render_template, request, sen
 from werkzeug.exceptions import HTTPException
 
 from .camera_service import CameraService, CameraStatus
-from .classifier import EVIDENCE_STATES, ClassifierEvidenceStore
+from .classifier import CLASSIFICATION_VIEWS, ClassifierEvidenceStore
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .event_report import load_events
 from .motion_runtime import MotionProcessingService
@@ -133,11 +134,25 @@ def _dashboard_events(events: list[dict[str, Any]], config: AppConfig) -> list[d
     prepared: list[dict[str, Any]] = []
     for event in events:
         item = dict(event)
+        event_directory: Path | None = None
         for field in ("snapshot_path", "clip_path"):
             try:
-                item[f"{field}_relative"] = Path(str(event.get(field, ""))).resolve().relative_to(output_root).as_posix()
+                source_path = Path(str(event.get(field, ""))).resolve()
+                item[f"{field}_relative"] = source_path.relative_to(output_root).as_posix()
+                event_directory = source_path.parent
             except (OSError, ValueError):
                 item[f"{field}_relative"] = None
+        classification: dict[str, Any] = {}
+        if event_directory is not None:
+            try:
+                loaded = json.loads((event_directory / "classification.json").read_text(encoding="utf-8"))
+                classification = loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                pass
+        item["display_label"] = classification.get("display_label", "Unclassified")
+        item["classification_status"] = classification.get("classification_status", "unclassified")
+        item["classification_label_source"] = classification.get("label_source")
+        item["motion_label"] = event.get("provisional_category", "unclassified_motion")
         prepared.append(item)
     return prepared
 
@@ -186,6 +201,7 @@ def create_app(
         if motion_service is not None and hasattr(motion_service, "classifier_store")
         else ClassifierEvidenceStore(app_config)
     )
+    classifier_store.prepare()
     classifier_review_token = secrets.token_urlsafe(32)
     started_at = monotonic()
     app.extensions.update(
@@ -299,8 +315,8 @@ def create_app(
 
     @app.get("/classifier-review")
     def classifier_review() -> str:
-        state = request.args.get("state", "pending")
-        if state not in EVIDENCE_STATES:
+        state = request.args.get("state", "review")
+        if state not in CLASSIFICATION_VIEWS:
             abort(404)
         return render_template(
             "classifier_review.html",
@@ -319,20 +335,26 @@ def create_app(
         if not hmac.compare_digest(supplied_token, classifier_review_token):
             abort(403)
         try:
-            classifier_store.review(item_id, decision, request.form.get("approval_label"))
+            if decision == "retry":
+                if motion_service is None or not hasattr(motion_service, "classifier"):
+                    abort(400)
+                queued = motion_service.classifier.retry(item_id)
+                message = "Classification retry queued" if queued else "Classifier is busy; retry remains in Errors"
+                return redirect(url_for("classifier_review", state="errors", message=message))
+            record = classifier_store.review(item_id, decision, request.form.get("approval_label"))
         except KeyError:
             abort(404)
-        except ValueError:
+        except (OSError, ValueError):
             abort(400)
-        message = "Approved classifier evidence" if decision == "approve" else "Rejected classifier evidence"
-        return redirect(url_for("classifier_review", state="pending", message=message))
+        message = f"Event labeled {record['display_label']}"
+        destination = "errors" if record["classification_status"] == "unclassified" else record["classification_status"]
+        return redirect(url_for("classifier_review", state=destination, message=message))
 
-    @app.get("/classifier-files/<state>/<path:filename>")
-    def classifier_file(state: str, filename: str) -> Any:
-        if state not in EVIDENCE_STATES:
-            abort(404)
-        path = _resolve_under(app_config.classifier.evidence_directory / state, filename)
-        if path is None:
+    @app.get("/classifier-files/<item_id>")
+    def classifier_file(item_id: str) -> Any:
+        try:
+            path = classifier_store.input_path(item_id)
+        except (KeyError, ValueError):
             abort(404)
         return send_file(path, conditional=True)
 
@@ -407,7 +429,7 @@ def create_app(
     @app.get("/api/recent-events")
     @app.get("/api/events")
     def api_recent_events() -> Any:
-        events = vision.recent_events()
+        events = _dashboard_events(vision.recent_events(), app_config)
         return jsonify(events=events, count=len(events))
 
     @app.errorhandler(Exception)

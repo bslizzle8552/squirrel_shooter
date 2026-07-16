@@ -1,60 +1,79 @@
 {% extends "base.html" %}
 
-{% block title %}Classifier review - Squirrel Squirter{% endblock %}
+{% block title %}Object review - Squirrel Squirter{% endblock %}
 
 {% block content %}
   <section class="hero compact">
     <div>
-      <p class="eyebrow">Stress-test evidence</p>
-      <h1>Classifier review</h1>
-      <p class="subtitle">The exact event crop sent to MobileNet-SSD, its result, and your final decision.</p>
+      <p class="eyebrow">Unified event labels</p>
+      <h1>Object review</h1>
+      <p class="subtitle">Every motion event is retained. Classification adds a label; it never decides whether the event is saved.</p>
     </div>
     <a class="button" href="{{ url_for('dashboard') }}">Back to live camera</a>
   </section>
 
   <section class="panel standalone">
     <div class="review-toolbar">
-      <nav class="review-tabs" aria-label="Classifier evidence states">
-        <a class="{{ 'selected' if selected_state == 'pending' else '' }}" href="{{ url_for('classifier_review', state='pending') }}">Pending {{ counts.pending }}</a>
-        <a class="{{ 'selected' if selected_state == 'accepted' else '' }}" href="{{ url_for('classifier_review', state='accepted') }}">Accepted {{ counts.accepted }}</a>
-        <a class="{{ 'selected' if selected_state == 'rejected' else '' }}" href="{{ url_for('classifier_review', state='rejected') }}">Rejected {{ counts.rejected }}</a>
+      <nav class="review-tabs" aria-label="Classification views">
+        <a class="{{ 'selected' if selected_state == 'review' else '' }}" href="{{ url_for('classifier_review', state='review') }}">Needs review {{ counts.review }}</a>
+        <a class="{{ 'selected' if selected_state == 'unknown' else '' }}" href="{{ url_for('classifier_review', state='unknown') }}">Unknown {{ counts.unknown }}</a>
+        <a class="{{ 'selected' if selected_state == 'known' else '' }}" href="{{ url_for('classifier_review', state='known') }}">Known {{ counts.known }}</a>
+        <a class="{{ 'selected' if selected_state == 'errors' else '' }}" href="{{ url_for('classifier_review', state='errors') }}">Errors {{ counts.errors }}</a>
+        <a class="{{ 'selected' if selected_state == 'false_positive' else '' }}" href="{{ url_for('classifier_review', state='false_positive') }}">False positives {{ counts.false_positive }}</a>
       </nav>
-      <a class="text-link" href="{{ url_for('log_file', relative_path=audit_log_filename) }}">Classifier audit log</a>
+      <a class="text-link" href="{{ url_for('log_file', relative_path=audit_log_filename) }}">Classification audit log</a>
     </div>
     {% if message %}<p class="review-message">{{ message }}</p>{% endif %}
 
     {% if items %}
       <div class="classifier-grid">
         {% for item in items %}
-          {% set shown_confidence = item.decision_confidence if item.decision_confidence is defined else item.top_confidence %}
           <article class="classifier-card">
-            <a href="{{ url_for('classifier_file', state=selected_state, filename=item.item_id ~ '.jpg') }}"><img src="{{ url_for('classifier_file', state=selected_state, filename=item.item_id ~ '.jpg') }}" alt="Classifier input for {{ item.event_id }}" loading="lazy"></a>
+            <a href="{{ url_for('classifier_file', item_id=item.item_id) }}"><img src="{{ url_for('classifier_file', item_id=item.item_id) }}" alt="Classifier input for {{ item.event_id }}" loading="lazy"></a>
             <div class="classifier-details">
-              <span class="decision-badge {{ item.state }}">{{ item.outcome|replace('_', ' ') }}</span>
-              <h2>{{ item.decision_label or item.top_label or 'No detection' }}</h2>
-              <p>{{ ('%.1f%% confidence'|format(shown_confidence * 100)) if shown_confidence is not none else 'No class exceeded the detection threshold' }}</p>
-              <dl><div><dt>Frame</dt><dd>{{ item.frame_number }}</dd></div><div><dt>Inference</dt><dd>{{ ('%.0f ms'|format(item.latency_ms)) if item.latency_ms is not none else 'Unavailable' }}</dd></div><div><dt>Event</dt><dd>{{ item.event_id }}</dd></div></dl>
+              <span class="decision-badge {{ item.classification_status }}">{{ item.classification_status|replace('_', ' ') }}</span>
+              <h2>{{ item.display_label }}</h2>
+              {% if item.review_suggestion_label %}<p>Known-class possibility: <strong>{{ item.review_suggestion_label }}</strong> at {{ '%.1f%%'|format(item.review_suggestion_confidence * 100) }}</p>{% elif item.top_label %}<p>Model suggestion: <strong>{{ item.top_label }}</strong> at {{ '%.1f%%'|format(item.top_confidence * 100) }}</p>{% else %}<p>No model class exceeded the detection threshold.</p>{% endif %}
+              <dl>
+                <div><dt>Frame</dt><dd>{{ item.frame_number }}</dd></div>
+                <div><dt>Inference</dt><dd>{{ ('%.0f ms'|format(item.latency_ms)) if item.latency_ms is not none else 'Unavailable' }}</dd></div>
+                <div><dt>Source</dt><dd>{{ item.label_source or 'Not labeled' }}</dd></div>
+                <div><dt>Event</dt><dd>{{ item.event_id }}</dd></div>
+              </dl>
               {% if item.error %}<p class="classifier-error">{{ item.error }}</p>{% endif %}
-              {% if item.approved_label %}<p class="approved-label">Approved label: <strong>{{ item.approved_label }}</strong></p>{% endif %}
-              {% if selected_state == 'pending' %}
-                <div class="review-actions">
+              <div class="evidence-links">
+                <a class="text-link" href="{{ url_for('classifier_file', item_id=item.item_id) }}" download>Download classifier image</a>
+                {% if item.event_snapshot_relative %}<a class="text-link" href="{{ url_for('event_file', relative_path=item.event_snapshot_relative) }}" download>Download event picture</a>{% endif %}
+                {% if item.event_clip_relative %}<a class="text-link" href="{{ url_for('event_file', relative_path=item.event_clip_relative) }}">Video clip</a>{% endif %}
+              </div>
+
+              {% if selected_state == 'errors' %}
+                <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='retry') }}">
+                  <input type="hidden" name="review_token" value="{{ review_token }}">
+                  <button class="approve-button" type="submit">Retry classification</button>
+                </form>
+              {% else %}
+                <div class="review-actions stacked">
                   <form class="approve-form" method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}">
                     <input type="hidden" name="review_token" value="{{ review_token }}">
-                    <label for="approval-label-{{ item.item_id }}">If approved, what is it?</label>
+                    <label for="approval-label-{{ item.item_id }}">Confirm or correct the known label</label>
                     <select id="approval-label-{{ item.item_id }}" name="approval_label" required>
                       <option value="" selected disabled>Choose car or person</option>
                       <option value="car">Car</option>
                       <option value="person">Person</option>
                     </select>
-                    <button class="approve-button" type="submit">Approve with label</button>
+                    <button class="approve-button" type="submit">Save known label</button>
                   </form>
-                  <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='reject') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="reject-button" type="submit">Reject</button></form>
+                  <div class="secondary-review-actions">
+                    <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='unknown') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="unknown-button" type="submit">Keep Unknown</button></form>
+                    <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='false-positive') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="reject-button" type="submit">False Positive</button></form>
+                  </div>
                 </div>
               {% endif %}
             </div>
           </article>
         {% endfor %}
       </div>
-    {% else %}<div class="empty-state"><p>No {{ selected_state }} classifier evidence.</p><small>Only confirmed motion events are submitted, once, on configured frame {{ config_frame_number|default(1) }}.</small></div>{% endif %}
+    {% else %}<div class="empty-state"><p>No events in {{ selected_state|replace('_', ' ') }}.</p><small>Unknown events remain available for the normal 30-day retention period.</small></div>{% endif %}
   </section>
 {% endblock %}

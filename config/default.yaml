@@ -45,7 +45,7 @@ classifier:
   auto_accept_labels:
     - person
     - car
-  evidence_directory: captures/classifier
+  evidence_directory: captures/classifier  # read-only legacy source for migration
   audit_log_filename: classifier.jsonl
   worker_queue_capacity: 1
 
