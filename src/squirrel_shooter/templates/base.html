@@ -11,7 +11,7 @@
     <header class="site-header">
       <div class="shell header-inner">
         <a class="brand" href="{{ url_for('dashboard') }}" aria-label="Squirrel Squirter dashboard"><span class="brand-mark" aria-hidden="true">SS</span><span>Squirrel Squirter</span></a>
-        <nav aria-label="Main navigation"><a href="{{ url_for('dashboard') }}">Live camera</a><a href="{{ url_for('events') }}">Event archive</a><a href="{{ url_for('captures') }}">Pictures</a></nav>
+        <nav aria-label="Main navigation"><a href="{{ url_for('dashboard') }}">Live camera</a><a href="{{ url_for('events') }}">Events</a><a href="{{ url_for('classifier_review') }}">Classifier</a><a href="{{ url_for('captures') }}">Pictures</a></nav>
       </div>
     </header>
     <main class="shell">{% block content %}{% endblock %}</main>

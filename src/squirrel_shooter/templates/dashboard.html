@@ -38,7 +38,7 @@
   <section class="panel gallery-panel recent-events-panel">
     <div class="section-heading">
       <div><p class="eyebrow">Motion event review</p><h2>Five most recent clips</h2><p>Each grouped event stores one snapshot and one video clip. All older evidence remains recorded.</p></div>
-      <div class="archive-links"><a class="text-link" href="{{ url_for('events') }}">All event pictures and videos</a><a class="text-link" href="{{ url_for('captures') }}">Standalone pictures</a></div>
+      <div class="archive-links"><a class="text-link" href="{{ url_for('events') }}">All event pictures and videos</a><a class="text-link" href="{{ url_for('classifier_review') }}">Classifier review queue</a><a class="text-link" href="{{ url_for('captures') }}">Standalone pictures</a></div>
     </div>
     {% if events %}
       <div class="capture-grid recent-event-grid">

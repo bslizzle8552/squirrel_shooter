@@ -2,15 +2,18 @@
 
 Squirrel Squirter is currently a **vision-only** Raspberry Pi garden watcher:
 
-**one shared USB camera -> motion groups + private dashboard -> snapshots/clips -> review report**
+**one shared USB camera -> motion groups -> one lightweight event classification -> private review dashboard**
 
-It does not recognize squirrels, aim, move anything, or control water. It imports
+It does not recognize squirrels, aim, move anything, or control water. A small
+MobileNet-SSD stress test can label common VOC objects such as `person` and `car`,
+but those labels are not squirrel recognition. It imports
 no GPIO, I2C, PCA9685, servo, MOSFET, solenoid, or valve driver. The existing
 disabled-valve placeholder remains closed and raises an error if asked to open.
 
-Every label produced by the watcher is a size/movement heuristic. It never outputs
-a definitive `squirrel` category. Species labels belong only in the human-review
-CSV after Stephen reviews the saved image and clip.
+The motion watcher's labels remain size/movement heuristics. The optional object
+classifier is a separate record and never outputs a definitive `squirrel`
+category. Species labels belong only in human review after Stephen inspects the
+saved image and clip.
 
 ## One camera, two consumers
 
@@ -67,12 +70,16 @@ cd ~/squirrel_shooter
 git pull --ff-only origin main
 source .venv/bin/activate
 python -m pip install -e ".[test]"
+python -m squirrel_shooter.classifier_setup
 python -m pytest
 ```
 
-Expected test result for this revision: all tests pass without opening the USB
-camera. Then stop any old dashboard, preview, recorder, or watcher process that
-already owns the camera and start the complete system:
+The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
+weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
+installing them under the ignored `models/` directory. Expected test result for
+this revision: **77 passed** without opening the USB camera. Then stop any old
+dashboard, preview, recorder, or watcher process that already owns the camera and
+start the complete system:
 
 ```bash
 python -m squirrel_shooter.app
@@ -134,6 +141,7 @@ Useful read-only routes are:
 
 - `/` - compact live feed, four essential readings, and the five newest events;
 - `/events` - live paginated archive of all saved event pictures and clips;
+- `/classifier-review` - pending, accepted, and rejected classifier evidence;
 - `/captures` - standalone and manual picture archive;
 - `/video_feed` - shared annotated MJPEG stream;
 - `/api/status` and `/api/health` - camera/motion health and counters;
@@ -160,11 +168,19 @@ captures/
         snapshot.jpg
         clip.avi
         event.json
+        classifier.json       # classifier result and current review state
+  classifier/
+    pending/                  # negative, edge-case, load-error, or overload result
+      <event-id>.jpg          # exact event crop submitted to the classifier
+      <event-id>.json
+    accepted/                 # automatic person/car and manually approved evidence
+    rejected/                 # manually rejected evidence
   manual/
   rejections/                 # only when rejection snapshots are enabled
   logs/
     events.csv
     events.jsonl
+    classifier.jsonl          # append-only classification and review audit
     rejections.jsonl
     sessions/
       session-<id>.json
@@ -279,6 +295,45 @@ gray box marked `FILTERED` is still useful tuning evidence; the dashboard shows
 the specific reason. If real squirrels are being filtered, lower
 `small_motion_minimum_travel_pixels` gradually before disabling coherent-motion
 filtering. This is motion filtering, not animal or object recognition.
+
+### Low-load event classifier stress test
+
+```yaml
+classifier:
+  enabled: true
+  event_frame_number: 1
+  crop_margin_percent: 30.0
+  detection_confidence: 0.25
+  auto_accept_confidence: 0.60
+  auto_accept_labels: [person, car]
+  worker_queue_capacity: 1
+```
+
+Only a confirmed motion event can submit work. Each event submits exactly once,
+using frame 1 by default (frame 2 is also allowed). The group box is expanded by
+30 percent to retain useful context and copied into a bounded one-item queue. A
+single background worker performs OpenCV DNN inference, so the motion loop never
+waits for the normal classifier path. The bounded queue also prevents inference
+work from accumulating when the Pi is busy.
+
+`person` and `car` detections at or above 60 percent go directly to
+`captures/classifier/accepted`. Other recognized classes are edge cases, and no
+detection is a negative result; both go to `pending` for Approve or Reject on the
+Classifier page. Model-load errors and the rare full-queue condition also go to
+pending instead of silently losing the event. The original event folder and clip
+are preserved regardless of the classifier decision.
+
+Every attempt records the submitted frame number, crop and source boxes, model,
+all detections, confidence, inference time, automatic/manual decision, error, and
+exact submitted crop. `captures/logs/classifier.jsonl` is append-only, while the
+event's `classifier.json` always reflects the newest decision. This classifier
+uses the VOC label set, which includes people, cars, birds, cats, and dogs but not
+squirrels.
+
+Watch `/api/status` during the supervised stress test. It reports classifier queue
+depth, completed count, last inference time, and last error. If motion processing
+rate drops materially or the queue fills, set `classifier.enabled: false`; the
+motion/event system continues unchanged.
 
 ### Inclusion-zone polygon
 

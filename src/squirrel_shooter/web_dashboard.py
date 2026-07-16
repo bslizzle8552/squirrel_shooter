@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import logging
 import math
+import secrets
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -12,10 +14,11 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from flask import Flask, abort, jsonify, render_template, request, send_file
+from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.exceptions import HTTPException
 
 from .camera_service import CameraService, CameraStatus
+from .classifier import EVIDENCE_STATES, ClassifierEvidenceStore
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .event_report import load_events
 from .motion_runtime import MotionProcessingService
@@ -178,6 +181,12 @@ def create_app(
     if vision is None:
         raise ValueError("create_app requires the shared motion processor")
     camera = camera_service
+    classifier_store = (
+        motion_service.classifier_store
+        if motion_service is not None and hasattr(motion_service, "classifier_store")
+        else ClassifierEvidenceStore(app_config)
+    )
+    classifier_review_token = secrets.token_urlsafe(32)
     started_at = monotonic()
     app.extensions.update(
         camera_service=camera,
@@ -185,6 +194,8 @@ def create_app(
         motion_service=motion_service,
         squirrel_config=app_config,
         temperature_reader=temperature_reader,
+        classifier_store=classifier_store,
+        classifier_review_token=classifier_review_token,
     )
 
     if start_camera:
@@ -203,6 +214,16 @@ def create_app(
             temperature = None
             LOGGER.warning("Pi temperature read failed", extra={"structured_data": {"event": "pi_temperature_failure", "error": str(exc)}})
         return camera_status, detector_status, temperature, monotonic() - started_at
+
+    def classifier_status() -> dict[str, Any]:
+        if motion_service is not None and hasattr(motion_service, "classifier"):
+            return asdict(motion_service.classifier.status())
+        return {
+            "enabled": app_config.classifier.enabled,
+            "thread_alive": False,
+            "queue_depth": 0,
+            "evidence_counts": classifier_store.counts(),
+        }
 
     @app.get("/")
     def dashboard() -> str:
@@ -276,6 +297,45 @@ def create_app(
             abort(404)
         return send_file(path, conditional=True)
 
+    @app.get("/classifier-review")
+    def classifier_review() -> str:
+        state = request.args.get("state", "pending")
+        if state not in EVIDENCE_STATES:
+            abort(404)
+        return render_template(
+            "classifier_review.html",
+            items=classifier_store.list_items(state),
+            counts=classifier_store.counts(),
+            selected_state=state,
+            review_token=classifier_review_token,
+            audit_log_filename=app_config.classifier.audit_log_filename,
+            config_frame_number=app_config.classifier.event_frame_number,
+            message=request.args.get("message"),
+        )
+
+    @app.post("/classifier-review/<item_id>/<decision>")
+    def classifier_decision(item_id: str, decision: str) -> Any:
+        supplied_token = request.form.get("review_token", "")
+        if not hmac.compare_digest(supplied_token, classifier_review_token):
+            abort(403)
+        try:
+            classifier_store.review(item_id, decision)
+        except KeyError:
+            abort(404)
+        except ValueError:
+            abort(400)
+        message = "Approved classifier evidence" if decision == "approve" else "Rejected classifier evidence"
+        return redirect(url_for("classifier_review", state="pending", message=message))
+
+    @app.get("/classifier-files/<state>/<path:filename>")
+    def classifier_file(state: str, filename: str) -> Any:
+        if state not in EVIDENCE_STATES:
+            abort(404)
+        path = _resolve_under(app_config.classifier.evidence_directory / state, filename)
+        if path is None:
+            abort(404)
+        return send_file(path, conditional=True)
+
     @app.get("/logs/<path:relative_path>")
     def log_file(relative_path: str) -> Any:
         path = _resolve_under(app_config.logging.directory, relative_path)
@@ -307,6 +367,7 @@ def create_app(
             application_uptime_seconds=round(uptime, 1),
             camera=camera_data,
             detector=detector,
+            classifier=classifier_status(),
             cpu_temperature_c=temperature,
             total_events=detector["accepted_events"],
             total_snapshots=len(captures) + len(events),
@@ -340,6 +401,7 @@ def create_app(
             capture_directory_writable=detector["capture_directory_writable"],
             camera_state=camera_data["state"],
             detector_state=detector["state"],
+            classifier=classifier_status(),
         )
 
     @app.get("/api/recent-events")

@@ -32,6 +32,23 @@ dashboard:
   jpeg_quality: 82
   status_refresh_interval_seconds: 3.0
 
+# One asynchronous classification of frame 1 from each confirmed event. The
+# pinned MobileNet-SSD model is installed separately with classifier_setup.
+classifier:
+  enabled: true
+  model_definition: models/mobilenet-ssd/deploy.prototxt
+  model_weights: models/mobilenet-ssd/mobilenet_iter_73000.caffemodel
+  event_frame_number: 1
+  crop_margin_percent: 30.0
+  detection_confidence: 0.25
+  auto_accept_confidence: 0.60
+  auto_accept_labels:
+    - person
+    - car
+  evidence_directory: captures/classifier
+  audit_log_filename: classifier.jsonl
+  worker_queue_capacity: 1
+
 motion:
   enabled: true
   processing_width: 640

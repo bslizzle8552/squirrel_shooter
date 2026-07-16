@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from .camera_service import CameraService, FramePacket
+from .classifier import ClassifierEvidenceStore, EventClassifier
 from .config import AppConfig
 from .diagnostics import cleanup_oldest
 from .event_report import generate_reports, load_events
@@ -60,12 +61,16 @@ class MotionProcessingService:
         config: AppConfig,
         *,
         detector: MotionWatcherDetector | None = None,
+        classifier_service: EventClassifier | None = None,
+        classifier_store: ClassifierEvidenceStore | None = None,
         video_writer_factory: Callable[..., Any] = cv2.VideoWriter,
         image_writer: Callable[[str, np.ndarray], bool] = cv2.imwrite,
     ) -> None:
         self.camera = camera
         self.config = config
         self.detector = detector or MotionWatcherDetector(config.motion)
+        self.classifier_store = classifier_store or ClassifierEvidenceStore(config)
+        self.classifier = classifier_service or EventClassifier(config.classifier, self.classifier_store)
         self._video_writer_factory = video_writer_factory
         self._image_writer = image_writer
         self._condition = threading.Condition()
@@ -95,6 +100,8 @@ class MotionProcessingService:
         self._latest_result: WatchDetectionResult | None = None
         self._latest_sequence = -1
         self._force_event_requested = False
+        self._classifier_event_frames: dict[int, int] = {}
+        self._classifier_submitted: set[int] = set()
         self._recent_events: deque[dict[str, Any]] = deque(maxlen=config.motion.recent_event_limit)
         self._logs: EventLogWriter | None = None
         self._session: SessionLog | None = None
@@ -125,6 +132,7 @@ class MotionProcessingService:
             self._stop_event.clear()
             self._finalized = False
             self._prepare_outputs()
+            self.classifier.start()
             self._thread = threading.Thread(target=self._run, name="squirrel-motion", daemon=True)
             self._thread.start()
         LOGGER.info("Shared motion processor started", extra={"structured_data": {"event": "motion_runtime_started"}})
@@ -143,6 +151,7 @@ class MotionProcessingService:
         else:
             with self._condition:
                 self._last_error = "Motion thread did not stop before the shutdown timeout"
+        self.classifier.stop(timeout=timeout)
         LOGGER.info("Shared motion processor stopped", extra={"structured_data": {"event": "motion_runtime_stopped"}})
 
     def status(self) -> MotionRuntimeStatus:
@@ -382,19 +391,40 @@ class MotionProcessingService:
                     }
                 if self._session is not None:
                     self._session.increment("confirmed_events")
+                self._classifier_event_frames[group.track_id] = 1
+                self._submit_classifier_if_due(event.event_id, event.directory, group, packet.frame)
             elif group.track_id in self._recorder.active:
                 self._recorder.update(group.track_id, group, annotated, now=now)
+                self._classifier_event_frames[group.track_id] = self._classifier_event_frames.get(group.track_id, 1) + 1
+                event = self._recorder.active[group.track_id]
+                self._submit_classifier_if_due(event.event_id, event.directory, group, packet.frame)
         for track_id, event in list(self._recorder.active.items()):
             if track_id not in groups_by_track:
                 self._recorder.update(track_id, None, annotated, now=now)
             if self._recorder.should_finish(event, now):
                 self._record_completed_event(self._recorder.finish(track_id, now=now))
+                self._classifier_event_frames.pop(track_id, None)
+                self._classifier_submitted.discard(track_id)
                 active = {item.directory for item in self._recorder.active.values()}
                 actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention, active_directories=active)
                 if self._session is not None:
                     self._session.data["retention_actions"].extend(actions)
         with self._condition:
             self._active_events = len(self._recorder.active)
+
+    def _submit_classifier_if_due(
+        self,
+        event_id: str,
+        event_directory: Path,
+        group: Any,
+        frame: np.ndarray,
+    ) -> None:
+        track_id = int(group.track_id)
+        frame_number = self._classifier_event_frames.get(track_id, 0)
+        if track_id in self._classifier_submitted or frame_number != self.config.classifier.event_frame_number:
+            return
+        self._classifier_submitted.add(track_id)
+        self.classifier.submit(event_id, event_directory, frame_number, frame, group.bounding_box)
 
     def _record_completed_event(self, record: dict[str, Any]) -> None:
         with self._condition:

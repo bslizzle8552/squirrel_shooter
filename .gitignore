@@ -35,6 +35,7 @@ captures/
 recordings/
 data/captures/
 data/videos/
+models/
 camera-test-*.avi
 camera-test-*.mp4
 camera-still-*.jpg

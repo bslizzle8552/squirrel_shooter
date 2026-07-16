@@ -56,6 +56,21 @@ class DashboardConfig:
 
 
 @dataclass(frozen=True)
+class ClassifierConfig:
+    enabled: bool
+    model_definition: Path
+    model_weights: Path
+    event_frame_number: int
+    crop_margin_percent: float
+    detection_confidence: float
+    auto_accept_confidence: float
+    auto_accept_labels: tuple[str, ...]
+    evidence_directory: Path
+    audit_log_filename: str
+    worker_queue_capacity: int
+
+
+@dataclass(frozen=True)
 class RoiConfig:
     enabled: bool
     x: float
@@ -227,6 +242,7 @@ class AppConfig:
     shared_camera: SharedCameraConfig
     runtime: RuntimeConfig
     dashboard: DashboardConfig
+    classifier: ClassifierConfig
     motion: MotionConfig
     storage: StorageConfig
     retention: RetentionConfig
@@ -291,6 +307,15 @@ def _text(value: Any, field: str) -> str:
     return value.strip()
 
 
+def _text_tuple(value: Any, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(f"{field} must be a non-empty list of labels")
+    labels = tuple(_text(item, f"{field} item").lower() for item in value)
+    if len(set(labels)) != len(labels):
+        raise ConfigError(f"{field} must not contain duplicate labels")
+    return labels
+
+
 def _percent(mapping: dict[str, Any], key: str, prefix: str) -> float:
     return _number(mapping[key], f"{prefix}.{key}", maximum=100.0)
 
@@ -326,6 +351,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     shared_camera = _mapping(raw, "shared_camera")
     runtime = _mapping(raw, "runtime")
     dashboard = _mapping(raw, "dashboard")
+    classifier = _mapping(raw, "classifier")
     roi = _mapping(motion, "roi")
     debug = _mapping(motion, "debug_outputs")
     warmup = _mapping(motion, "startup_warmup")
@@ -474,6 +500,20 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     dashboard_quality = _int(dashboard.get("jpeg_quality"), "dashboard.jpeg_quality", minimum=1)
     if dashboard_quality > 100:
         raise ConfigError("dashboard.jpeg_quality must be at most 100")
+    classifier_frame = _int(classifier.get("event_frame_number"), "classifier.event_frame_number", minimum=1)
+    if classifier_frame not in {1, 2}:
+        raise ConfigError("classifier.event_frame_number must be 1 or 2")
+    detection_confidence = _number(
+        classifier.get("detection_confidence"), "classifier.detection_confidence", maximum=1.0
+    )
+    auto_accept_confidence = _number(
+        classifier.get("auto_accept_confidence"), "classifier.auto_accept_confidence", maximum=1.0
+    )
+    if auto_accept_confidence < detection_confidence:
+        raise ConfigError("classifier.auto_accept_confidence must be at least detection_confidence")
+    audit_log_filename = _text(classifier.get("audit_log_filename"), "classifier.audit_log_filename")
+    if Path(audit_log_filename).name != audit_log_filename:
+        raise ConfigError("classifier.audit_log_filename must be a filename, not a path")
 
     return AppConfig(
         camera=CameraConfig(
@@ -506,6 +546,19 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _number(dashboard.get("stream_fps"), "dashboard.stream_fps", exclusive=True),
             dashboard_quality,
             _number(dashboard.get("status_refresh_interval_seconds"), "dashboard.status_refresh_interval_seconds", exclusive=True),
+        ),
+        classifier=ClassifierConfig(
+            _bool(classifier.get("enabled"), "classifier.enabled"),
+            _path(classifier.get("model_definition"), "classifier.model_definition"),
+            _path(classifier.get("model_weights"), "classifier.model_weights"),
+            classifier_frame,
+            _percent(classifier, "crop_margin_percent", "classifier"),
+            detection_confidence,
+            auto_accept_confidence,
+            _text_tuple(classifier.get("auto_accept_labels"), "classifier.auto_accept_labels"),
+            _path(classifier.get("evidence_directory"), "classifier.evidence_directory"),
+            audit_log_filename,
+            _int(classifier.get("worker_queue_capacity"), "classifier.worker_queue_capacity", minimum=1),
         ),
         motion=motion_config,
         storage=StorageConfig(*(_int(storage.get(name), f"storage.{name}", minimum=1) for name in ("max_event_captures", "max_debug_images", "max_log_files"))),

@@ -14,6 +14,8 @@ def write_test_config(tmp_path: Path, **changes: Any) -> Path:
     raw["camera"]["output_directory"] = (tmp_path / "captures").as_posix()
     raw["motion"]["debug_outputs"]["directory"] = (tmp_path / "debug").as_posix()
     raw["logging"]["directory"] = (tmp_path / "logs").as_posix()
+    raw["classifier"]["enabled"] = False
+    raw["classifier"]["evidence_directory"] = (tmp_path / "captures" / "classifier").as_posix()
     for dotted_key, value in changes.items():
         target = raw
         parts = dotted_key.split("__")
