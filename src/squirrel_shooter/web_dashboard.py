@@ -269,8 +269,8 @@ def create_app(
 
     @app.get("/reports/latest")
     def latest_report() -> Any:
-        path = app_config.reporting.directory / "latest-report.html"
-        if not path.is_file():
+        path = _resolve_under(app_config.reporting.directory, "latest-report.html")
+        if path is None:
             abort(404)
         return send_file(path, conditional=True)
 

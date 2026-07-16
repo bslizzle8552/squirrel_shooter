@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterator
 
@@ -151,6 +152,30 @@ def test_empty_unsupported_and_unsafe_captures_are_handled(
     assert b"kept.jpg" in page and b"ignored.png" not in page
     assert app.test_client().get("/captures/kept.jpg").status_code == 200
     assert app.test_client().get("/captures/..%2Fsecret.jpg").status_code == 404
+
+
+def test_latest_report_resolves_relative_directory_from_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(write_test_config(tmp_path))
+    config = replace(config, reporting=replace(config.reporting, directory=Path("relative-reports")))
+    report_directory = tmp_path / "relative-reports"
+    report_directory.mkdir()
+    (report_directory / "latest-report.html").write_text("<h1>Latest report</h1>", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    app = create_app(
+        app_config=config,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(),  # type: ignore[arg-type]
+        start_camera=False,
+        start_vision=False,
+    )
+    app.config.update(TESTING=True)
+
+    response = app.test_client().get("/reports/latest")
+    assert response.status_code == 200
+    assert b"Latest report" in response.data
 
 
 def test_multiple_browser_sessions_reuse_one_camera(tmp_path: Path) -> None:
