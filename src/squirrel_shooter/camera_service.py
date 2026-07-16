@@ -239,18 +239,28 @@ class CameraService:
             self._condition.notify_all()
         return True
 
-    def mjpeg_frames(self, *, maximum_fps: float | None = None) -> Iterator[bytes]:
-        """Yield annotated MJPEG frames, falling back to raw frames if necessary."""
+    def mjpeg_frames(
+        self,
+        *,
+        maximum_fps: float | None = None,
+        annotated_only: bool = False,
+    ) -> Iterator[bytes]:
+        """Yield MJPEG frames, optionally waiting for watcher annotations only."""
 
         sequence = -1
         last_yield = 0.0
         interval = 0.0 if maximum_fps is None else 1.0 / maximum_fps
         while not self._stop_event.is_set():
+            def frame_ready() -> bool:
+                if self._stop_event.is_set():
+                    return True
+                if self._latest_annotated_jpeg is not None:
+                    return self._annotated_sequence != sequence
+                return not annotated_only and self._latest_raw_jpeg is not None and self._sequence != sequence
+
             with self._condition:
                 self._condition.wait_for(
-                    lambda: self._annotated_sequence != sequence
-                    or (self._annotated_sequence == 0 and self._sequence != sequence)
-                    or self._stop_event.is_set(),
+                    frame_ready,
                     timeout=self.shared_settings.consumer_wait_timeout_seconds,
                 )
                 if self._stop_event.is_set():
@@ -258,6 +268,8 @@ class CameraService:
                 if self._annotated_sequence:
                     current_sequence = self._annotated_sequence
                     jpeg = self._latest_annotated_jpeg
+                elif annotated_only:
+                    continue
                 else:
                     current_sequence = self._sequence
                     jpeg = self._latest_raw_jpeg

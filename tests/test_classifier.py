@@ -96,6 +96,7 @@ def test_evidence_store_auto_accepts_person_and_queues_negative_for_review(tmp_p
 
     assert accepted["state"] == "accepted" and accepted["outcome"] == "auto_accepted"
     assert accepted["decision_label"] == "person" and accepted["decision_confidence"] == 0.92
+    assert accepted["approved_label"] == "person"
     assert pending["state"] == "pending" and pending["outcome"] == "negative"
     assert (config.classifier.evidence_directory / "accepted" / "person-event.jpg").is_file()
     assert (config.classifier.evidence_directory / "pending" / "negative-event.jpg").is_file()
@@ -106,9 +107,12 @@ def test_evidence_store_auto_accepts_person_and_queues_negative_for_review(tmp_p
         "classified",
     ]
 
-    reviewed = store.review("negative-event", "approve")
+    with pytest.raises(ValueError, match="car or person"):
+        store.review("negative-event", "approve")
+    reviewed = store.review("negative-event", "approve", "car")
 
     assert reviewed["state"] == "accepted" and reviewed["outcome"] == "manual_approved"
+    assert reviewed["approved_label"] == reviewed["decision_label"] == "car"
     assert not (config.classifier.evidence_directory / "pending" / "negative-event.jpg").exists()
     assert (config.classifier.evidence_directory / "accepted" / "negative-event.jpg").is_file()
     assert json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])["action"] == "manual_approve"
@@ -212,6 +216,7 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
     store.save_classification(task(tmp_path, "review-event"), [], 100.0, "test-model")
+    store.save_classification(task(tmp_path, "approval-event"), [], 100.0, "test-model")
 
     camera = SimpleNamespace(
         start=lambda: None,
@@ -242,10 +247,26 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     assert client.post("/classifier-review/review-event/approve").status_code == 403
     token_match = re.search(rb'name="review_token" value="([^"]+)"', page.data)
     assert token_match is not None
+    token = token_match.group(1).decode()
+    assert client.post(
+        "/classifier-review/approval-event/approve",
+        data={"review_token": token},
+    ).status_code == 400
+    assert client.post(
+        "/classifier-review/approval-event/approve",
+        data={"review_token": token, "approval_label": "squirrel"},
+    ).status_code == 400
+    approved = client.post(
+        "/classifier-review/approval-event/approve",
+        data={"review_token": token, "approval_label": "person"},
+    )
+    assert approved.status_code == 302
+    accepted_page = client.get("/classifier-review?state=accepted").data
+    assert b"approval-event" in accepted_page and b"Approved label" in accepted_page and b"person" in accepted_page
 
     response = client.post(
         "/classifier-review/review-event/reject",
-        data={"review_token": token_match.group(1).decode()},
+        data={"review_token": token},
     )
 
     assert response.status_code == 302

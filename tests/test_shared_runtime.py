@@ -6,6 +6,7 @@ import time
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -79,14 +80,38 @@ def test_shared_runtime_publishes_raw_and_annotated_frames(tmp_path: Path) -> No
         wait_until(lambda: service.status().frames_received > 0)
         packet = service.wait_for_frame(-1)
         assert packet is not None and np.array_equal(packet.frame, raw)
-        annotated = np.full_like(raw, 180)
+        annotated = raw.copy()
+        cv2.rectangle(annotated, (8, 8), (24, 24), (0, 255, 0), -1)
         assert service.publish_annotated(packet.sequence, annotated)
         assert np.array_equal(service.latest_annotated_frame(), annotated)
-        assert next(service.mjpeg_frames(maximum_fps=10)).startswith(b"--frame\r\nContent-Type: image/jpeg")
+        stream_frame = next(service.mjpeg_frames(maximum_fps=10, annotated_only=True))
+        assert stream_frame.startswith(b"--frame\r\nContent-Type: image/jpeg")
+        jpeg = stream_frame.split(b"\r\n\r\n", 1)[1].removesuffix(b"\r\n")
+        decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert decoded is not None
+        assert decoded[16, 16, 1] > 200 and decoded[16, 16, 1] > decoded[16, 16, 0] * 3
         assert service.status().annotated_frames == 1
     finally:
         service.stop()
     assert released.is_set()
+
+
+def test_live_stream_holds_last_seen_box_during_tracker_gap(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+    motion = MotionProcessingService(SimpleNamespace(), config)  # type: ignore[arg-type]
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    group = SimpleNamespace(
+        track_id=7,
+        bounding_box=(20, 20, 30, 25),
+        provisional_category="small_animal_candidate",
+    )
+
+    motion._add_live_box_holds(frame, (group,), 1.0)
+    held = motion._add_live_box_holds(frame, (), 1.1)
+    expired = motion._add_live_box_holds(frame, (), 2.0)
+
+    assert held[20, 20].any()
+    assert not expired[20, 20].any()
 
 
 def test_camera_failure_is_reported_and_reconnects_safely(tmp_path: Path) -> None:

@@ -319,7 +319,7 @@ def create_app(
         if not hmac.compare_digest(supplied_token, classifier_review_token):
             abort(403)
         try:
-            classifier_store.review(item_id, decision)
+            classifier_store.review(item_id, decision, request.form.get("approval_label"))
         except KeyError:
             abort(404)
         except ValueError:

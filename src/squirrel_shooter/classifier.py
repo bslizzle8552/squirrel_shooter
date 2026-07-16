@@ -26,6 +26,7 @@ VOC_LABELS = (
     "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor",
 )
 EVIDENCE_STATES = frozenset({"pending", "accepted", "rejected"})
+MANUAL_APPROVAL_LABELS = frozenset({"car", "person"})
 SAFE_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -192,6 +193,7 @@ class ClassifierEvidenceStore:
             "state": state,
             "outcome": outcome,
             "auto_accepted": outcome == "auto_accepted",
+            "approved_label": auto.label if auto is not None else None,
             "error": error,
             "latency_ms": None if latency_ms is None else round(latency_ms, 2),
             "image_path": str(image_path),
@@ -224,11 +226,19 @@ class ClassifierEvidenceStore:
     def counts(self) -> dict[str, int]:
         return {state: len(self.list_items(state)) for state in EVIDENCE_STATES}
 
-    def review(self, item_id: str, decision: str) -> dict[str, Any]:
+    def review(
+        self,
+        item_id: str,
+        decision: str,
+        approval_label: str | None = None,
+    ) -> dict[str, Any]:
         if SAFE_ITEM_ID.fullmatch(item_id) is None:
             raise ValueError("Unsafe classifier evidence id")
         if decision not in {"approve", "reject"}:
             raise ValueError("Review decision must be approve or reject")
+        normalized_label = approval_label.strip().lower() if isinstance(approval_label, str) else None
+        if decision == "approve" and normalized_label not in MANUAL_APPROVAL_LABELS:
+            raise ValueError("Manual approval requires a car or person label")
         source = self.root / "pending"
         metadata_path = source / f"{item_id}.json"
         image_path = source / f"{item_id}.jpg"
@@ -245,6 +255,8 @@ class ClassifierEvidenceStore:
             record.update(
                 state=target_state,
                 outcome="manual_approved" if decision == "approve" else "manual_rejected",
+                approved_label=normalized_label if decision == "approve" else None,
+                decision_label=normalized_label if decision == "approve" else record.get("decision_label"),
                 image_path=str(target_image),
                 reviewed_at=datetime.now().astimezone().isoformat(timespec="milliseconds"),
             )

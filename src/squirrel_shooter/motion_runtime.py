@@ -102,6 +102,7 @@ class MotionProcessingService:
         self._force_event_requested = False
         self._classifier_event_frames: dict[int, int] = {}
         self._classifier_submitted: set[int] = set()
+        self._live_group_holds: dict[int, tuple[float, Any]] = {}
         self._recent_events: deque[dict[str, Any]] = deque(maxlen=config.motion.recent_event_limit)
         self._logs: EventLogWriter | None = None
         self._session: SessionLog | None = None
@@ -194,7 +195,10 @@ class MotionProcessingService:
             return [dict(event) for event in reversed(self._recent_events)]
 
     def mjpeg_frames(self):  # type: ignore[no-untyped-def]
-        return self.camera.mjpeg_frames(maximum_fps=self.config.dashboard.stream_fps)
+        return self.camera.mjpeg_frames(
+            maximum_fps=self.config.dashboard.stream_fps,
+            annotated_only=True,
+        )
 
     def request_forced_event(self) -> bool:
         """Queue a local test event; no dashboard route exposes this method."""
@@ -301,7 +305,8 @@ class MotionProcessingService:
         annotated = annotate_watch_frame(packet.frame, result, measured_fps=measured_fps)
         self._handle_rejection(result, measured_fps)
         self._handle_events(packet, result, annotated, now, measured_fps)
-        self.camera.publish_annotated(packet.sequence, annotated)
+        live_annotated = self._add_live_box_holds(annotated, result.groups, now)
+        self.camera.publish_annotated(packet.sequence, live_annotated)
         self._prebuffer.append(now, annotated)
         now_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
         groups = tuple(group.as_dict() for group in result.groups)
@@ -314,7 +319,7 @@ class MotionProcessingService:
             self._candidates_seen += len(result.groups)
             self._current_groups = groups
             self._latest_frame = packet.frame.copy()
-            self._latest_annotated = annotated.copy()
+            self._latest_annotated = live_annotated.copy()
             self._latest_result = result
             self._latest_sequence = packet.sequence
             self._last_detector_update = now_iso
@@ -327,6 +332,42 @@ class MotionProcessingService:
             if monotonic() - self._last_session_save >= 10.0:
                 self._session.save()
                 self._last_session_save = monotonic()
+
+    def _add_live_box_holds(
+        self,
+        annotated: np.ndarray,
+        groups: tuple[Any, ...] | list[Any],
+        now: float,
+    ) -> np.ndarray:
+        """Keep a last-known box visible during the tracker's short gap window."""
+
+        visible_track_ids = {int(group.track_id) for group in groups}
+        hold_seconds = self.config.motion.persistence.maximum_gap_seconds
+        for group in groups:
+            self._live_group_holds[int(group.track_id)] = (now + hold_seconds, group)
+        expired = [track_id for track_id, (until, _) in self._live_group_holds.items() if until < now]
+        for track_id in expired:
+            del self._live_group_holds[track_id]
+        hidden_track_ids = [track_id for track_id in self._live_group_holds if track_id not in visible_track_ids]
+        if not hidden_track_ids:
+            return annotated
+        held = annotated.copy()
+        for track_id in hidden_track_ids:
+            _, group = self._live_group_holds[track_id]
+            x, y, width, height = group.bounding_box
+            color = (0, 170, 255)
+            cv2.rectangle(held, (x, y), (x + width, y + height), color, 3)
+            cv2.putText(
+                held,
+                f"last seen: {group.provisional_category}",
+                (x, max(22, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+        return held
 
     def _handle_rejection(self, result: WatchDetectionResult, measured_fps: float) -> None:
         if result.global_motion.reason and result.state.value == "GLOBAL_RECOVERY":

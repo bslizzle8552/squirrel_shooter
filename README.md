@@ -21,6 +21,12 @@ saved image and clip.
 camera runtime opens `/dev/video*` exactly once, measures the negotiated stream,
 and publishes raw frames to the motion processor. The motion processor publishes
 annotated frames back to the same runtime for the dashboard's MJPEG stream.
+The dashboard stream waits for watcher-annotated frames rather than silently
+falling back to raw camera JPEGs. The blue outline is the inclusion-zone boundary;
+group and component boxes are drawn over it whenever the watcher sees a candidate.
+If a candidate briefly drops out between frames, the live view holds its last box
+for the tracker's existing short gap window (0.7 seconds by default) and labels it
+`last seen`. This affects only the display and adds no classifier inference.
 
 The dashboard never constructs or reads a `VideoCapture`, and the motion processor
 never opens a camera. Camera reconnects happen only inside the shared runtime.
@@ -77,7 +83,7 @@ python -m pytest
 The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
 weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
 installing them under the ignored `models/` directory. Expected test result for
-this revision: **77 passed** without opening the USB camera. Then stop any old
+this revision: **78 passed** without opening the USB camera. Then stop any old
 dashboard, preview, recorder, or watcher process that already owns the camera and
 start the complete system:
 
@@ -319,9 +325,11 @@ work from accumulating when the Pi is busy.
 `person` and `car` detections at or above 60 percent go directly to
 `captures/classifier/accepted`. Other recognized classes are edge cases, and no
 detection is a negative result; both go to `pending` for Approve or Reject on the
-Classifier page. Model-load errors and the rare full-queue condition also go to
-pending instead of silently losing the event. The original event folder and clip
-are preserved regardless of the classifier decision.
+Classifier page. Manual approval requires a second answer identifying the item as
+either `car` or `person`; the server rejects an approval without one of those two
+labels. Model-load errors and the rare full-queue condition also go to pending
+instead of silently losing the event. The original event folder and clip are
+preserved regardless of the classifier decision.
 
 Every attempt records the submitted frame number, crop and source boxes, model,
 all detections, confidence, inference time, automatic/manual decision, error, and

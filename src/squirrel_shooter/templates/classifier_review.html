@@ -35,9 +35,19 @@
               <p>{{ ('%.1f%% confidence'|format(shown_confidence * 100)) if shown_confidence is not none else 'No class exceeded the detection threshold' }}</p>
               <dl><div><dt>Frame</dt><dd>{{ item.frame_number }}</dd></div><div><dt>Inference</dt><dd>{{ ('%.0f ms'|format(item.latency_ms)) if item.latency_ms is not none else 'Unavailable' }}</dd></div><div><dt>Event</dt><dd>{{ item.event_id }}</dd></div></dl>
               {% if item.error %}<p class="classifier-error">{{ item.error }}</p>{% endif %}
+              {% if item.approved_label %}<p class="approved-label">Approved label: <strong>{{ item.approved_label }}</strong></p>{% endif %}
               {% if selected_state == 'pending' %}
                 <div class="review-actions">
-                  <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="approve-button" type="submit">Approve</button></form>
+                  <form class="approve-form" method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}">
+                    <input type="hidden" name="review_token" value="{{ review_token }}">
+                    <label for="approval-label-{{ item.item_id }}">If approved, what is it?</label>
+                    <select id="approval-label-{{ item.item_id }}" name="approval_label" required>
+                      <option value="" selected disabled>Choose car or person</option>
+                      <option value="car">Car</option>
+                      <option value="person">Person</option>
+                    </select>
+                    <button class="approve-button" type="submit">Approve with label</button>
+                  </form>
                   <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='reject') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="reject-button" type="submit">Reject</button></form>
                 </div>
               {% endif %}
