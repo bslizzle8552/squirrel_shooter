@@ -1,29 +1,95 @@
-# Conservative defaults for a Raspberry Pi 4 and a 720p USB camera.
+# Conservative starting values for a fixed 1280x720 garden camera currently
+# observed near 10 FPS.  Tune these after reviewing saved events.
 camera:
   device_index: 0
   requested_width: 1280
   requested_height: 720
   requested_fps: 30
   output_directory: captures
+  camera_mode_if_known: unknown
+  ir_mode_if_explicitly_detected_or_configured: unknown
+  low_fps_threshold: 15.0
+  reopen_after_failed_reads: 10
+  reopen_delay_seconds: 2.0
 
 motion:
   enabled: true
   processing_width: 640
-  learning_frames: 90
-  history: 300
-  variance_threshold: 25
+  history: 500
+  variance_threshold: 32
   detect_shadows: true
   blur_kernel: 7
   morphology_kernel: 5
   open_iterations: 1
   close_iterations: 2
-  min_blob_area: 450
-  max_blob_area: 90000
+  min_blob_area: 300
+  max_blob_area: 150000
+  recent_event_limit: 100
+
+  startup_warmup:
+    seconds: 12.0
+    minimum_frames: 60
+
+  # Normalized x/y points.  This full-frame polygon is the default.  Replace
+  # the points with the corners of the useful garden area, in order.
+  inclusion_zone:
+    enabled: false
+    polygon:
+      - [0.0, 0.0]
+      - [1.0, 0.0]
+      - [1.0, 1.0]
+      - [0.0, 1.0]
+
+  persistence:
+    frames: 3
+    max_centroid_distance_pixels: 100
+    maximum_gap_seconds: 0.7
+    cooldown_seconds: 8.0
+
+  grouping:
+    enabled: true
+    max_horizontal_gap_pixels: 80
+    max_vertical_gap_pixels: 80
+    expanded_box_margin_pixels: 40
+    max_centroid_distance_pixels: 140
+    direction_similarity_degrees: 50
+    speed_similarity_ratio: 2.5
+    maximum_components_per_group: 12
+
+  global_rejection:
+    enabled: true
+    max_frame_motion_percent: 35.0
+    max_zone_motion_percent: 45.0
+    recovery_seconds: 3.0
+    log_rejected_global_events: true
+    save_debug_snapshot: false
+    exposure_luminance_delta: 35.0
+    ir_colorfulness_delta: 18.0
+    obstruction_motion_percent: 80.0
+
+  event_lifecycle:
+    pre_event_seconds: 2.0
+    post_event_seconds: 3.0
+    maximum_event_seconds: 60.0
+    clip_codec: MJPG
+
+  provisional_classification:
+    tiny_max_frame_percent: 0.08
+    small_animal_max_frame_percent: 1.5
+    medium_animal_max_frame_percent: 5.0
+    person_min_height_percent: 35.0
+    large_object_min_frame_percent: 5.0
+    flicker_min_components: 5
+    stationary_speed_pixels_per_second: 8.0
+    slow_speed_pixels_per_second: 30.0
+    fast_speed_pixels_per_second: 150.0
+
+  # Backward-compatible settings used by the read-only dashboard detector.
+  learning_frames: 90
   persistence_frames: 3
   persistence_max_distance: 80
   cooldown_seconds: 8
   lighting_change_percent: 65
-  recent_event_limit: 100
   roi:
     enabled: false
     x: 0.0
@@ -39,10 +105,21 @@ motion:
     roi_visualization: false
     rejected_candidate_frame: false
 
+reporting:
+  directory: captures/reports
+  thumbnail_width: 320
+  rebuild_on_clean_shutdown: true
+
+retention:
+  maximum_storage_megabytes: 4096
+  maximum_event_age_days: 30
+  maximum_event_count: 1000
+
 health:
   camera_stale_seconds: 3
   detector_stale_seconds: 5
 
+# Legacy dashboard limits remain separate from complete watcher event retention.
 storage:
   max_event_captures: 500
   max_debug_images: 200
@@ -50,4 +127,10 @@ storage:
 
 logging:
   level: INFO
-  directory: logs
+  directory: captures/logs
+  event_csv: events.csv
+  event_jsonl: events.jsonl
+  rejection_jsonl: rejections.jsonl
+  sessions_directory: sessions
+  maximum_active_log_megabytes: 100
+  retained_log_rotations: 5

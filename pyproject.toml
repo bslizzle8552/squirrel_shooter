@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "squirrel-shooter"
-version = "0.1.0"
-description = "Camera-first foundation for a Raspberry Pi garden squirrel deterrent"
+version = "0.2.0"
+description = "Vision-only Raspberry Pi garden motion watcher and review workflow"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
