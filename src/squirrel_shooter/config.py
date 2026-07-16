@@ -85,6 +85,16 @@ class PersistenceConfig:
 
 
 @dataclass(frozen=True)
+class CandidateFilterConfig:
+    enabled: bool
+    minimum_frame_percent: float
+    ignore_tiny_motion: bool
+    ignore_plant_or_shadow_flicker: bool
+    require_coherent_small_motion: bool
+    small_motion_minimum_travel_pixels: float
+
+
+@dataclass(frozen=True)
 class GroupingConfig:
     enabled: bool
     max_horizontal_gap_pixels: int
@@ -165,6 +175,7 @@ class MotionConfig:
     warmup: StartupWarmupConfig
     inclusion_zone: InclusionZoneConfig
     persistence: PersistenceConfig
+    candidate_filter: CandidateFilterConfig
     grouping: GroupingConfig
     global_rejection: GlobalRejectionConfig
     event_lifecycle: EventLifecycleConfig
@@ -319,6 +330,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     debug = _mapping(motion, "debug_outputs")
     warmup = _mapping(motion, "startup_warmup")
     persistence = _mapping(motion, "persistence")
+    candidate_filter = _mapping(motion, "candidate_filter")
     grouping = _mapping(motion, "grouping")
     global_rejection = _mapping(motion, "global_rejection")
     lifecycle = _mapping(motion, "event_lifecycle")
@@ -384,6 +396,23 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _number(persistence.get("max_centroid_distance_pixels"), "motion.persistence.max_centroid_distance_pixels", exclusive=True),
             _number(persistence.get("maximum_gap_seconds"), "motion.persistence.maximum_gap_seconds", exclusive=True),
             _number(persistence.get("cooldown_seconds"), "motion.persistence.cooldown_seconds"),
+        ),
+        candidate_filter=CandidateFilterConfig(
+            _bool(candidate_filter.get("enabled"), "motion.candidate_filter.enabled"),
+            _percent(candidate_filter, "minimum_frame_percent", "motion.candidate_filter"),
+            _bool(candidate_filter.get("ignore_tiny_motion"), "motion.candidate_filter.ignore_tiny_motion"),
+            _bool(
+                candidate_filter.get("ignore_plant_or_shadow_flicker"),
+                "motion.candidate_filter.ignore_plant_or_shadow_flicker",
+            ),
+            _bool(
+                candidate_filter.get("require_coherent_small_motion"),
+                "motion.candidate_filter.require_coherent_small_motion",
+            ),
+            _number(
+                candidate_filter.get("small_motion_minimum_travel_pixels"),
+                "motion.candidate_filter.small_motion_minimum_travel_pixels",
+            ),
         ),
         grouping=GroupingConfig(
             _bool(grouping.get("enabled"), "motion.grouping.enabled"),

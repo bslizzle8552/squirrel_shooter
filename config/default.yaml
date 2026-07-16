@@ -42,7 +42,7 @@ motion:
   morphology_kernel: 5
   open_iterations: 1
   close_iterations: 2
-  min_blob_area: 300
+  min_blob_area: 500
   max_blob_area: 150000
   recent_event_limit: 100
 
@@ -61,10 +61,19 @@ motion:
       - [0.0, 1.0]
 
   persistence:
-    frames: 3
+    frames: 5
     max_centroid_distance_pixels: 100
     maximum_gap_seconds: 0.7
     cooldown_seconds: 8.0
+
+  # Keep weak motion visible for tuning, but do not turn it into a saved event.
+  candidate_filter:
+    enabled: true
+    minimum_frame_percent: 0.15
+    ignore_tiny_motion: true
+    ignore_plant_or_shadow_flicker: true
+    require_coherent_small_motion: true
+    small_motion_minimum_travel_pixels: 10.0
 
   grouping:
     enabled: true

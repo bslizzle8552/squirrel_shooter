@@ -12,7 +12,7 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
-from .config import ClassificationConfig, GroupingConfig, MotionConfig
+from .config import CandidateFilterConfig, ClassificationConfig, GroupingConfig, MotionConfig
 
 
 class WatchState(StrEnum):
@@ -67,6 +67,8 @@ class GroupedCandidate:
     provisional_category: str = "unclassified_motion"
     movement_attributes: tuple[str, ...] = ()
     heuristic_score: float = 0.0
+    event_eligible: bool = True
+    event_filter_reason: str | None = None
     confirmed: bool = False
     newly_confirmed: bool = False
 
@@ -113,6 +115,8 @@ class GroupedCandidate:
             "provisional_category": self.provisional_category,
             "movement_attributes": list(self.movement_attributes),
             "heuristic_score": round(self.heuristic_score, 3),
+            "event_eligible": self.event_eligible,
+            "event_filter_reason": self.event_filter_reason,
             "confirmed": self.confirmed,
         }
 
@@ -287,6 +291,25 @@ def classify_candidate(candidate: GroupedCandidate, frame_shape: tuple[int, int]
     attributes = tuple(item for item in (speed_attribute, shape_attribute) if item)
     score = min(0.95, 0.35 + 0.08 * candidate.persistence_count + 0.25 * candidate.grouping_confidence)
     return replace(candidate, provisional_category=category, movement_attributes=attributes, heuristic_score=score)
+
+
+def evaluate_event_eligibility(candidate: GroupedCandidate, config: CandidateFilterConfig) -> GroupedCandidate:
+    """Keep weak candidates observable while preventing them from creating events."""
+
+    reason: str | None = None
+    if config.enabled:
+        if config.ignore_tiny_motion and candidate.provisional_category == "tiny_motion":
+            reason = "tiny_motion"
+        elif config.ignore_plant_or_shadow_flicker and candidate.provisional_category == "plant_or_shadow_flicker":
+            reason = "plant_or_shadow_flicker"
+        elif candidate.frame_percent < config.minimum_frame_percent:
+            reason = "below_minimum_frame_percent"
+        elif candidate.provisional_category == "small_animal_candidate":
+            if config.require_coherent_small_motion and not candidate.coherent_motion:
+                reason = "small_motion_not_coherent"
+            elif candidate.travel_distance < config.small_motion_minimum_travel_pixels:
+                reason = "small_motion_insufficient_travel"
+    return replace(candidate, event_eligible=reason is None, event_filter_reason=reason)
 
 
 def _direction(path: list[tuple[float, float]]) -> str:
@@ -499,11 +522,6 @@ class MotionWatcherDetector:
             travel = sum(segment_distances)
             displacement = math.dist(path[0], path[-1]) if len(path) > 1 else 0.0
             coherent = travel > 5 and displacement / travel >= 0.65
-            can_confirm = self._last_confirmation_at is None or now - self._last_confirmation_at >= settings.cooldown_seconds
-            newly_confirmed = not track.confirmed and track.persistence >= settings.frames and can_confirm
-            if newly_confirmed:
-                track.confirmed = True
-                self._last_confirmation_at = now
             updated = replace(
                 group,
                 track_id=track.track_id,
@@ -516,10 +534,20 @@ class MotionWatcherDetector:
                 direction=_direction(path),
                 coherent_motion=coherent,
                 dispersed_motion=group.dispersed_motion or (len(group.components) >= 5 and not coherent),
-                confirmed=track.confirmed,
-                newly_confirmed=newly_confirmed,
             )
-            output.append(classify_candidate(updated, frame_shape, self.config.classification))
+            classified = classify_candidate(updated, frame_shape, self.config.classification)
+            filtered = evaluate_event_eligibility(classified, self.config.candidate_filter)
+            can_confirm = self._last_confirmation_at is None or now - self._last_confirmation_at >= settings.cooldown_seconds
+            newly_confirmed = (
+                not track.confirmed
+                and track.persistence >= settings.frames
+                and can_confirm
+                and filtered.event_eligible
+            )
+            if newly_confirmed:
+                track.confirmed = True
+                self._last_confirmation_at = now
+            output.append(replace(filtered, confirmed=track.confirmed, newly_confirmed=newly_confirmed))
         expired = [track_id for track_id, track in self._tracks.items() if now - track.last_at > settings.maximum_gap_seconds]
         for track_id in expired:
             del self._tracks[track_id]
@@ -538,7 +566,7 @@ def annotate_watch_frame(frame: np.ndarray, result: WatchDetectionResult, *, eve
     zone_contours, _ = cv2.findContours(zone, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(annotated, zone_contours, -1, (255, 180, 0), 2)
     for group in result.groups:
-        color = (30, 220, 80) if group.confirmed else (0, 190, 255)
+        color = (30, 220, 80) if group.confirmed else ((120, 120, 120) if not group.event_eligible else (0, 190, 255))
         x, y, box_width, box_height = group.bounding_box
         cv2.rectangle(annotated, (x, y), (x + box_width, y + box_height), color, 3)
         for component in group.components:
@@ -550,7 +578,8 @@ def annotate_watch_frame(frame: np.ndarray, result: WatchDetectionResult, *, eve
             cv2.polylines(annotated, [np.array(group.path, dtype=np.int32)], False, color, 2)
         label = f"{group.provisional_category} | {','.join(group.movement_attributes)} | {group.average_speed:.1f}px/s"
         cv2.putText(annotated, label, (x, max(22, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 2, cv2.LINE_AA)
-        details = f"area {group.foreground_pixels}px | {group.frame_percent:.2f}% frame | {group.duration:.1f}s | {len(group.components)} blobs | group {group.grouping_confidence:.2f}"
+        filter_detail = f" | FILTERED {group.event_filter_reason}" if group.event_filter_reason else ""
+        details = f"area {group.foreground_pixels}px | {group.frame_percent:.2f}% frame | {group.duration:.1f}s | {len(group.components)} blobs | group {group.grouping_confidence:.2f}{filter_detail}"
         cv2.putText(annotated, details, (x, min(height - 12, y + box_height + 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.43, color, 1, cv2.LINE_AA)
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     lines = [

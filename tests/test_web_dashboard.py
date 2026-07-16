@@ -15,6 +15,7 @@ from flask import Flask
 from conftest import write_test_config
 from squirrel_shooter.camera_service import CameraService, CameraStatus
 from squirrel_shooter.config import CameraConfig, load_config
+from squirrel_shooter.motion_runtime import MotionRuntimeStatus
 from squirrel_shooter.vision_service import VisionService, VisionStatus
 from squirrel_shooter.web_dashboard import build_parser, create_app, list_capture_images
 
@@ -114,6 +115,51 @@ def test_status_health_and_recent_events_endpoints(
     assert health.json["detector_alive"] is True
     assert health.json["capture_directory_writable"] is True
     assert recent.json == {"count": 0, "events": []}
+
+
+def test_dashboard_explains_filtered_candidate(tmp_path: Path) -> None:
+    config_path = write_test_config(tmp_path)
+    filtered_group = {
+        "provisional_category": "small_animal_candidate",
+        "component_count": 1,
+        "average_pixel_speed": 3.0,
+        "event_eligible": False,
+        "event_filter_reason": "small_motion_not_coherent",
+    }
+    status = MotionRuntimeStatus(
+        state="READY",
+        enabled=True,
+        processing_fps=10.0,
+        blob_count=1,
+        persistence_count=5,
+        frames_processed=10,
+        candidates_seen=5,
+        accepted_events=0,
+        rejected_events=0,
+        snapshots_saved=0,
+        global_motion_rejections=0,
+        active_events=0,
+        last_detector_update=None,
+        last_detector_age_seconds=0.1,
+        last_event=None,
+        last_snapshot=None,
+        last_error=None,
+        thread_alive=True,
+        capture_directory_writable=True,
+        current_groups=(filtered_group,),
+        last_event_summary=None,
+    )
+    app = create_app(
+        config_path,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(status),  # type: ignore[arg-type]
+        temperature_reader=lambda: None,
+    )
+    app.config.update(TESTING=True)
+
+    response = app.test_client().get("/")
+    assert response.status_code == 200
+    assert b"Filtered: small_motion_not_coherent" in response.data
 
 
 def test_stale_camera_is_reported_in_health(tmp_path: Path) -> None:

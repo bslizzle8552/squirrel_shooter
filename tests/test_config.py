@@ -26,6 +26,9 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.dashboard.port == 5000
     assert config.shared_camera.reconnect_enabled is True
     assert config.runtime.headless is False
+    assert config.motion.min_blob_area == 500
+    assert config.motion.persistence.frames == 5
+    assert config.motion.candidate_filter.require_coherent_small_motion is True
 
 
 def test_rejects_missing_camera_setting(tmp_path: Path) -> None:

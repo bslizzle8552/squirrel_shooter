@@ -13,6 +13,7 @@ from squirrel_shooter.watch_detection import (
     MotionWatcherDetector,
     WatchState,
     classify_candidate,
+    evaluate_event_eligibility,
     group_components,
 )
 
@@ -228,3 +229,49 @@ def test_provisional_categories_never_claim_squirrel(tmp_path: Path) -> None:
     assert tiny.provisional_category == "tiny_motion"
     assert flicker.provisional_category == "plant_or_shadow_flicker"
     assert "squirrel" not in tiny.provisional_category
+
+
+def test_candidate_filter_rejects_tiny_and_flickering_motion(tmp_path: Path) -> None:
+    config = watch_config(tmp_path)
+    tiny_base = group_components([component(10, 10, 2, 2)], config.grouping, 10_000, 10_000)[0]
+    tiny = classify_candidate(tiny_base, (100, 100), config.classification)
+    flicker = classify_candidate(
+        replace(tiny_base, components=tuple(component(index * 4, 20, 3, 3) for index in range(6)), dispersed_motion=True),
+        (100, 100),
+        config.classification,
+    )
+
+    tiny = evaluate_event_eligibility(tiny, config.candidate_filter)
+    flicker = evaluate_event_eligibility(flicker, config.candidate_filter)
+
+    assert not tiny.event_eligible and tiny.event_filter_reason == "tiny_motion"
+    assert not flicker.event_eligible and flicker.event_filter_reason == "plant_or_shadow_flicker"
+
+
+def test_small_motion_requires_coherent_travel_before_confirmation(tmp_path: Path) -> None:
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    stationary_masks = [box_mask(), *(box_mask((20 + (index % 2), 30, 10, 10)) for index in range(5))]
+    stationary = MotionWatcherDetector(
+        watch_config(tmp_path, persistence_frames=5),
+        subtractor=MaskSubtractor(stationary_masks),
+    )
+    stationary.process(frame, now=0)
+    filtered = None
+    for index in range(5):
+        filtered = stationary.process(frame, now=0.1 * (index + 1)).groups[0]
+    assert filtered is not None
+    assert not filtered.confirmed
+    assert filtered.event_filter_reason == "small_motion_not_coherent"
+
+    traveling_masks = [box_mask(), *(box_mask((20 + index * 3, 30, 10, 10)) for index in range(5))]
+    traveling = MotionWatcherDetector(
+        watch_config(tmp_path, persistence_frames=5),
+        subtractor=MaskSubtractor(traveling_masks),
+    )
+    traveling.process(frame, now=0)
+    accepted = None
+    for index in range(5):
+        accepted = traveling.process(frame, now=0.1 * (index + 1)).groups[0]
+    assert accepted is not None
+    assert accepted.event_eligible and accepted.confirmed and accepted.newly_confirmed
+    assert accepted.travel_distance >= 10

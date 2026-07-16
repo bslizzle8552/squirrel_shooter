@@ -238,13 +238,13 @@ to `false` is equivalent to `--no-dashboard`.
 motion:
   history: 500
   variance_threshold: 32
-  min_blob_area: 300
+  min_blob_area: 500
   max_blob_area: 150000
   startup_warmup:
     seconds: 12.0
     minimum_frames: 60
   persistence:
-    frames: 3
+    frames: 5
     maximum_gap_seconds: 0.7
     cooldown_seconds: 8.0
 ```
@@ -253,6 +253,28 @@ The first run needs time to learn the background. No normal event is confirmed
 during warmup. Raising `variance_threshold`, `min_blob_area`, or persistence makes
 the detector less sensitive. Cooldown and gap values are seconds, not assumed
 frame counts.
+
+### Candidate event filter
+
+Weak motion remains visible on the dashboard for diagnosis, but these defaults
+prevent common noise from becoming a saved event:
+
+```yaml
+motion:
+  candidate_filter:
+    enabled: true
+    minimum_frame_percent: 0.15
+    ignore_tiny_motion: true
+    ignore_plant_or_shadow_flicker: true
+    require_coherent_small_motion: true
+    small_motion_minimum_travel_pixels: 10.0
+```
+
+Small candidates must travel consistently before they can create an event. A
+gray box marked `FILTERED` is still useful tuning evidence; the dashboard shows
+the specific reason. If real squirrels are being filtered, lower
+`small_motion_minimum_travel_pixels` gradually before disabling coherent-motion
+filtering. This is motion filtering, not animal or object recognition.
 
 ### Inclusion-zone polygon
 
