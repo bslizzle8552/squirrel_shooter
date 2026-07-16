@@ -12,6 +12,26 @@ camera:
   reopen_after_failed_reads: 10
   reopen_delay_seconds: 2.0
 
+# One process owns the camera and publishes frames to every consumer.
+shared_camera:
+  reconnect_enabled: true
+  maximum_consecutive_read_failures: 10
+  reconnect_delay_seconds: 2.0
+  consumer_wait_timeout_seconds: 1.0
+  annotated_frame_stale_seconds: 3.0
+
+runtime:
+  headless: false
+  shutdown_timeout_seconds: 10.0
+
+dashboard:
+  enabled: true
+  host: 0.0.0.0
+  port: 5000
+  stream_fps: 8.0
+  jpeg_quality: 82
+  status_refresh_interval_seconds: 3.0
+
 motion:
   enabled: true
   processing_width: 640

@@ -292,7 +292,7 @@ def annotate_detection(
 
     state_detail = result.state.value
     if result.state is DetectorState.LEARNING:
-        state_detail = f"LEARNING (background warm-up)"
+        state_detail = "LEARNING (background warm-up)"
     lines = (
         f"Detector: {state_detail} | enabled: {'yes' if config.enabled else 'no'}",
         f"Processing: {result.processing_fps:4.1f} FPS | blobs: {result.blob_count} | persistence: {result.persistence}/{config.persistence_frames}",

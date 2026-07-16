@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import atexit
 import logging
 import math
 from collections.abc import Callable
@@ -18,7 +17,7 @@ from werkzeug.exceptions import HTTPException
 
 from .camera_service import CameraService, CameraStatus
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
-from .diagnostics import configure_logging
+from .motion_runtime import MotionProcessingService
 from .vision_service import VisionService, VisionStatus
 
 
@@ -26,7 +25,7 @@ LOGGER = logging.getLogger(__name__)
 SUPPORTED_CAPTURE_SUFFIXES = frozenset({".jpg", ".jpeg"})
 RECENT_CAPTURE_LIMIT = 12
 CAPTURES_PER_PAGE = 24
-APPLICATION_MODE = "motion-diagnostics"
+APPLICATION_MODE = "shared-camera-motion-watch"
 
 
 @dataclass(frozen=True)
@@ -89,6 +88,14 @@ def _camera_status_dict(status: CameraStatus, app_config: AppConfig) -> dict[str
         "last_frame_age_seconds": None if status.last_frame_age_seconds is None else round(status.last_frame_age_seconds, 2),
         "frames_received": status.frames_received,
         "thread_alive": status.thread_alive,
+        "reported_fps": round(status.reported_fps, 1),
+        "read_failures": status.read_failures,
+        "reconnects": status.reconnects,
+        "camera_open_count": status.camera_open_count,
+        "annotated_frames": status.annotated_frames,
+        "last_annotated_frame": status.last_annotated_at,
+        "annotated_frame_stale": status.annotated_frame_age_seconds is None
+        or status.annotated_frame_age_seconds > app_config.shared_camera.annotated_frame_stale_seconds,
     }
 
 
@@ -98,7 +105,36 @@ def _vision_status_dict(status: VisionStatus, config: AppConfig) -> dict[str, An
     data["processing_fps"] = round(status.processing_fps, 1)
     data["last_detector_age_seconds"] = None if status.last_detector_age_seconds is None else round(status.last_detector_age_seconds, 2)
     data["alive"] = status.thread_alive and fresh
+    data.setdefault("global_motion_rejections", 0)
+    data.setdefault("active_events", 0)
+    data.setdefault("current_groups", ())
+    data.setdefault("last_event_summary", None)
     return data
+
+
+def _resolve_under(directory: Path, relative_path: str) -> Path | None:
+    try:
+        root = directory.resolve()
+        candidate = (root / relative_path).resolve(strict=True)
+    except OSError:
+        return None
+    if not candidate.is_file() or not candidate.is_relative_to(root):
+        return None
+    return candidate
+
+
+def _dashboard_events(events: list[dict[str, Any]], config: AppConfig) -> list[dict[str, Any]]:
+    output_root = config.camera.output_directory.resolve()
+    prepared: list[dict[str, Any]] = []
+    for event in events:
+        item = dict(event)
+        for field in ("snapshot_path", "clip_path"):
+            try:
+                item[f"{field}_relative"] = Path(str(event.get(field, ""))).resolve().relative_to(output_root).as_posix()
+            except (OSError, ValueError):
+                item[f"{field}_relative"] = None
+        prepared.append(item)
+    return prepared
 
 
 def _safe_capture_filename(filename: str) -> bool:
@@ -122,22 +158,29 @@ def _resolve_capture_path(directory: Path, filename: str) -> Path | None:
 def create_app(
     config_path: str | Path = DEFAULT_CONFIG_PATH,
     *,
+    app_config: AppConfig | None = None,
     camera_service: CameraService | None = None,
     vision_service: VisionService | None = None,
+    motion_service: MotionProcessingService | None = None,
     temperature_reader: Callable[[], float | None] = read_cpu_temperature,
     start_camera: bool = True,
     start_vision: bool = True,
 ) -> Flask:
-    """Build the dashboard with injectable camera and detector boundaries."""
+    """Build a read-only dashboard around already-created shared services."""
 
-    app_config = load_config(config_path)
+    app_config = app_config or load_config(config_path)
     app = Flask(__name__)
-    camera = camera_service or CameraService(app_config.camera, encode_jpeg=False)
-    vision = vision_service or VisionService(camera, app_config)
+    if camera_service is None:
+        raise ValueError("create_app requires the shared camera runtime")
+    vision = motion_service or vision_service
+    if vision is None:
+        raise ValueError("create_app requires the shared motion processor")
+    camera = camera_service
     started_at = monotonic()
     app.extensions.update(
         camera_service=camera,
         vision_service=vision,
+        motion_service=motion_service,
         squirrel_config=app_config,
         temperature_reader=temperature_reader,
     )
@@ -146,10 +189,6 @@ def create_app(
         camera.start()
     if start_vision:
         vision.start()
-    if camera_service is None or vision_service is None:
-        atexit.register(vision.stop)
-        atexit.register(camera.stop)
-
     def page_status() -> tuple[dict[str, Any], dict[str, Any], float | None, float]:
         camera_status = _camera_status_dict(camera.status(), app_config)
         detector_status = _vision_status_dict(vision.status(), app_config)
@@ -166,6 +205,7 @@ def create_app(
     @app.get("/")
     def dashboard() -> str:
         captures = list_capture_images(app_config.camera.output_directory)
+        events = _dashboard_events(vision.recent_events(), app_config)
         camera_data, detector, temperature, uptime = page_status()
         return render_template(
             "dashboard.html",
@@ -173,12 +213,15 @@ def create_app(
             detector=detector,
             cpu_temperature=temperature,
             captures=captures[:RECENT_CAPTURE_LIMIT],
-            total_captures=len(captures),
+            events=events[:RECENT_CAPTURE_LIMIT],
+            total_captures=len(captures) + len(events),
             application_mode=APPLICATION_MODE,
             uptime_seconds=uptime,
+            status_refresh_ms=round(app_config.dashboard.status_refresh_interval_seconds * 1000),
         )
 
     @app.get("/video-feed")
+    @app.get("/video_feed")
     def video_feed() -> Any:
         return app.response_class(
             vision.mjpeg_frames(),
@@ -203,10 +246,46 @@ def create_app(
             abort(404)
         return send_file(capture_path, conditional=True)
 
+    @app.get("/files/<path:relative_path>")
+    def output_file(relative_path: str) -> Any:
+        path = _resolve_under(app_config.camera.output_directory, relative_path)
+        if path is None:
+            abort(404)
+        return send_file(path, conditional=True)
+
+    @app.get("/events/<path:relative_path>")
+    def event_file(relative_path: str) -> Any:
+        path = _resolve_under(app_config.camera.output_directory / "events", relative_path)
+        if path is None:
+            abort(404)
+        return send_file(path, conditional=True)
+
+    @app.get("/logs/<path:relative_path>")
+    def log_file(relative_path: str) -> Any:
+        path = _resolve_under(app_config.logging.directory, relative_path)
+        if path is None:
+            abort(404)
+        return send_file(path, conditional=True)
+
+    @app.get("/reports/latest")
+    def latest_report() -> Any:
+        path = app_config.reporting.directory / "latest-report.html"
+        if not path.is_file():
+            abort(404)
+        return send_file(path, conditional=True)
+
+    @app.get("/reports/<path:relative_path>")
+    def report_file(relative_path: str) -> Any:
+        path = _resolve_under(app_config.reporting.directory, relative_path)
+        if path is None:
+            abort(404)
+        return send_file(path, conditional=True)
+
     @app.get("/api/status")
     def api_status() -> Any:
         camera_data, detector, temperature, uptime = page_status()
         captures = list_capture_images(app_config.camera.output_directory)
+        events = vision.recent_events()
         return jsonify(
             application_mode=APPLICATION_MODE,
             application_uptime_seconds=round(uptime, 1),
@@ -214,7 +293,7 @@ def create_app(
             detector=detector,
             cpu_temperature_c=temperature,
             total_events=detector["accepted_events"],
-            total_snapshots=len(captures),
+            total_snapshots=len(captures) + len(events),
             last_event_time=detector["last_event"],
             last_snapshot_time=detector["last_snapshot"],
         )
@@ -236,6 +315,11 @@ def create_app(
             accepted_events=detector["accepted_events"],
             rejected_events=detector["rejected_events"],
             snapshots_saved=detector["snapshots_saved"],
+            global_motion_rejections=detector["global_motion_rejections"],
+            camera_read_failures=camera_data["read_failures"],
+            camera_reconnects=camera_data["reconnects"],
+            camera_open_count=camera_data["camera_open_count"],
+            active_events=detector["active_events"],
             last_error=detector["last_error"] or camera_data["error"],
             capture_directory_writable=detector["capture_directory_writable"],
             camera_state=camera_data["state"],
@@ -243,6 +327,7 @@ def create_app(
         )
 
     @app.get("/api/recent-events")
+    @app.get("/api/events")
     def api_recent_events() -> Any:
         events = vision.recent_events()
         return jsonify(events=events, count=len(events))
@@ -266,20 +351,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    config = load_config(args.config)
-    configure_logging(config.logging, config.storage.max_log_files)
-    LOGGER.info("Squirrel Squirter starting", extra={"structured_data": {"event": "startup", "config": str(config.source_path)}})
-    app = create_app(args.config)
-    camera: CameraService = app.extensions["camera_service"]
-    vision: VisionService = app.extensions["vision_service"]
-    try:
-        app.run(host=args.host, port=args.port, debug=False, threaded=True)
-    finally:
-        vision.stop()
-        camera.stop()
-        LOGGER.info("Squirrel Squirter shutdown complete", extra={"structured_data": {"event": "shutdown"}})
-    return 0
+    from .app import main as combined_main
+
+    return combined_main()
 
 
 if __name__ == "__main__":

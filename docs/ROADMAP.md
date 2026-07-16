@@ -12,6 +12,8 @@ must be proven before the next phase can control physical hardware.
 
 ## Current phase: unattended vision-only watcher and review
 
+- Run detection and the private Tailnet dashboard from one shared, reconnect-safe
+  camera runtime with coordinated shutdown.
 - Detect motion locally with MOG2, cleanup, polygon inclusion, time-based recovery,
   persistence, multi-blob grouping, and multi-candidate tracking.
 - Reject scene-wide motion from pixel coverage and visual evidence without treating

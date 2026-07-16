@@ -31,6 +31,31 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class SharedCameraConfig:
+    reconnect_enabled: bool
+    maximum_consecutive_read_failures: int
+    reconnect_delay_seconds: float
+    consumer_wait_timeout_seconds: float
+    annotated_frame_stale_seconds: float
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    headless: bool
+    shutdown_timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class DashboardConfig:
+    enabled: bool
+    host: str
+    port: int
+    stream_fps: float
+    jpeg_quality: int
+    status_refresh_interval_seconds: float
+
+
+@dataclass(frozen=True)
 class RoiConfig:
     enabled: bool
     x: float
@@ -188,6 +213,9 @@ class HealthConfig:
 @dataclass(frozen=True)
 class AppConfig:
     camera: CameraConfig
+    shared_camera: SharedCameraConfig
+    runtime: RuntimeConfig
+    dashboard: DashboardConfig
     motion: MotionConfig
     storage: StorageConfig
     retention: RetentionConfig
@@ -284,6 +312,9 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     camera = _mapping(raw, "camera")
     _required(camera, {"device_index", "requested_width", "requested_height", "requested_fps", "output_directory"}, "camera")
     motion = _mapping(raw, "motion")
+    shared_camera = _mapping(raw, "shared_camera")
+    runtime = _mapping(raw, "runtime")
+    dashboard = _mapping(raw, "dashboard")
     roi = _mapping(motion, "roi")
     debug = _mapping(motion, "debug_outputs")
     warmup = _mapping(motion, "startup_warmup")
@@ -408,6 +439,13 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     if motion_config.event_lifecycle.maximum_event_seconds <= motion_config.event_lifecycle.post_event_seconds:
         raise ConfigError("maximum_event_seconds must be greater than post_event_seconds")
 
+    dashboard_port = _int(dashboard.get("port"), "dashboard.port", minimum=1)
+    if dashboard_port > 65535:
+        raise ConfigError("dashboard.port must be at most 65535")
+    dashboard_quality = _int(dashboard.get("jpeg_quality"), "dashboard.jpeg_quality", minimum=1)
+    if dashboard_quality > 100:
+        raise ConfigError("dashboard.jpeg_quality must be at most 100")
+
     return AppConfig(
         camera=CameraConfig(
             _int(camera.get("device_index"), "camera.device_index"),
@@ -420,6 +458,25 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _number(camera.get("low_fps_threshold", 15.0), "camera.low_fps_threshold", exclusive=True),
             _int(camera.get("reopen_after_failed_reads", 10), "camera.reopen_after_failed_reads", minimum=1),
             _number(camera.get("reopen_delay_seconds", 2.0), "camera.reopen_delay_seconds"),
+        ),
+        shared_camera=SharedCameraConfig(
+            _bool(shared_camera.get("reconnect_enabled"), "shared_camera.reconnect_enabled"),
+            _int(shared_camera.get("maximum_consecutive_read_failures"), "shared_camera.maximum_consecutive_read_failures", minimum=1),
+            _number(shared_camera.get("reconnect_delay_seconds"), "shared_camera.reconnect_delay_seconds"),
+            _number(shared_camera.get("consumer_wait_timeout_seconds"), "shared_camera.consumer_wait_timeout_seconds", exclusive=True),
+            _number(shared_camera.get("annotated_frame_stale_seconds"), "shared_camera.annotated_frame_stale_seconds", exclusive=True),
+        ),
+        runtime=RuntimeConfig(
+            _bool(runtime.get("headless"), "runtime.headless"),
+            _number(runtime.get("shutdown_timeout_seconds"), "runtime.shutdown_timeout_seconds", exclusive=True),
+        ),
+        dashboard=DashboardConfig(
+            _bool(dashboard.get("enabled"), "dashboard.enabled"),
+            _text(dashboard.get("host"), "dashboard.host"),
+            dashboard_port,
+            _number(dashboard.get("stream_fps"), "dashboard.stream_fps", exclusive=True),
+            dashboard_quality,
+            _number(dashboard.get("status_refresh_interval_seconds"), "dashboard.status_refresh_interval_seconds", exclusive=True),
         ),
         motion=motion_config,
         storage=StorageConfig(*(_int(storage.get(name), f"storage.{name}", minimum=1) for name in ("max_event_captures", "max_debug_images", "max_log_files"))),

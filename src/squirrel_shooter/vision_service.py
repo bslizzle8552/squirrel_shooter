@@ -8,7 +8,6 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
 from time import monotonic
 from typing import Any
 

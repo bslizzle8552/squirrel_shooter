@@ -106,7 +106,7 @@ def test_status_health_and_recent_events_endpoints(
     health = app.test_client().get("/api/health")
     recent = app.test_client().get("/api/recent-events")
     assert status.status_code == health.status_code == recent.status_code == 200
-    assert status.json["application_mode"] == "motion-diagnostics"
+    assert status.json["application_mode"] == "shared-camera-motion-watch"
     assert status.json["camera"]["state"] == "OFFLINE"
     assert status.json["detector"]["state"] == "LEARNING"
     assert health.json["camera_alive"] is False
@@ -192,11 +192,14 @@ def test_multiple_browser_sessions_reuse_one_camera(tmp_path: Path) -> None:
         second = app.test_client().get("/video-feed", buffered=False)
         assert next(first.response).startswith(b"--frame")
         assert next(second.response).startswith(b"--frame")
-        first.close(); second.close()
-        camera.start(); vision.start()
+        first.close()
+        second.close()
+        camera.start()
+        vision.start()
         assert factory_calls == 1
     finally:
-        vision.stop(); camera.stop()
+        vision.stop()
+        camera.stop()
 
 
 def test_shared_service_publishes_raw_frame_without_real_camera(tmp_path: Path) -> None:
@@ -227,13 +230,16 @@ def test_shared_service_publishes_raw_frame_without_real_camera(tmp_path: Path) 
 def test_non_pi_host_never_opens_a_camera(tmp_path: Path) -> None:
     called = threading.Event()
     def forbidden(settings: CameraConfig) -> None:
-        del settings; called.set(); raise AssertionError
+        del settings
+        called.set()
+        raise AssertionError
     service = CameraService(CameraConfig(0, 1280, 720, 30.0, tmp_path), capture_factory=forbidden, platform_checker=lambda: False)
     service.start()
     deadline = time.monotonic() + 1.0
     while service.status().error is None and time.monotonic() < deadline:
         time.sleep(0.01)
-    status = service.status(); service.stop()
+    status = service.status()
+    service.stop()
     assert not called.is_set()
     assert status.error == "Camera capture is disabled because this host is not a Raspberry Pi"
 

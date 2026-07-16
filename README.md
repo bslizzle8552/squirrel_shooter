@@ -2,7 +2,7 @@
 
 Squirrel Squirter is currently a **vision-only** Raspberry Pi garden watcher:
 
-**USB camera -> motion groups -> provisional heuristics -> snapshots/clips -> review report**
+**one shared USB camera -> motion groups + private dashboard -> snapshots/clips -> review report**
 
 It does not recognize squirrels, aim, move anything, or control water. It imports
 no GPIO, I2C, PCA9685, servo, MOSFET, solenoid, or valve driver. The existing
@@ -12,7 +12,19 @@ Every label produced by the watcher is a size/movement heuristic. It never outpu
 a definitive `squirrel` category. Species labels belong only in the human-review
 CSV after Stephen reviews the saved image and clip.
 
-## What the watcher does
+## One camera, two consumers
+
+`python -m squirrel_shooter.app` is the normal entry point. One lock-protected
+camera runtime opens `/dev/video*` exactly once, measures the negotiated stream,
+and publishes raw frames to the motion processor. The motion processor publishes
+annotated frames back to the same runtime for the dashboard's MJPEG stream.
+
+The dashboard never constructs or reads a `VideoCapture`, and the motion processor
+never opens a camera. Camera reconnects happen only inside the shared runtime.
+Stopping the complete app finishes event files, flushes logs, rebuilds reports,
+stops the dashboard, and finally releases the sole camera handle.
+
+## What the combined system does
 
 - Uses OpenCV MOG2 with configurable history, variance threshold, shadow removal,
   warmup, morphology, contour limits, and a polygon inclusion zone.
@@ -57,11 +69,11 @@ python -m pytest
 ```
 
 Expected test result for this revision: all tests pass without opening the USB
-camera. Then stop any dashboard, preview, or recorder that already owns the camera
-and launch the watcher:
+camera. Then stop any old dashboard, preview, recorder, or watcher process that
+already owns the camera and start the complete system:
 
 ```bash
-python -m squirrel_shooter.motion_watch
+python -m squirrel_shooter.app
 ```
 
 On a desktop session, the preview supports:
@@ -74,12 +86,57 @@ On a desktop session, the preview supports:
 From a normal headless SSH session, use:
 
 ```bash
-python -m squirrel_shooter.motion_watch --headless
+python -m squirrel_shooter.app --headless
+```
+
+The headless command still runs both motion/event processing and the dashboard.
+It only disables the local OpenCV preview window.
+
+`motion_watch` remains as a compatibility command and now uses this same shared
+runtime. Do not start it alongside `squirrel_shooter.app`. To intentionally run
+motion processing without HTTP, use:
+
+```bash
+python -m squirrel_shooter.motion_watch --headless --no-dashboard
 ```
 
 Press `Ctrl+C` once to stop safely. The watcher finishes active event records when
 possible, releases the camera, applies retention, updates the session log, and
 refreshes the report. Do not power off the Pi while it is writing an event.
+
+## Open the dashboard through Tailscale
+
+The default listener is `0.0.0.0:5000`, which makes it reachable through the Pi's
+Tailnet address while the complete app is running. In another Pi SSH session:
+
+```bash
+cd ~/squirrel_shooter
+source .venv/bin/activate
+tailscale status
+tailscale ip -4
+ss -ltnp | grep ':5000'
+curl --fail http://127.0.0.1:5000/api/status
+```
+
+From the PC on the same Tailnet, open either:
+
+```text
+http://PI_TAILSCALE_IP:5000
+http://PI_MAGICDNS_HOSTNAME:5000
+```
+
+Replace the placeholders with the values shown by Tailscale. Do not add router
+port forwarding, a public reverse proxy, or public DNS for this dashboard.
+
+Useful read-only routes are:
+
+- `/` - live status, annotated feed, recent events, and review links;
+- `/video_feed` - shared annotated MJPEG stream;
+- `/api/status` and `/api/health` - camera/motion health and counters;
+- `/api/events` - recent completed events;
+- `/reports/latest` - latest local HTML review report.
+
+There are no remote aiming, movement, valve, or water controls.
 
 To rebuild the reports later, with no camera required:
 
@@ -144,7 +201,36 @@ camera:
 
 `requested_fps` is only the USB request. `event.json` separately records actual
 dimensions and `measured_camera_fps`. Do not change either mode field unless there
-is direct evidence.
+is direct evidence. The `camera.reopen_*` values remain compatibility fallbacks;
+the combined app uses the explicit `shared_camera` reconnect settings below.
+
+### Shared runtime and dashboard
+
+```yaml
+shared_camera:
+  reconnect_enabled: true
+  maximum_consecutive_read_failures: 10
+  reconnect_delay_seconds: 2.0
+  consumer_wait_timeout_seconds: 1.0
+  annotated_frame_stale_seconds: 3.0
+
+runtime:
+  headless: false
+  shutdown_timeout_seconds: 10.0
+
+dashboard:
+  enabled: true
+  host: 0.0.0.0
+  port: 5000
+  stream_fps: 8.0
+  jpeg_quality: 82
+  status_refresh_interval_seconds: 3.0
+```
+
+The dashboard stream is capped below the currently observed camera rate to leave
+CPU time for detection and event recording. Change `host` or `port` in YAML, or
+temporarily override them with `--host` and `--port`. Setting `dashboard.enabled`
+to `false` is equivalent to `--no-dashboard`.
 
 ### Background learning and motion sensitivity
 
@@ -285,7 +371,8 @@ Low FPS alone does not indicate night mode.
 6. Review `rejections.jsonl` for repeated vibration/exposure/plant rejection.
 7. Check `df -h`, capture-directory permissions, retention limits, Pi temperature,
    stable USB negotiation, and reliable power.
-8. Confirm no dashboard, preview, or other process is competing for the camera.
+8. Confirm no separately started `motion_watch`, `web_dashboard`, preview, or
+   recorder process is competing with the combined app for the camera.
 9. Confirm the disabled valve remains closed and no physical-output hardware has
    been added or energized.
 
@@ -298,3 +385,12 @@ python -m pytest
 
 Real outdoor tuning still must be done on the Raspberry Pi with the actual fixed
 camera, lighting, plants, storage, temperature, and USB behavior.
+
+## Known limitations
+
+- The dashboard is private by deployment convention, not an authentication layer;
+  keep it inside Tailscale and do not expose port 5000 publicly.
+- A camera reconnect resets its short-term FPS smoothing. MOG2 continues safely,
+  but a changed camera angle may cause warmup or global-motion rejection.
+- Browser MJPEG display and MJPG AVI playback depend on the client's codec support.
+- Heuristic categories still require human review and are not species recognition.

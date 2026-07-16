@@ -22,6 +22,10 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.camera.requested_height == 720
     assert config.camera.requested_fps == 30.0
     assert config.camera.output_directory == Path("captures")
+    assert config.dashboard.host == "0.0.0.0"
+    assert config.dashboard.port == 5000
+    assert config.shared_camera.reconnect_enabled is True
+    assert config.runtime.headless is False
 
 
 def test_rejects_missing_camera_setting(tmp_path: Path) -> None:
@@ -54,4 +58,13 @@ def test_rejects_invalid_roi_and_even_blur_kernel(tmp_path: Path) -> None:
     raw["motion"]["blur_kernel"] = 4
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     with pytest.raises(ConfigError, match="odd"):
+        load_config(config_path)
+
+
+def test_rejects_invalid_dashboard_port(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["dashboard"]["port"] = 70000
+    config_path = tmp_path / "bad-dashboard.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ConfigError, match="dashboard.port"):
         load_config(config_path)
