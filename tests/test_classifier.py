@@ -385,6 +385,57 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     assert b"unknown-event" in false_positive_page and b"False Positive" in false_positive_page
 
 
+def test_classifier_image_route_resolves_pi_style_relative_capture_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = classifier_config(tmp_path)
+    config = replace(
+        config,
+        camera=replace(config.camera, output_directory=Path("captures")),
+        classifier=replace(config.classifier, evidence_directory=Path("captures/classifier")),
+        logging=replace(config.logging, directory=Path("captures/logs")),
+    )
+    monkeypatch.chdir(tmp_path)
+    relative_task = ClassifierTask(
+        event_id="relative-event",
+        event_directory=Path("captures/events/2026-07-16/relative-event"),
+        frame_number=1,
+        image=np.full((24, 32, 3), 120, dtype=np.uint8),
+        source_bounding_box=(1, 2, 20, 18),
+        crop_bounding_box=(0, 0, 24, 22),
+        submitted_at="2026-07-16T18:00:00-04:00",
+    )
+    store = ClassifierEvidenceStore(config)
+    store.save_classification(relative_task, [], 100.0, "test-model")
+    assert store.input_path("relative-event").is_absolute()
+
+    camera = SimpleNamespace(
+        start=lambda: None,
+        status=lambda: CameraStatus(False, 1280, 720, 0.0, "offline"),
+    )
+    vision = SimpleNamespace(
+        start=lambda: None,
+        status=lambda: VisionStatus(
+            "READY", True, 10.0, 0, 0, 1, 1, 1, 0, 1,
+            None, None, None, None, None, True, True,
+        ),
+        recent_events=lambda: [],
+    )
+    app = create_app(
+        app_config=config,
+        camera_service=camera,  # type: ignore[arg-type]
+        vision_service=vision,  # type: ignore[arg-type]
+        start_camera=False,
+        start_vision=False,
+        temperature_reader=lambda: 45.0,
+    )
+    app.config.update(TESTING=True)
+
+    response = app.test_client().get("/classifier-files/relative-event")
+    assert response.status_code == 200 and response.content_type == "image/jpeg"
+
+
 def test_classifier_config_rejects_frame_outside_first_two(tmp_path: Path) -> None:
     path = write_test_config(tmp_path, classifier__event_frame_number=3)
     with pytest.raises(ConfigError, match="event_frame_number must be 1 or 2"):

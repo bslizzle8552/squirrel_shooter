@@ -271,8 +271,12 @@ class ClassifierEvidenceStore:
         return payload
 
     def input_path(self, item_id: str) -> Path:
-        path = self._record_path(item_id).parent / CLASSIFIER_INPUT_FILENAME
-        if not path.is_file():
+        events_root = self.events_root.resolve()
+        try:
+            path = (self._record_path(item_id).parent / CLASSIFIER_INPUT_FILENAME).resolve(strict=True)
+        except OSError as exc:
+            raise KeyError(item_id) from exc
+        if not path.is_file() or not path.is_relative_to(events_root):
             raise KeyError(item_id)
         return path
 
