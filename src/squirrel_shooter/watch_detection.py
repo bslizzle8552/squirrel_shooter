@@ -371,7 +371,9 @@ class MotionWatcherDetector:
         if self.config.close_iterations:
             cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=self.config.close_iterations)
         zone_mask = self._zone_mask(cleaned.shape)
-        measurement = self._measure_global(reduced, raw, cleaned, zone_mask)
+        analysis_raw = cv2.bitwise_and(raw, zone_mask)
+        analysis_cleaned = cv2.bitwise_and(cleaned, zone_mask)
+        measurement = self._measure_global(reduced, analysis_raw, analysis_cleaned, zone_mask)
         self._frame_count += 1
 
         if not self.config.enabled:
@@ -389,13 +391,22 @@ class MotionWatcherDetector:
         else:
             state = WatchState.READY
 
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(analysis_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if state is not WatchState.READY:
-            return WatchDetectionResult(state, (), raw, cleaned, zone_mask, measurement, len(contours), self._processing_fps)
+            return WatchDetectionResult(
+                state,
+                (),
+                analysis_raw,
+                analysis_cleaned,
+                zone_mask,
+                measurement,
+                len(contours),
+                self._processing_fps,
+            )
 
         inverse = 1.0 / scale
         components: list[MotionComponent] = []
-        zone_foreground = cv2.bitwise_and(cleaned, zone_mask)
+        zone_foreground = analysis_cleaned
         for contour in contours:
             area = float(cv2.contourArea(contour))
             if area < self.config.min_blob_area or area > self.config.max_blob_area:
@@ -436,7 +447,16 @@ class MotionWatcherDetector:
         boundary = cv2.subtract(full_zone, cv2.erode(full_zone, np.ones((5, 5), dtype=np.uint8)))
         groups = [replace(group, touched_zone_boundary=self._box_touches_mask(group.bounding_box, boundary)) for group in groups]
         tracked = self._update_tracks(groups, current, frame.shape[:2])
-        return WatchDetectionResult(state, tuple(tracked), raw, cleaned, zone_mask, measurement, len(contours), self._processing_fps)
+        return WatchDetectionResult(
+            state,
+            tuple(tracked),
+            analysis_raw,
+            analysis_cleaned,
+            zone_mask,
+            measurement,
+            len(contours),
+            self._processing_fps,
+        )
 
     def _zone_mask(self, shape: tuple[int, int]) -> np.ndarray:
         height, width = shape

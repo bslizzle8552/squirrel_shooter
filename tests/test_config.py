@@ -30,6 +30,8 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.night_mode.enter_consecutive_frames == 5
     assert config.night_mode.exit_consecutive_frames == 10
     assert config.motion.min_blob_area == 500
+    assert config.motion.inclusion_zone.enabled is True
+    assert config.motion.inclusion_zone.polygon[:2] == ((0.0, 0.26), (1.0, 0.26))
     assert config.motion.persistence.frames == 5
     assert config.motion.candidate_filter.require_coherent_small_motion is True
 

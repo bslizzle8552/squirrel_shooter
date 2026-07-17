@@ -367,24 +367,27 @@ depth, completed count, last inference time, and last error. If motion processin
 rate drops materially or the queue fills, set `classifier.enabled: false`; the
 motion/event system continues unchanged.
 
-### Inclusion-zone polygon
+### Inclusion-zone polygon and sky mask
 
-The default zone is the whole frame. To use a garden polygon, set `enabled: true`
-and replace the normalized points in clockwise or counterclockwise order:
+The current default removes the sky above 26% of the image, matching a cutoff
+near row 187 in the 720p camera view. Foreground pixels outside this polygon are
+removed before global-motion measurements and object contours, so clouds cannot
+create candidates or inflate the displayed motion percentage:
 
 ```yaml
 motion:
   inclusion_zone:
     enabled: true
     polygon:
-      - [0.10, 0.20]
-      - [0.90, 0.20]
-      - [0.82, 0.92]
-      - [0.18, 0.92]
+      - [0.0, 0.26]
+      - [1.0, 0.26]
+      - [1.0, 1.0]
+      - [0.0, 1.0]
 ```
 
 `[0.0, 0.0]` is top-left and `[1.0, 1.0]` is bottom-right. Keep at least three
-points, all between 0 and 1.
+points, all between 0 and 1. The live feed remains uncropped and outlines the
+active detection zone, making the boundary visible while tuning it.
 
 ### Fragment grouping
 

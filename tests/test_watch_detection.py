@@ -45,6 +45,11 @@ def watch_config(tmp_path: Path, *, global_enabled: bool = False, persistence_fr
         persistence=replace(config.persistence, frames=persistence_frames, cooldown_seconds=2.0, max_centroid_distance_pixels=40),
         grouping=replace(config.grouping, max_horizontal_gap_pixels=20, max_vertical_gap_pixels=20, expanded_box_margin_pixels=8, max_centroid_distance_pixels=35),
         global_rejection=replace(config.global_rejection, enabled=global_enabled, max_frame_motion_percent=35, max_zone_motion_percent=45, recovery_seconds=1),
+        inclusion_zone=replace(
+            config.inclusion_zone,
+            enabled=False,
+            polygon=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+        ),
     )
 
 
@@ -137,7 +142,30 @@ def test_inclusion_zone_rejects_outside_motion(tmp_path: Path) -> None:
     detector = MotionWatcherDetector(replace(config, inclusion_zone=zone), subtractor=MaskSubtractor([box_mask(), box_mask((5, 30, 15, 15))]))
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     detector.process(frame, now=0)
-    assert detector.process(frame, now=0.1).groups == ()
+    result = detector.process(frame, now=0.1)
+    assert result.groups == ()
+    assert result.global_motion.raw_foreground_percent == 0.0
+    assert result.global_motion.cleaned_foreground_percent == 0.0
+
+
+def test_inclusion_zone_keeps_motion_below_sky_cutoff(tmp_path: Path) -> None:
+    config = watch_config(tmp_path, persistence_frames=1)
+    zone = replace(
+        config.inclusion_zone,
+        enabled=True,
+        polygon=((0.0, 0.26), (1.0, 0.26), (1.0, 1.0), (0.0, 1.0)),
+    )
+    detector = MotionWatcherDetector(
+        replace(config, inclusion_zone=zone),
+        subtractor=MaskSubtractor([box_mask(), box_mask((40, 40, 15, 15))]),
+    )
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    detector.process(frame, now=0)
+    result = detector.process(frame, now=0.1)
+
+    assert len(result.groups) == 1
+    assert result.groups[0].bounding_box == (40, 40, 15, 15)
 
 
 def test_large_lighting_change_and_scene_obstruction_are_rejected(tmp_path: Path) -> None:

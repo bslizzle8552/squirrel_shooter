@@ -75,13 +75,13 @@ motion:
     seconds: 12.0
     minimum_frames: 60
 
-  # Normalized x/y points.  This full-frame polygon is the default.  Replace
-  # the points with the corners of the useful garden area, in order.
+  # Ignore the sky above 26% of the frame. This matches the visible tree-line
+  # cutoff near y=187 on the current 1280x720 camera view.
   inclusion_zone:
-    enabled: false
+    enabled: true
     polygon:
-      - [0.0, 0.0]
-      - [1.0, 0.0]
+      - [0.0, 0.26]
+      - [1.0, 0.26]
       - [1.0, 1.0]
       - [0.0, 1.0]
 
