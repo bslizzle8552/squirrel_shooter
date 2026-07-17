@@ -275,6 +275,9 @@ def test_motion_submits_only_configured_event_frame_once(tmp_path: Path, configu
         def __init__(self) -> None:
             self.calls: list[tuple[str, int]] = []
 
+        def set_paused(self, _paused: bool) -> None:
+            return None
+
         def submit(self, event_id: str, _directory: Path, frame_number: int, _frame: np.ndarray, _box: tuple[int, int, int, int]) -> bool:
             self.calls.append((event_id, frame_number))
             return True
@@ -316,6 +319,24 @@ def test_motion_submits_only_configured_event_frame_once(tmp_path: Path, configu
     motion._handle_events(packet, SimpleNamespace(groups=(later,)), frame, 1.2, 10.0)  # type: ignore[arg-type]
 
     assert classifier.calls == [("event-one", configured_frame)]
+
+
+def test_classifier_rejects_new_work_while_night_mode_is_paused(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    classifier = EventClassifier(config.classifier, ClassifierEvidenceStore(config))
+    classifier.set_paused(True)
+
+    queued = classifier.submit(
+        "night-event",
+        tmp_path / "captures" / "events" / "night-event",
+        1,
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        (20, 20, 30, 20),
+    )
+
+    assert queued is False
+    assert classifier.status().paused is True
+    assert classifier.status().queue_depth == 0
 
 
 def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp_path: Path) -> None:

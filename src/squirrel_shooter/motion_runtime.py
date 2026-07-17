@@ -50,6 +50,8 @@ class MotionRuntimeStatus:
     capture_directory_writable: bool
     current_groups: tuple[dict[str, Any], ...]
     last_event_summary: dict[str, Any] | None
+    night_mode_paused: bool = False
+    night_mode_evidence: str | None = None
 
 
 class MotionProcessingService:
@@ -95,6 +97,14 @@ class MotionProcessingService:
         self._last_error: str | None = None
         self._current_groups: tuple[dict[str, Any], ...] = ()
         self._last_event_summary: dict[str, Any] | None = None
+        explicit_ir = config.camera.ir_mode_if_explicitly_detected_or_configured.strip().lower()
+        self._night_mode_paused = bool(
+            config.night_mode.pause_recording_and_classifier
+            and explicit_ir in {"night", "night_vision", "ir", "infrared", "on", "enabled", "true"}
+        )
+        self._night_mode_evidence: str | None = "explicit_camera_setting" if self._night_mode_paused else None
+        self._night_mono_frames = 0
+        self._night_color_frames = 0
         self._latest_frame: np.ndarray | None = None
         self._latest_annotated: np.ndarray | None = None
         self._latest_result: WatchDetectionResult | None = None
@@ -123,6 +133,7 @@ class MotionProcessingService:
             "ir_mode_if_explicitly_detected_or_configured": config.camera.ir_mode_if_explicitly_detected_or_configured,
             "low_fps_observed": False,
         }
+        self.classifier.set_paused(self._night_mode_paused)
 
     def start(self) -> None:
         """Start consuming frames; this method never starts or opens the camera."""
@@ -180,6 +191,8 @@ class MotionProcessingService:
                 self.config.camera.output_directory.exists(),
                 self._current_groups,
                 None if self._last_event_summary is None else dict(self._last_event_summary),
+                self._night_mode_paused,
+                self._night_mode_evidence,
             )
 
     def status_dict(self) -> dict[str, Any]:
@@ -204,7 +217,7 @@ class MotionProcessingService:
         """Queue a local test event; no dashboard route exposes this method."""
 
         with self._condition:
-            if not self._current_groups:
+            if self._night_mode_paused or not self._current_groups:
                 return False
             self._force_event_requested = True
             return True
@@ -303,15 +316,19 @@ class MotionProcessingService:
             self._session.sample_fps(measured_fps)
         result = self.detector.process(packet.frame, now=now)
         annotated = annotate_watch_frame(packet.frame, result, measured_fps=measured_fps)
-        self._handle_rejection(result, measured_fps)
-        self._handle_events(packet, result, annotated, now, measured_fps)
-        live_annotated = self._add_live_box_holds(annotated, result.groups, now)
+        self._update_night_mode(result, now)
+        if not self._night_mode_paused:
+            self._handle_rejection(result, measured_fps)
+            self._handle_events(packet, result, annotated, now, measured_fps)
+            live_annotated = self._add_live_box_holds(annotated, result.groups, now)
+            self._prebuffer.append(now, annotated)
+        else:
+            live_annotated = self._annotate_night_pause(annotated)
         self.camera.publish_annotated(packet.sequence, live_annotated)
-        self._prebuffer.append(now, annotated)
         now_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
         groups = tuple(group.as_dict() for group in result.groups)
         with self._condition:
-            self._state = result.state.value
+            self._state = "NIGHT_PAUSED" if self._night_mode_paused else result.state.value
             self._processing_fps = result.measured_processing_fps
             self._blob_count = len(result.groups)
             self._persistence_count = max((group.persistence_count for group in result.groups), default=0)
@@ -332,6 +349,72 @@ class MotionProcessingService:
             if monotonic() - self._last_session_save >= 10.0:
                 self._session.save()
                 self._last_session_save = monotonic()
+
+    def _update_night_mode(self, result: WatchDetectionResult, now: float) -> None:
+        settings = self.config.night_mode
+        if not settings.pause_recording_and_classifier:
+            return
+        monochrome = result.global_motion.colorfulness <= settings.monochrome_colorfulness_threshold
+        if monochrome:
+            self._night_mono_frames += 1
+            self._night_color_frames = 0
+        else:
+            self._night_color_frames += 1
+            self._night_mono_frames = 0
+
+        transition_to_mono = (
+            result.global_motion.reason == "probable_ir_mode_switch" and monochrome
+        )
+        should_pause = transition_to_mono or self._night_mono_frames >= settings.enter_consecutive_frames
+        if not self._night_mode_paused and should_pause:
+            self._night_mode_paused = True
+            self._night_mode_evidence = (
+                "probable_ir_mode_switch" if transition_to_mono else "sustained_monochrome_frames"
+            )
+            self.classifier.set_paused(True)
+            self._prebuffer.clear()
+            self._live_group_holds.clear()
+            completed: list[dict[str, Any]] = []
+            if self._recorder is not None:
+                completed = self._recorder.finish_all(now=now, notes="night vision pause")
+            for record in completed:
+                self._record_completed_event(record)
+            self._classifier_event_frames.clear()
+            self._classifier_submitted.clear()
+            with self._condition:
+                self._active_events = 0
+                self._force_event_requested = False
+            LOGGER.info(
+                "Night vision detected; event recording and classifier paused",
+                extra={"structured_data": {"event": "night_mode_paused", "evidence": self._night_mode_evidence}},
+            )
+        elif self._night_mode_paused and self._night_color_frames >= settings.exit_consecutive_frames:
+            self._night_mode_paused = False
+            self._night_mode_evidence = "sustained_color_return"
+            self.classifier.set_paused(False)
+            self._prebuffer.clear()
+            self._live_group_holds.clear()
+            LOGGER.info(
+                "Day color returned; event recording and classifier resumed",
+                extra={"structured_data": {"event": "night_mode_resumed"}},
+            )
+
+    @staticmethod
+    def _annotate_night_pause(annotated: np.ndarray) -> np.ndarray:
+        output = annotated.copy()
+        message = "NIGHT VISION - RECORDING AND CLASSIFIER PAUSED"
+        cv2.rectangle(output, (0, 0), (output.shape[1], 42), (12, 12, 12), -1)
+        cv2.putText(
+            output,
+            message,
+            (12, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (80, 210, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        return output
 
     def _add_live_box_holds(
         self,
@@ -397,7 +480,7 @@ class MotionProcessingService:
             self._last_rejection = None
 
     def _handle_events(self, packet: FramePacket, result: WatchDetectionResult, annotated: np.ndarray, now: float, measured_fps: float) -> None:
-        if self._recorder is None:
+        if self._night_mode_paused or self._recorder is None:
             return
         groups_by_track = {group.track_id: group for group in result.groups}
         with self._condition:
@@ -460,6 +543,8 @@ class MotionProcessingService:
         group: Any,
         frame: np.ndarray,
     ) -> None:
+        if self._night_mode_paused:
+            return
         track_id = int(group.track_id)
         frame_number = self._classifier_event_frames.get(track_id, 0)
         if track_id in self._classifier_submitted or frame_number != self.config.classifier.event_frame_number:

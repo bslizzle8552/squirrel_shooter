@@ -145,7 +145,7 @@ port forwarding, a public reverse proxy, or public DNS for this dashboard.
 
 Useful routes are:
 
-- `/` - compact live feed, four essential readings, and the five newest events;
+- `/` - compact live feed, four essential readings, and five newest events that refresh automatically;
 - `/events` - live paginated archive of all saved event pictures and clips;
 - `/classifier-review` - needs-review, unknown, known, error, and false-positive event views;
 - `/captures` - standalone and manual picture archive;
@@ -247,7 +247,21 @@ dashboard:
   stream_fps: 8.0
   jpeg_quality: 82
   status_refresh_interval_seconds: 3.0
+
+night_mode:
+  pause_recording_and_classifier: true
+  monochrome_colorfulness_threshold: 8.0
+  enter_consecutive_frames: 5
+  exit_consecutive_frames: 10
 ```
+
+The live feed stays available in `NIGHT_PAUSED`, but new clips, snapshots, and
+classifier submissions stop. An active clip is closed immediately. A detected
+infrared transition pauses at once; sustained monochrome frames also cover a
+process that starts after dark. Recording resumes only after sustained color
+returns, and the pre-event buffer is cleared at both transitions so night frames
+cannot be attached to a daytime event. These thresholds are visual evidence,
+not an FPS inference.
 
 The dashboard stream is capped below the currently observed camera rate to leave
 CPU time for detection and event recording. Change `host` or `port` in YAML, or

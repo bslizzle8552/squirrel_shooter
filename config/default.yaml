@@ -32,6 +32,14 @@ dashboard:
   jpeg_quality: 82
   status_refresh_interval_seconds: 3.0
 
+# Pause evidence recording and classifier CPU work while the camera is producing
+# sustained monochrome night-vision frames. The live feed remains available.
+night_mode:
+  pause_recording_and_classifier: true
+  monochrome_colorfulness_threshold: 8.0
+  enter_consecutive_frames: 5
+  exit_consecutive_frames: 10
+
 # One asynchronous classification of frame 1 from each confirmed event. The
 # pinned MobileNet-SSD model is installed separately with classifier_setup.
 classifier:

@@ -131,6 +131,8 @@ class GlobalMotionMeasurement:
     reason: str | None = None
     luminance_delta: float = 0.0
     colorfulness_delta: float = 0.0
+    luminance: float = 0.0
+    colorfulness: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {name: round(value, 3) if isinstance(value, float) else value for name, value in self.__dict__.items()}
@@ -483,7 +485,18 @@ class MotionWatcherDetector:
                 reason = "excessive_frame_motion"
             else:
                 reason = "global_motion_unclassified"
-        return GlobalMotionMeasurement(raw_percent, cleaned_percent, candidate_percent, zone_percent, len(contours), reason, luminance_delta, color_delta)
+        return GlobalMotionMeasurement(
+            raw_percent,
+            cleaned_percent,
+            candidate_percent,
+            zone_percent,
+            len(contours),
+            reason,
+            luminance_delta,
+            color_delta,
+            luminance,
+            colorfulness,
+        )
 
     @staticmethod
     def _box_touches_mask(box: tuple[int, int, int, int], mask: np.ndarray) -> bool:

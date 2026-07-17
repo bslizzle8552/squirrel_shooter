@@ -114,6 +114,92 @@ def test_live_stream_holds_last_seen_box_during_tracker_gap(tmp_path: Path) -> N
     assert not expired[20, 20].any()
 
 
+def test_night_mode_finishes_active_clip_and_pauses_until_color_returns(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+
+    class Classifier:
+        def __init__(self) -> None:
+            self.pause_states: list[bool] = []
+
+        def set_paused(self, paused: bool) -> None:
+            self.pause_states.append(paused)
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.active = {7: SimpleNamespace(event_id="day-event")}
+            self.finished = 0
+            self.begin_calls = 0
+
+        def finish_all(self, *, now: float, notes: str) -> list[dict[str, object]]:
+            del now
+            self.finished += 1
+            self.active.clear()
+            return [{"event_id": "day-event", "end_timestamp": "now", "notes": notes}]
+
+        def begin(self, *_args: object, **_kwargs: object) -> object:
+            self.begin_calls += 1
+            raise AssertionError("night mode must not begin an event")
+
+    classifier = Classifier()
+    recorder = Recorder()
+    motion = MotionProcessingService(
+        SimpleNamespace(),
+        config,
+        classifier_service=classifier,  # type: ignore[arg-type]
+    )
+    motion._recorder = recorder  # type: ignore[assignment]
+    motion._active_events = 1
+    motion._prebuffer.append(0.0, np.zeros((20, 20, 3), dtype=np.uint8))
+    night_result = SimpleNamespace(
+        global_motion=SimpleNamespace(reason="probable_ir_mode_switch", colorfulness=0.0),
+        groups=(SimpleNamespace(track_id=9),),
+    )
+
+    motion._update_night_mode(night_result, 1.0)  # type: ignore[arg-type]
+    motion._handle_events(SimpleNamespace(), night_result, np.zeros((20, 20, 3), dtype=np.uint8), 1.0, 10.0)  # type: ignore[arg-type]
+
+    assert motion._night_mode_paused is True
+    assert motion._night_mode_evidence == "probable_ir_mode_switch"
+    assert classifier.pause_states == [False, True]
+    assert recorder.finished == 1 and recorder.begin_calls == 0
+    assert motion._active_events == 0 and len(motion._prebuffer) == 0
+    assert motion.recent_events()[0]["notes"] == "night vision pause"
+
+    day_result = SimpleNamespace(global_motion=SimpleNamespace(reason=None, colorfulness=20.0), groups=())
+    for index in range(config.night_mode.exit_consecutive_frames):
+        motion._update_night_mode(day_result, 2.0 + index)  # type: ignore[arg-type]
+
+    assert motion._night_mode_paused is False
+    assert motion._night_mode_evidence == "sustained_color_return"
+    assert classifier.pause_states[-1] is False
+
+
+def test_sustained_monochrome_frames_pause_a_process_started_after_dark(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+
+    class Classifier:
+        def __init__(self) -> None:
+            self.paused = False
+
+        def set_paused(self, paused: bool) -> None:
+            self.paused = paused
+
+    classifier = Classifier()
+    motion = MotionProcessingService(
+        SimpleNamespace(),
+        config,
+        classifier_service=classifier,  # type: ignore[arg-type]
+    )
+    mono_result = SimpleNamespace(global_motion=SimpleNamespace(reason=None, colorfulness=0.0))
+
+    for index in range(config.night_mode.enter_consecutive_frames):
+        motion._update_night_mode(mono_result, float(index))  # type: ignore[arg-type]
+
+    assert motion._night_mode_paused is True
+    assert motion._night_mode_evidence == "sustained_monochrome_frames"
+    assert classifier.paused is True
+
+
 def test_camera_failure_is_reported_and_reconnects_safely(tmp_path: Path) -> None:
     opens = 0
     released = threading.Event()

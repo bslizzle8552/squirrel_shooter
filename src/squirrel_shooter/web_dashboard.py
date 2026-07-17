@@ -430,6 +430,11 @@ def create_app(
     @app.get("/api/events")
     def api_recent_events() -> Any:
         events = _dashboard_events(vision.recent_events(), app_config)
+        for event in events:
+            snapshot = event.get("snapshot_path_relative")
+            clip = event.get("clip_path_relative")
+            event["snapshot_url"] = url_for("output_file", relative_path=snapshot) if snapshot else None
+            event["clip_url"] = url_for("output_file", relative_path=clip) if clip else None
         return jsonify(events=events, count=len(events))
 
     @app.errorhandler(Exception)

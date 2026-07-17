@@ -70,6 +70,9 @@ class RollingFrameBuffer:
     def frames(self) -> list[tuple[float, np.ndarray]]:
         return list(self._frames)
 
+    def clear(self) -> None:
+        self._frames.clear()
+
     def __len__(self) -> int:
         return len(self._frames)
 

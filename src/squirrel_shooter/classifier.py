@@ -73,6 +73,8 @@ class ClassifierStatus:
     last_error: str | None
     unknown: int = 0
     errors: int = 0
+    paused: bool = False
+    skipped_while_paused: int = 0
 
 
 class MobileNetSSDDetector:
@@ -412,6 +414,8 @@ class EventClassifier:
         self._queued_for_review = 0
         self._unknown = 0
         self._errors = 0
+        self._paused = False
+        self._skipped_while_paused = 0
         self._last_latency_ms: float | None = None
         self._last_error: str | None = None
 
@@ -429,6 +433,12 @@ class EventClassifier:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)
 
+    def set_paused(self, paused: bool) -> None:
+        """Pause CPU-heavy inference without stopping the worker lifecycle."""
+
+        with self._lock:
+            self._paused = paused
+
     def submit(
         self,
         event_id: str,
@@ -437,7 +447,9 @@ class EventClassifier:
         frame: np.ndarray,
         source_bounding_box: tuple[int, int, int, int],
     ) -> bool:
-        if not self.config.enabled:
+        with self._lock:
+            paused = self._paused
+        if not self.config.enabled or paused:
             return False
         crop, crop_box = _candidate_crop(frame, source_bounding_box, self.config.crop_margin_percent)
         task = ClassifierTask(
@@ -452,7 +464,9 @@ class EventClassifier:
         return self._enqueue(task)
 
     def retry(self, item_id: str) -> bool:
-        if not self.config.enabled:
+        with self._lock:
+            paused = self._paused
+        if not self.config.enabled or paused:
             return False
         record = self.store.get_record(item_id)
         if record.get("classification_status") != "unclassified":
@@ -502,6 +516,8 @@ class EventClassifier:
                 self._last_error,
                 self._unknown,
                 self._errors,
+                self._paused,
+                self._skipped_while_paused,
             )
 
     def _run(self) -> None:
@@ -513,6 +529,15 @@ class EventClassifier:
             except queue.Empty:
                 continue
             try:
+                while True:
+                    with self._lock:
+                        paused = self._paused
+                    if not paused or self._stop_event.wait(0.2):
+                        break
+                if paused and self._stop_event.is_set():
+                    with self._lock:
+                        self._skipped_while_paused += 1
+                    continue
                 if detector is None:
                     try:
                         detector = self._detector_factory()

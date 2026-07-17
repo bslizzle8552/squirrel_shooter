@@ -175,7 +175,10 @@ def test_ir_cut_visual_transition_requires_image_evidence(tmp_path: Path) -> Non
     color[:, :, 2] = 180
     mono = np.full((100, 100, 3), 100, dtype=np.uint8)
     detector.process(color, now=0)
-    assert detector.process(mono, now=0.1).global_motion.reason == "probable_ir_mode_switch"
+    measurement = detector.process(mono, now=0.1).global_motion
+    assert measurement.reason == "probable_ir_mode_switch"
+    assert measurement.colorfulness == 0.0
+    assert measurement.luminance == 100.0
 
 
 def test_low_fps_alone_never_implies_ir_and_other_fps_work(tmp_path: Path) -> None:

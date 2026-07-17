@@ -254,6 +254,10 @@ def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) ->
     assert "All event pictures and videos" in body and "Standalone pictures" in body
     api_events = app.test_client().get("/api/events").json["events"]
     assert api_events[0]["display_label"] == "Car" and api_events[1]["display_label"] == "Unknown"
+    assert api_events[0]["snapshot_url"].endswith("/snapshot.jpg")
+    assert api_events[0]["clip_url"].endswith("/clip.avi")
+    assert 'id="recent-events-content"' in body
+    assert "refreshRecentEvents" in body and ".slice(0, 5)" in body
 
 
 def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> None:

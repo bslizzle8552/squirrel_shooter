@@ -56,6 +56,14 @@ class DashboardConfig:
 
 
 @dataclass(frozen=True)
+class NightModeConfig:
+    pause_recording_and_classifier: bool
+    monochrome_colorfulness_threshold: float
+    enter_consecutive_frames: int
+    exit_consecutive_frames: int
+
+
+@dataclass(frozen=True)
 class ClassifierConfig:
     enabled: bool
     model_definition: Path
@@ -242,6 +250,7 @@ class AppConfig:
     shared_camera: SharedCameraConfig
     runtime: RuntimeConfig
     dashboard: DashboardConfig
+    night_mode: NightModeConfig
     classifier: ClassifierConfig
     motion: MotionConfig
     storage: StorageConfig
@@ -351,6 +360,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     shared_camera = _mapping(raw, "shared_camera")
     runtime = _mapping(raw, "runtime")
     dashboard = _mapping(raw, "dashboard")
+    night_mode = _mapping(raw, "night_mode")
     classifier = _mapping(raw, "classifier")
     roi = _mapping(motion, "roi")
     debug = _mapping(motion, "debug_outputs")
@@ -546,6 +556,27 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _number(dashboard.get("stream_fps"), "dashboard.stream_fps", exclusive=True),
             dashboard_quality,
             _number(dashboard.get("status_refresh_interval_seconds"), "dashboard.status_refresh_interval_seconds", exclusive=True),
+        ),
+        night_mode=NightModeConfig(
+            _bool(
+                night_mode.get("pause_recording_and_classifier"),
+                "night_mode.pause_recording_and_classifier",
+            ),
+            _number(
+                night_mode.get("monochrome_colorfulness_threshold"),
+                "night_mode.monochrome_colorfulness_threshold",
+                exclusive=True,
+            ),
+            _int(
+                night_mode.get("enter_consecutive_frames"),
+                "night_mode.enter_consecutive_frames",
+                minimum=1,
+            ),
+            _int(
+                night_mode.get("exit_consecutive_frames"),
+                "night_mode.exit_consecutive_frames",
+                minimum=1,
+            ),
         ),
         classifier=ClassifierConfig(
             _bool(classifier.get("enabled"), "classifier.enabled"),
