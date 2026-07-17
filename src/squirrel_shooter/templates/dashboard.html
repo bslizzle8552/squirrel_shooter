@@ -2,11 +2,18 @@
 
 {% block content %}
   <section class="hero dashboard-hero">
-    <img class="hero-art" src="{{ url_for('static', filename='squirrel-squirter-logo.png') }}" alt="The Squirrel Squirter artwork">
-    <div class="hero-copy">
-      <p class="eyebrow">Private shared-camera monitor</p>
-      <h1>Squirrel Squirter</h1>
-      <p class="subtitle">Motion-triggered garden evidence from one shared camera. No physical outputs.</p>
+    <div class="hero-identity">
+      <img class="hero-art" src="{{ url_for('static', filename='squirrel-squirter-logo.png') }}" alt="The Squirrel Squirter artwork">
+      <div class="hero-copy">
+        <p class="eyebrow">Private shared-camera monitor</p>
+        <h1>Squirrel Squirter</h1>
+        <p class="subtitle">Motion-triggered garden evidence from one shared camera. No physical outputs.</p>
+      </div>
+    </div>
+    <div class="hero-actions" aria-label="Primary dashboard actions">
+      <a class="action-button primary" href="{{ url_for('events') }}">Review events</a>
+      <a class="action-button" href="{{ url_for('classifier_review') }}">Label objects</a>
+      <a class="action-button subtle" href="{{ url_for('captures') }}">Browse pictures</a>
     </div>
   </section>
 
@@ -38,7 +45,7 @@
   <section class="panel gallery-panel recent-events-panel">
     <div class="section-heading">
       <div><p class="eyebrow">Motion event review</p><h2>Five most recent clips</h2><p>Each grouped event stores one snapshot and one video clip. All older evidence remains recorded.</p></div>
-      <div class="archive-links"><a class="text-link" href="{{ url_for('events') }}">All event pictures and videos</a><a class="text-link" href="{{ url_for('classifier_review') }}">Object review and unknowns</a><a class="text-link" href="{{ url_for('captures') }}">Standalone pictures</a></div>
+      <div class="archive-links" aria-label="Event archive shortcuts"><a class="button ghost" href="{{ url_for('events') }}">All event pictures and videos</a><a class="button ghost" href="{{ url_for('classifier_review') }}">Object review and unknowns</a><a class="button ghost" href="{{ url_for('captures') }}">Standalone pictures</a></div>
     </div>
     <div id="recent-events-content" aria-live="polite">
     {% if events %}

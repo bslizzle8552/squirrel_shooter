@@ -3,18 +3,19 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#18241d">
+    <meta name="theme-color" content="#f4efe4">
     <title>{% block title %}Squirrel Squirter{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
     <header class="site-header">
       <div class="shell header-inner">
-        <a class="brand" href="{{ url_for('dashboard') }}" aria-label="Squirrel Squirter dashboard"><span class="brand-mark" aria-hidden="true">SS</span><span>Squirrel Squirter</span></a>
-        <nav aria-label="Main navigation"><a href="{{ url_for('dashboard') }}">Live camera</a><a href="{{ url_for('events') }}">Events</a><a href="{{ url_for('classifier_review') }}">Object review</a><a href="{{ url_for('captures') }}">Pictures</a></nav>
+        <a class="brand" href="{{ url_for('dashboard') }}" aria-label="Squirrel Squirter dashboard"><span class="brand-mark" aria-hidden="true">SS</span><span class="brand-text">Squirrel Squirter</span></a>
+        <nav class="main-nav" aria-label="Main navigation"><a class="nav-link" href="{{ url_for('dashboard') }}">Live camera</a><a class="nav-link" href="{{ url_for('events') }}">Events</a><a class="nav-link" href="{{ url_for('classifier_review') }}">Object review</a><a class="nav-link" href="{{ url_for('captures') }}">Pictures</a></nav>
       </div>
     </header>
-    <main class="shell">{% block content %}{% endblock %}</main>
+    <main class="shell page-shell" id="main-content">{% block content %}{% endblock %}</main>
     <footer class="shell site-footer">Private local dashboard &middot; Keep access inside your Tailnet</footer>
     {% block scripts %}{% endblock %}
   </body>
