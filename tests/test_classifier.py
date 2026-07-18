@@ -406,6 +406,74 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     assert b"unknown-event" in false_positive_page and b"False Positive" in false_positive_page
 
 
+def test_classifier_review_json_api_lists_items_and_accepts_decisions(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    store.save_classification(
+        task(tmp_path, "review-event"),
+        [ClassifierDetection("person", 0.4, (1, 1, 10, 10))],
+        100.0,
+        "test-model",
+    )
+    store.save_classification(task(tmp_path, "unknown-event"), [], 100.0, "test-model")
+
+    camera = SimpleNamespace(
+        start=lambda: None,
+        status=lambda: CameraStatus(False, 1280, 720, 0.0, "offline"),
+    )
+    vision = SimpleNamespace(
+        start=lambda: None,
+        status=lambda: VisionStatus(
+            "READY", True, 10.0, 0, 0, 1, 1, 1, 0, 1,
+            None, None, None, None, None, True, True,
+        ),
+        recent_events=lambda: [],
+    )
+    app = create_app(
+        app_config=config,
+        camera_service=camera,  # type: ignore[arg-type]
+        vision_service=vision,  # type: ignore[arg-type]
+        start_camera=False,
+        start_vision=False,
+        temperature_reader=lambda: 45.0,
+    )
+    app.config.update(TESTING=True)
+    client = app.test_client()
+
+    listing = client.get("/api/classifier-review?state=review")
+    assert listing.status_code == 200
+    payload = listing.json
+    assert payload["state"] == "review"
+    assert payload["counts"]["review"] == 1
+    assert payload["counts"]["unknown"] == 1
+    item = payload["items"][0]
+    assert item["item_id"] == "review-event"
+    assert item["event_id"] == "review-event"
+    assert item["image_url"].endswith("/classifier-files/review-event")
+    assert item["top_label"] == "person"
+
+    assert client.get("/api/classifier-review?state=bogus").status_code == 404
+
+    page = client.get("/")
+    assert b'id="queue-list"' in page.data and b"review-event" in page.data
+    token_match = re.search(rb'reviewToken: "([^"]+)"', page.data)
+    assert token_match is not None
+    token = token_match.group(1).decode()
+
+    decided = client.post(
+        "/classifier-review/review-event/approve",
+        data={"review_token": token, "approval_label": "car", "format": "json"},
+    )
+    assert decided.status_code == 200
+    assert decided.json["ok"] is True
+    assert decided.json["classification_status"] == "known"
+    assert decided.json["display_label"] == "Car"
+
+    updated = client.get("/api/classifier-review?state=review").json
+    assert updated["counts"]["review"] == 0
+    assert updated["counts"]["known"] == 1
+
+
 def test_classifier_image_route_resolves_pi_style_relative_capture_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1,0 +1,9 @@
+{
+  "name": "squirrel-squirter",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Garden mission control preview for the Squirrel Squirter motion watcher dashboard",
+  "scripts": {
+    "dev": ".venv\\Scripts\\python scripts\\preview_dashboard.py"
+  }
+}

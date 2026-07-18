@@ -8,6 +8,10 @@
       <p class="eyebrow">Saved locally</p>
       <h1>Camera captures</h1>
       <p class="subtitle">Newest first · {{ total_captures }} supported image{{ '' if total_captures == 1 else 's' }}</p>
+      <div class="chip-row">
+        <span class="chip"><b>{{ total_captures }}</b> images</span>
+        <span class="chip">Page {{ page }} of {{ total_pages }}</span>
+      </div>
     </div>
     <div class="hero-actions"><a class="button" href="{{ url_for('dashboard') }}">Back to live camera</a></div>
   </section>

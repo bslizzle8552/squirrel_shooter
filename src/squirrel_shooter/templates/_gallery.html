@@ -2,11 +2,14 @@
   <div class="capture-grid" data-testid="capture-grid">
     {% for capture in captures %}
       <a class="capture-card" href="{{ url_for('capture_file', filename=capture.filename) }}" target="_blank" rel="noopener">
-        <img
-          src="{{ url_for('capture_file', filename=capture.filename) }}"
-          alt="Saved camera capture {{ capture.filename }}"
-          loading="lazy"
-        >
+        <span class="card-media">
+          <img
+            src="{{ url_for('capture_file', filename=capture.filename) }}"
+            alt="Saved camera capture {{ capture.filename }}"
+            loading="lazy"
+          >
+          <span class="card-actions"><span class="chip-action">Open full size</span></span>
+        </span>
         <span class="capture-details">
           <strong>{{ capture.filename }}</strong>
           <time>{{ capture.timestamp }}</time>

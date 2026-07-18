@@ -3,16 +3,27 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#f4efe4">
+    <meta name="theme-color" content="#15171b">
     <title>{% block title %}Squirrel Squirter{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
   </head>
   <body>
-    <a class="skip-link" href="#main-content">Skip to main content</a>
+    {% if demo_mode %}<div class="demo-ribbon" role="note">DEMO DATA</div>{% endif %}
     <header class="site-header">
       <div class="shell header-inner">
-        <a class="brand" href="{{ url_for('dashboard') }}" aria-label="Squirrel Squirter dashboard"><span class="brand-mark" aria-hidden="true">SS</span><span class="brand-text">Squirrel Squirter</span></a>
-        <nav class="main-nav" aria-label="Main navigation"><a class="nav-link" href="{{ url_for('dashboard') }}">Live camera</a><a class="nav-link" href="{{ url_for('events') }}">Events</a><a class="nav-link" href="{{ url_for('classifier_review') }}">Object review</a><a class="nav-link" href="{{ url_for('captures') }}">Pictures</a></nav>
+        <a class="brand" href="{{ url_for('dashboard') }}" aria-label="Squirrel Squirter dashboard">
+          <img class="brand-logo" src="{{ url_for('static', filename='squirrel-squirter-logo.png') }}" alt="">
+          <span class="brand-text">
+            <span class="brand-name">Squirrel Squirter</span>
+            <span class="brand-sub">Garden mission control</span>
+          </span>
+        </a>
+        <nav aria-label="Main navigation">
+          <a class="{{ 'active' if request.endpoint == 'dashboard' }}" href="{{ url_for('dashboard') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'dashboard' }}>Live camera</a>
+          <a class="{{ 'active' if request.endpoint == 'events' }}" href="{{ url_for('events') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'events' }}>Events</a>
+          <a class="{{ 'active' if request.endpoint == 'classifier_review' }}" href="{{ url_for('classifier_review') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'classifier_review' }}>Object review</a>
+          <a class="{{ 'active' if request.endpoint == 'captures' }}" href="{{ url_for('captures') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'captures' }}>Pictures</a>
+        </nav>
       </div>
     </header>
     <main class="shell page-shell" id="main-content">{% block content %}{% endblock %}</main>

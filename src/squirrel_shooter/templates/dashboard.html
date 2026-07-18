@@ -1,173 +1,272 @@
-{% extends "base.html" %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#15171b">
+    <title>Squirrel Squirter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='console.css') }}">
+  </head>
+  <body data-mode="observe">
+    {% if demo_mode %}<div class="demo-ribbon" role="note">DEMO DATA</div>{% endif %}
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-squirrel" viewBox="0 0 24 24"><path d="M7 20c-2.5 0-4-1.6-4-3.6 0-1.5 1-2.7 2.4-3.1C4.6 12.6 4 11.7 4 10.6 4 8.6 5.8 7 8 7c.4 0 .8 0 1.2.1C9.5 5.6 10.6 4.5 12 4.5c.6 0 1.1.1 1.6.4C14.2 3.4 15.7 2.5 17.5 2.5c2 0 3.5 1.2 3.5 3 0 1.3-.8 2.3-2 2.8.6.7 1 1.6 1 2.7 0 2.5-2.2 4.5-5 4.5-.6 0-1.1-.1-1.6-.3.5.6 1.1 1 1.6 1.3 1.1.7 1.5 1.6 1.5 2.5"/></symbol>
+      <symbol id="i-car" viewBox="0 0 24 24"><path d="M3 16v-4l2-5c.3-.8 1-1.5 2-1.5h10c1 0 1.7.7 2 1.5l2 5v4"/><path d="M3 16h18"/><circle cx="7.5" cy="16.5" r="1.8"/><circle cx="16.5" cy="16.5" r="1.8"/></symbol>
+      <symbol id="i-person" viewBox="0 0 24 24"><circle cx="12" cy="6.5" r="3"/><path d="M6.5 20c.6-3.8 2.8-6 5.5-6s4.9 2.2 5.5 6"/></symbol>
+      <symbol id="i-unknown" viewBox="0 0 24 24"><path d="M8.5 9a3.5 3.5 0 1 1 5.3 3c-1 .7-1.8 1.3-1.8 2.6"/><circle cx="12" cy="18" r=".6"/></symbol>
+      <symbol id="i-false" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M4.5 12.5l5 5 10-11"/></symbol>
+      <symbol id="i-clear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5 5l1.8 1.8M17.2 17.2L19 19M19 5l-1.8 1.8M6.8 17.2L5 19"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"/></symbol>
+      <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.7 2.2c-.9.6-1.3 1-1.3 2"/><circle cx="12" cy="16.5" r=".5"/></symbol>
+      <symbol id="i-clip" viewBox="0 0 24 24"><rect x="3.5" y="5" width="13" height="14" rx="1.5"/><path d="M16.5 10.5l4-2.5v8l-4-2.5"/></symbol>
+      <symbol id="i-live" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.4"/><path d="M7 7a7 7 0 0 0 0 10M17 7a7 7 0 0 1 0 10M4 4a11 11 0 0 0 0 16M20 4a11 11 0 0 1 0 16"/></symbol>
+      <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="1.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17.5l4.5-4 3.5 3 3.5-3.5 4.5 4.5"/></symbol>
+      <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
+      <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="M14.5 5.5L8 12l6.5 6.5"/></symbol>
+      <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9.5 5.5L16 12l-6.5 6.5"/></symbol>
+    </svg>
 
-{% block content %}
-  <section class="hero dashboard-hero">
-    <div class="hero-identity">
-      <img class="hero-art" src="{{ url_for('static', filename='squirrel-squirter-logo.png') }}" alt="The Squirrel Squirter artwork">
-      <div class="hero-copy">
-        <p class="eyebrow">Private shared-camera monitor</p>
-        <h1>Squirrel Squirter</h1>
-        <p class="subtitle">Motion-triggered garden evidence from one shared camera. No physical outputs.</p>
+    <header id="statusbar" class="statusbar">
+      <a class="brand" href="{{ url_for('dashboard') }}" title="Squirrel Squirter — garden evidence, no physical outputs">
+        <img class="brand-logo" src="{{ url_for('static', filename='squirrel-squirter-logo.png') }}" alt="Squirrel Squirter logo">
+        <span class="brand-text">
+          <span class="brand-name">Squirrel Squirter</span>
+          <span class="brand-sub">Garden mission control</span>
+        </span>
+      </a>
+
+      <div class="metric-strip" role="group" aria-label="Live system metrics">
+        <span class="stat" id="stat-fps" title="Motion analysis rate">
+          <span class="stat-stack"><em>FPS</em><b id="fps-value" class="num">{{ '%.1f'|format(detector.processing_fps) }}</b></span>
+          <canvas class="spark" id="spark-fps" width="72" height="24" aria-hidden="true"></canvas>
+        </span>
+        <span class="stat" id="stat-temp" title="Pi CPU temperature">
+          <span class="stat-stack"><em>TEMP</em><b id="temp-value" class="num">{{ ('%.1f °C'|format(cpu_temperature)) if cpu_temperature is not none else '--' }}</b></span>
+          <canvas class="spark" id="spark-temp" width="72" height="24" aria-hidden="true"></canvas>
+        </span>
+        <span class="stat" id="stat-queue" title="Events waiting for review">
+          <span class="stat-stack"><em>QUEUED</em><b id="queue-value" class="num">{{ review_counts.review }}</b></span>
+          <canvas class="spark" id="spark-queue" width="72" height="24" aria-hidden="true"></canvas>
+        </span>
+        <span class="stat mode" id="stat-mode" title="Console mode">
+          <span class="stat-stack"><em>MODE</em><b id="mode-value">OBSERVE</b></span>
+        </span>
+        <span class="stat cam" id="stat-cam" title="Camera state">
+          <span class="dot {{ camera.state|lower }}" id="cam-dot"></span>
+          <span class="stat-stack"><em>CAMERA</em><b id="cam-value">{{ camera.state }}</b></span>
+        </span>
       </div>
-    </div>
-    <div class="hero-actions" aria-label="Primary dashboard actions">
-      <a class="action-button primary" href="{{ url_for('events') }}">Review events</a>
-      <a class="action-button" href="{{ url_for('classifier_review') }}">Label objects</a>
-      <a class="action-button subtle" href="{{ url_for('captures') }}">Browse pictures</a>
-    </div>
-  </section>
 
-  <section class="monitor-layout" aria-label="Live camera and essential status">
-    <section class="panel live-panel">
-      <div class="section-heading">
-        <div><p class="eyebrow">Live debug feed</p><h2>What the detector sees</h2></div>
-        <span class="live-label {{ camera.state|lower }}" id="stream-label"><span class="stream-dot" aria-hidden="true"></span><span id="stream-label-text">{{ camera.state }}</span></span>
+      <span class="bar-spacer"></span>
+      <nav class="bar-nav" aria-label="Archive pages">
+        <a href="{{ url_for('events') }}">Events</a>
+        <a href="{{ url_for('classifier_review') }}">Object review</a>
+        <a href="{{ url_for('captures') }}">Pictures</a>
+      </nav>
+      <button class="bar-btn" id="outdoor-toggle" type="button" title="Outdoor sunlight mode (O)" aria-pressed="false" aria-label="Outdoor sunlight mode"><svg><use href="#i-sun"/></svg></button>
+      <button class="bar-btn" id="help-open" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><svg><use href="#i-help"/></svg></button>
+      <button class="bar-btn" id="system-open" type="button" title="System details (S)" aria-label="System details"><svg><use href="#i-gear"/></svg></button>
+    </header>
+
+    <main id="layout" class="layout">
+      <section id="stage" class="stage" aria-label="Live camera and event inspector">
+        <div id="live-view" class="live-view">
+          <div class="video-frame" id="video-frame" data-online="{{ 'true' if camera.online else 'false' }}">
+            <img id="live-stream" src="{{ url_for('video_feed') }}" alt="Annotated live garden camera stream">
+            <div class="hud hud-top">
+              <span class="hud-pill cam-pill {{ camera.state|lower }}" id="hud-cam-pill"><span class="pulse-dot" aria-hidden="true"></span><b id="hud-cam-value">{{ camera.state }}</b></span>
+              <span class="hud-spacer"></span>
+              <span class="hud-pill hud-chip" id="hud-detector">{{ detector.state }}</span>
+              <span class="hud-pill hud-chip hud-fps" id="hud-fps">{{ '%.1f'|format(detector.processing_fps) }} FPS</span>
+            </div>
+            <div class="hud-scrim">
+              <p class="notice {{ 'learning' if detector.state in ('LEARNING', 'WARMING_UP') else '' }}" id="detector-notice" role="status">
+                <strong id="notice-title">{{ 'Night vision paused' if detector.state == 'NIGHT_PAUSED' else ('LEARNING background' if detector.state in ('LEARNING', 'WARMING_UP') else 'Motion-only diagnostics') }}</strong>
+                <span id="notice-detail">{{ 'The live feed remains on, but clips and classifier work are paused until daytime color returns.' if detector.state == 'NIGHT_PAUSED' else ('Events are suppressed until the detector reaches READY.' if detector.state in ('LEARNING', 'WARMING_UP') else 'Labels describe size and movement; they are not person, car, or squirrel recognition.') }}</span>
+              </p>
+            </div>
+            <div class="offline-message" id="offline-message">
+              <span class="offline-mark" aria-hidden="true">!</span>
+              <strong id="offline-title">Camera {{ camera.state|lower }}</strong>
+              <p id="camera-error">{{ camera.error or 'No fresh frames are available. The dashboard and diagnostics remain online.' }}</p>
+            </div>
+          </div>
+        </div>
+
+        <div id="event-view" class="event-view" hidden>
+          <figure class="inspector-media">
+            <img id="inspector-image" src="" alt="Selected event evidence">
+            <figcaption class="inspector-tools">
+              <button class="tool-btn" id="inspector-live" type="button" title="Back to live feed (L)"><svg><use href="#i-live"/></svg><span>Live</span></button>
+              <a class="tool-btn" id="inspector-snapshot" href="#" target="_blank" rel="noopener" hidden><svg><use href="#i-photo"/></svg><span>Full frame</span></a>
+              <a class="tool-btn" id="inspector-clip" href="#" hidden><svg><use href="#i-clip"/></svg><span>Video clip</span></a>
+            </figcaption>
+          </figure>
+          <div class="inspector-panel">
+            <dl class="event-meta" id="inspector-meta">
+              <div><dt>Time</dt><dd id="meta-time">—</dd></div>
+              <div><dt>Label</dt><dd id="meta-label">—</dd></div>
+              <div><dt>Model</dt><dd id="meta-model">—</dd></div>
+              <div><dt>Inference</dt><dd id="meta-inference">—</dd></div>
+              <div><dt>Source</dt><dd id="meta-source">—</dd></div>
+              <div><dt>Event</dt><dd id="meta-event">—</dd></div>
+            </dl>
+            <div class="decision-deck" id="decision-deck" hidden>
+              <button class="btn btn-car" type="button" data-decision="approve" data-label="car"><svg><use href="#i-car"/></svg><span class="btn-label">Car</span><b class="key-hint">1</b></button>
+              <button class="btn btn-person" type="button" data-decision="approve" data-label="person"><svg><use href="#i-person"/></svg><span class="btn-label">Person</span><b class="key-hint">2</b></button>
+              <button class="btn btn-unknown" type="button" data-decision="unknown"><svg><use href="#i-unknown"/></svg><span class="btn-label">Unknown</span><b class="key-hint">3</b></button>
+              <button class="btn btn-false" type="button" data-decision="false-positive"><svg><use href="#i-false"/></svg><span class="btn-label">False</span><b class="key-hint">0</b></button>
+            </div>
+            <p class="inspector-hint" id="inspector-hint">Select a queued event to review it. Keys 1 / 2 / 3 / 0 label the selection, arrows move, L returns to live.</p>
+          </div>
+          <div class="filmstrip" id="filmstrip" role="listbox" aria-label="Queue filmstrip"></div>
+        </div>
+      </section>
+
+      <aside id="queue-panel" class="queue-panel" aria-label="Review queue">
+        <header class="rail-head">
+          <div class="rail-title">
+            <h2><svg aria-hidden="true"><use href="#i-queue"/></svg> Review queue</h2>
+            <p class="rail-sub" id="queue-progress">{{ review_counts.review }} of {{ review_counts.review }} remaining</p>
+          </div>
+          <span class="rail-count" id="tab-count-review" title="Events waiting for review">{{ review_counts.review }}</span>
+        </header>
+        <div class="rail-progress" aria-hidden="true"><span id="queue-progress-bar"></span></div>
+
+        <ul class="queue-list" id="queue-list" tabindex="0" aria-label="Events queue">
+          {% for item in review_items %}
+          <li class="row" data-kind="review" data-item-id="{{ item.item_id }}" data-index="{{ loop.index0 }}">
+            <a class="row-thumb" href="{{ url_for('classifier_review') }}" title="Open full object review">
+              <img src="{{ item.image_url }}" alt="Classifier input for {{ item.event_id }}" loading="lazy" decoding="async">
+            </a>
+            <span class="row-meta">
+              <time>{{ item.classifier_timestamp[11:16] if item.classifier_timestamp else '' }}</time>
+              <strong>{{ item.display_label }}</strong>
+              <small class="row-suggestion">{% if item.review_suggestion_label %}Maybe {{ item.review_suggestion_label }} {{ '%.0f%%'|format(item.review_suggestion_confidence * 100) }}{% elif item.top_label %}Model {{ item.top_label }} {{ '%.0f%%'|format(item.top_confidence * 100) }}{% else %}No model match{% endif %}</small>
+            </span>
+            <span class="row-actions">
+              <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><input type="hidden" name="approval_label" value="car"><button type="submit" class="mini-btn btn-car" title="Label as car (1)" aria-label="Label as car"><svg><use href="#i-car"/></svg></button></form>
+              <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><input type="hidden" name="approval_label" value="person"><button type="submit" class="mini-btn btn-person" title="Label as person (2)" aria-label="Label as person"><svg><use href="#i-person"/></svg></button></form>
+              <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='false-positive') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button type="submit" class="mini-btn btn-false" title="Mark false positive (0)" aria-label="Mark false positive"><svg><use href="#i-false"/></svg></button></form>
+            </span>
+          </li>
+          {% else %}
+          <li class="row-empty all-clear" id="review-empty">
+            <svg aria-hidden="true"><use href="#i-clear"/></svg>
+            <strong>All clear</strong>
+            <span>Queue clear — nothing needs review.</span>
+          </li>
+          {% endfor %}
+        </ul>
+
+        <footer class="queue-footer">
+          <a href="{{ url_for('events') }}">All event pictures and videos</a>
+          <a href="{{ url_for('classifier_review') }}">Object review and unknowns</a>
+          <a href="{{ url_for('captures') }}">Standalone pictures</a>
+        </footer>
+      </aside>
+
+      <section class="recent-strip" aria-label="Recent activity">
+        <header class="strip-head">
+          <h2>Recent activity</h2>
+          <span class="strip-count" id="tab-count-recent">{{ events|length }}</span>
+          <span class="strip-spacer"></span>
+          <a class="strip-link" href="{{ url_for('events') }}">Event archive</a>
+        </header>
+        <ul class="recent-rail" id="recent-list" aria-label="Recent events">
+          {% for event in events %}
+          <li class="row" data-kind="recent" data-event-id="{{ event.event_id }}" data-index="{{ loop.index0 }}">
+            {% if event.snapshot_path_relative %}<a class="row-thumb" href="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}"><img src="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}" alt="Event {{ event.event_id }}" loading="lazy" decoding="async"></a>{% endif %}
+            <span class="row-meta">
+              <time>{{ event.start_timestamp[11:16] if event.start_timestamp else '' }}</time>
+              <strong>{{ event.display_label }}</strong>
+              <small>Motion: {{ event.motion_label|replace('_', ' ') }}</small>
+            </span>
+            {% if event.clip_path_relative %}<span class="row-actions"><a class="mini-btn" href="{{ url_for('output_file', relative_path=event.clip_path_relative) }}" title="Open video clip" aria-label="Open video clip"><svg><use href="#i-clip"/></svg></a></span>{% endif %}
+          </li>
+          {% else %}
+          <li class="row-empty" id="recent-empty">No completed grouped events yet. Filtered motion stays visible in the live feed.</li>
+          {% endfor %}
+        </ul>
+      </section>
+    </main>
+
+    <template id="queue-row-template">
+      <li class="row" data-kind="review" data-item-id="">
+        <a class="row-thumb" href="#" title="Open full object review"><img alt="" loading="lazy" decoding="async"></a>
+        <span class="row-meta"><time></time><strong></strong><small class="row-suggestion"></small></span>
+        <span class="row-actions">
+          <button type="button" class="mini-btn btn-car" data-decision="approve" data-label="car" title="Label as car (1)" aria-label="Label as car"><svg><use href="#i-car"/></svg></button>
+          <button type="button" class="mini-btn btn-person" data-decision="approve" data-label="person" title="Label as person (2)" aria-label="Label as person"><svg><use href="#i-person"/></svg></button>
+          <button type="button" class="mini-btn btn-false" data-decision="false-positive" title="Mark false positive (0)" aria-label="Mark false positive"><svg><use href="#i-false"/></svg></button>
+        </span>
+      </li>
+    </template>
+
+    <dialog id="system-dialog" class="dialog">
+      <h2>System</h2>
+      <dl class="system-grid">
+        <dt>Camera</dt><dd id="sys-camera">{{ camera.state }} · {{ camera.resolution.label }}</dd>
+        <dt>Detector</dt><dd id="sys-detector">{{ detector.state }} · {{ '%.1f'|format(detector.processing_fps) }} FPS</dd>
+        <dt>Pi CPU</dt><dd id="sys-temp">{{ ('%.1f °C'|format(cpu_temperature)) if cpu_temperature is not none else 'Unavailable' }}</dd>
+        <dt>Uptime</dt><dd id="sys-uptime">{{ '%.0f'|format(uptime_seconds) }}s</dd>
+        <dt>Events accepted</dt><dd id="sys-accepted">{{ detector.accepted_events }}</dd>
+        <dt>Events rejected</dt><dd id="sys-rejected">{{ detector.rejected_events }}</dd>
+        <dt>Classifier queue</dt><dd id="sys-classifier">—</dd>
+        <dt>Capture storage</dt><dd id="sys-storage">—</dd>
+      </dl>
+      <div class="dialog-prefs">
+        <label><input type="checkbox" id="pref-outdoor"> Outdoor sunlight mode</label>
+        <label><input type="checkbox" id="pref-pause-stream"> Pause live stream (saves Pi CPU)</label>
       </div>
-      <div class="video-frame" id="video-frame" data-online="{{ 'true' if camera.online else 'false' }}">
-        <img id="live-stream" src="{{ url_for('video_feed') }}" alt="Annotated live garden camera stream">
-        <div class="offline-message" id="offline-message"><span aria-hidden="true">!</span><strong id="offline-title">Camera {{ camera.state|lower }}</strong><p id="camera-error">{{ camera.error or 'No fresh frames are available. The dashboard and diagnostics remain online.' }}</p></div>
+      <p class="dialog-note">Motion-triggered garden evidence from one shared camera. No physical outputs. Detection settings live in <code>config/default.yaml</code> on the Pi.</p>
+      <div class="dialog-links">
+        <a href="{{ url_for('events') }}">All event pictures and videos</a>
+        <a href="{{ url_for('classifier_review') }}">Object review and unknowns</a>
+        <a href="{{ url_for('captures') }}">Standalone pictures</a>
+        <a href="{{ url_for('latest_report') }}">Latest report</a>
       </div>
-    </section>
+      <form method="dialog"><button class="btn btn-close">Close</button></form>
+    </dialog>
 
-    <aside class="status-sidebar" aria-label="Essential system status">
-      <article class="status-card"><span>State</span><strong id="detector-state">{{ detector.state }}</strong><small>Vision pipeline</small></article>
-      <article class="status-card"><span>Motion enabled</span><strong id="motion-enabled">{{ 'Yes' if detector.enabled else 'No' }}</strong><small>Read-only setting</small></article>
-      <article class="status-card"><span>Processing rate</span><strong><span id="processing-fps">{{ '%.1f'|format(detector.processing_fps) }}</span> FPS</strong><small>Motion analysis</small></article>
-      <article class="status-card"><span>Pi CPU</span><strong id="cpu-temperature">{{ ('%.1f &deg;C'|format(cpu_temperature)) if cpu_temperature is not none else 'Unavailable' }}</strong><small>Temperature</small></article>
-    </aside>
-  </section>
+    <dialog id="help-dialog" class="dialog">
+      <h2>Keyboard shortcuts</h2>
+      <dl class="system-grid keys">
+        <dt>↑ / ↓</dt><dd>Move through the queue</dd>
+        <dt>← / →</dt><dd>Previous / next item while inspecting</dd>
+        <dt>Enter</dt><dd>Open the highlighted event</dd>
+        <dt>1 / 2</dt><dd>Label selection Car / Person</dd>
+        <dt>3 / 0</dt><dd>Label selection Unknown / False positive</dd>
+        <dt>Tab</dt><dd>Switch Review / Recent (Q)</dd>
+        <dt>L</dt><dd>Back to the live feed</dd>
+        <dt>O</dt><dd>Outdoor sunlight mode</dd>
+        <dt>S</dt><dd>System details</dd>
+      </dl>
+      <form method="dialog"><button class="btn btn-close">Close</button></form>
+    </dialog>
 
-  <section class="notice {{ 'learning' if detector.state in ('LEARNING', 'WARMING_UP') else '' }}" id="detector-notice" aria-label="Detector notice">
-    <span class="notice-icon" aria-hidden="true">i</span>
-    <div><strong id="notice-title">{{ 'Night vision paused' if detector.state == 'NIGHT_PAUSED' else ('LEARNING background' if detector.state in ('LEARNING', 'WARMING_UP') else 'Motion-only diagnostics') }}</strong><p id="notice-detail">{{ 'The live feed remains on, but clips and classifier work are paused until daytime color returns.' if detector.state == 'NIGHT_PAUSED' else ('Events are suppressed until the detector reaches READY.' if detector.state in ('LEARNING', 'WARMING_UP') else 'Labels describe size and movement; they are not person, car, or squirrel recognition.') }}</p></div>
-  </section>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <section class="panel gallery-panel recent-events-panel">
-    <div class="section-heading">
-      <div><p class="eyebrow">Motion event review</p><h2>Five most recent clips</h2><p>Each grouped event stores one snapshot and one video clip. All older evidence remains recorded.</p></div>
-      <div class="archive-links" aria-label="Event archive shortcuts"><a class="button ghost" href="{{ url_for('events') }}">All event pictures and videos</a><a class="button ghost" href="{{ url_for('classifier_review') }}">Object review and unknowns</a><a class="button ghost" href="{{ url_for('captures') }}">Standalone pictures</a></div>
-    </div>
-    <div id="recent-events-content" aria-live="polite">
-    {% if events %}
-      <div class="capture-grid recent-event-grid" id="recent-events-grid">
-        {% for event in events %}
-          <article class="capture-card event-card">
-            {% if event.snapshot_path_relative %}<a href="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}"><img src="{{ url_for('output_file', relative_path=event.snapshot_path_relative) }}" alt="Event {{ event.event_id }}" loading="lazy"></a>{% endif %}
-            <span class="capture-details"><strong>{{ event.display_label }}</strong><time>{{ event.start_timestamp }}</time><small>Motion: {{ event.motion_label|replace('_', ' ') }}</small>{% if event.classification_label_source %}<small>Label: {{ event.classification_label_source }}</small>{% endif %}{% if event.clip_path_relative %}<a class="clip-link" href="{{ url_for('output_file', relative_path=event.clip_path_relative) }}">Open video clip</a>{% endif %}</span>
-          </article>
-        {% endfor %}
-      </div>
-    {% else %}<div class="empty-state"><p>No completed grouped events yet.</p><small>Filtered motion remains visible in the live feed but does not create a clip.</small></div>{% endif %}
-    </div>
-  </section>
-{% endblock %}
-
-{% block scripts %}
-  <script>
-    (() => {
-      const byId = (id) => document.getElementById(id);
-      let recentEventsSignature = '';
-
-      function eventDetails(event) {
-        const details = document.createElement('span');
-        details.className = 'capture-details';
-        const label = document.createElement('strong');
-        label.textContent = event.display_label || 'Unclassified';
-        const time = document.createElement('time');
-        time.textContent = event.start_timestamp || '';
-        const motion = document.createElement('small');
-        motion.textContent = `Motion: ${(event.motion_label || 'unclassified motion').replaceAll('_', ' ')}`;
-        details.append(label, time, motion);
-        if (event.classification_label_source) {
-          const source = document.createElement('small');
-          source.textContent = `Label: ${event.classification_label_source}`;
-          details.append(source);
-        }
-        if (event.clip_url) {
-          const clip = document.createElement('a');
-          clip.className = 'clip-link';
-          clip.href = event.clip_url;
-          clip.textContent = 'Open video clip';
-          details.append(clip);
-        }
-        return details;
-      }
-
-      function renderRecentEvents(events) {
-        const content = byId('recent-events-content');
-        if (!events.length) {
-          const empty = document.createElement('div');
-          empty.className = 'empty-state';
-          const message = document.createElement('p');
-          message.textContent = 'No completed grouped events yet.';
-          const detail = document.createElement('small');
-          detail.textContent = 'Filtered motion remains visible in the live feed but does not create a clip.';
-          empty.append(message, detail);
-          content.replaceChildren(empty);
-          return;
-        }
-        const grid = document.createElement('div');
-        grid.className = 'capture-grid recent-event-grid';
-        grid.id = 'recent-events-grid';
-        for (const event of events) {
-          const card = document.createElement('article');
-          card.className = 'capture-card event-card';
-          if (event.snapshot_url) {
-            const link = document.createElement('a');
-            link.href = event.snapshot_url;
-            const image = document.createElement('img');
-            image.src = event.snapshot_url;
-            image.alt = `Event ${event.event_id || ''}`;
-            image.loading = 'lazy';
-            link.append(image);
-            card.append(link);
-          }
-          card.append(eventDetails(event));
-          grid.append(card);
-        }
-        content.replaceChildren(grid);
-      }
-
-      async function refreshRecentEvents() {
-        try {
-          const response = await fetch('{{ url_for("api_recent_events") }}', { cache: 'no-store' });
-          if (!response.ok) return;
-          const data = await response.json();
-          const events = (data.events || []).slice(0, 5);
-          const signature = JSON.stringify(events.map((event) => [event.event_id, event.display_label, event.classification_label_source, event.snapshot_url, event.clip_url]));
-          if (signature !== recentEventsSignature) {
-            recentEventsSignature = signature;
-            renderRecentEvents(events);
-          }
-        } catch (_) { /* A later poll will recover. */ }
-      }
-
-      async function refreshStatus() {
-        try {
-          const response = await fetch('{{ url_for("api_status") }}', { cache: 'no-store' });
-          if (!response.ok) return;
-          const data = await response.json(); const camera = data.camera; const detector = data.detector;
-          byId('detector-state').textContent = detector.state;
-          byId('motion-enabled').textContent = detector.enabled ? 'Yes' : 'No';
-          byId('processing-fps').textContent = detector.processing_fps.toFixed(1);
-          byId('cpu-temperature').textContent = data.cpu_temperature_c === null ? 'Unavailable' : `${data.cpu_temperature_c.toFixed(1)} \u00B0C`;
-          byId('video-frame').dataset.online = camera.online ? 'true' : 'false';
-          byId('stream-label').className = `live-label ${camera.state.toLowerCase()}`;
-          byId('stream-label-text').textContent = camera.state;
-          byId('offline-title').textContent = `Camera ${camera.state.toLowerCase()}`;
-          byId('camera-error').textContent = camera.error || 'No fresh frames are available. The dashboard and diagnostics remain online.';
-          const learning = detector.state === 'LEARNING' || detector.state === 'WARMING_UP';
-          const nightPaused = detector.state === 'NIGHT_PAUSED';
-          byId('detector-notice').classList.toggle('learning', learning);
-          byId('notice-title').textContent = nightPaused ? 'Night vision paused' : (learning ? 'LEARNING background' : 'Motion-only diagnostics');
-          byId('notice-detail').textContent = nightPaused ? 'The live feed remains on, but clips and classifier work are paused until daytime color returns.' : (learning ? 'Events are suppressed until the detector reaches READY.' : 'Labels describe size and movement; they are not person, car, or squirrel recognition.');
-        } catch (_) { /* A later poll will recover; never replace diagnostics with guessed state. */ }
-      }
-      async function refreshDashboard() {
-        await Promise.all([refreshStatus(), refreshRecentEvents()]);
-      }
-      refreshRecentEvents();
-      window.setInterval(refreshDashboard, {{ status_refresh_ms }});
-    })();
-  </script>
-{% endblock %}
+    <script>
+      window.SS_CONFIG = {
+        urls: {
+          status: {{ url_for('api_status')|tojson }},
+          health: {{ url_for('api_health')|tojson }},
+          events: {{ url_for('api_recent_events')|tojson }},
+          review: {{ url_for('api_classifier_review')|tojson }},
+          decision: {{ url_for('classifier_decision', item_id='ITEM_ID', decision='DECISION')|tojson }},
+          reviewPage: {{ url_for('classifier_review')|tojson }}
+        },
+        reviewToken: {{ review_token|tojson }},
+        statusPollMs: 5000,
+        eventsPollMs: 2000,
+        reviewPollMs: {{ status_refresh_ms }},
+        queueLimit: 100,
+        queueWindow: 10
+      };
+    </script>
+    <script src="{{ url_for('static', filename='console.js') }}" defer></script>
+  </body>
+</html>

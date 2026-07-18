@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import secrets
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -31,6 +32,8 @@ SUPPORTED_CAPTURE_SUFFIXES = frozenset({".jpg", ".jpeg"})
 RECENT_EVENT_LIMIT = 5
 CAPTURES_PER_PAGE = 24
 EVENTS_PER_PAGE = 20
+REVIEW_QUEUE_INITIAL = 10
+REVIEW_QUEUE_API_LIMIT = 100
 APPLICATION_MODE = "shared-camera-motion-watch"
 
 
@@ -157,6 +160,32 @@ def _dashboard_events(events: list[dict[str, Any]], config: AppConfig) -> list[d
     return prepared
 
 
+def _review_item_payload(item: dict[str, Any]) -> dict[str, Any]:
+    """Trim a classifier evidence record to the fields the Pi console polls."""
+
+    item_id = str(item.get("item_id", ""))
+    snapshot_relative = item.get("event_snapshot_relative")
+    clip_relative = item.get("event_clip_relative")
+    return {
+        "item_id": item_id,
+        "event_id": item.get("event_id"),
+        "display_label": item.get("display_label", "Unclassified"),
+        "classification_status": item.get("classification_status", "unclassified"),
+        "label_source": item.get("label_source"),
+        "top_label": item.get("top_label"),
+        "top_confidence": item.get("top_confidence"),
+        "review_suggestion_label": item.get("review_suggestion_label"),
+        "review_suggestion_confidence": item.get("review_suggestion_confidence"),
+        "latency_ms": item.get("latency_ms"),
+        "frame_number": item.get("frame_number"),
+        "error": item.get("error"),
+        "classifier_timestamp": item.get("classifier_timestamp"),
+        "image_url": url_for("classifier_file", item_id=item_id),
+        "event_snapshot_url": url_for("event_file", relative_path=snapshot_relative) if snapshot_relative else None,
+        "event_clip_url": url_for("event_file", relative_path=clip_relative) if clip_relative else None,
+    }
+
+
 def _safe_capture_filename(filename: str) -> bool:
     path = Path(filename)
     return bool(filename) and path.name == filename and filename not in {".", ".."} and path.suffix.lower() in SUPPORTED_CAPTURE_SUFFIXES
@@ -190,6 +219,7 @@ def create_app(
 
     app_config = app_config or load_config(config_path)
     app = Flask(__name__)
+    demo_mode = os.environ.get("SQUIRREL_DEMO", "").strip() == "1"
     if camera_service is None:
         raise ValueError("create_app requires the shared camera runtime")
     vision = motion_service or vision_service
@@ -245,6 +275,8 @@ def create_app(
     def dashboard() -> str:
         events = _dashboard_events(vision.recent_events(), app_config)
         camera_data, detector, temperature, uptime = page_status()
+        review_overview = classifier_store.overview()
+        review_counts = {view: len(items) for view, items in review_overview.items()}
         return render_template(
             "dashboard.html",
             camera=camera_data,
@@ -254,6 +286,10 @@ def create_app(
             application_mode=APPLICATION_MODE,
             uptime_seconds=uptime,
             status_refresh_ms=round(app_config.dashboard.status_refresh_interval_seconds * 1000),
+            review_items=[_review_item_payload(item) for item in review_overview["review"][:REVIEW_QUEUE_INITIAL]],
+            review_counts=review_counts,
+            review_token=classifier_review_token,
+            demo_mode=demo_mode,
         )
 
     @app.get("/video-feed")
@@ -273,7 +309,7 @@ def create_app(
         if page > total_pages and all_captures:
             abort(404)
         start = (page - 1) * CAPTURES_PER_PAGE
-        return render_template("captures.html", captures=all_captures[start : start + CAPTURES_PER_PAGE], page=page, total_pages=total_pages, total_captures=len(all_captures))
+        return render_template("captures.html", captures=all_captures[start : start + CAPTURES_PER_PAGE], page=page, total_pages=total_pages, total_captures=len(all_captures), demo_mode=demo_mode)
 
     @app.get("/captures/<path:filename>")
     def capture_file(filename: str) -> Any:
@@ -297,6 +333,7 @@ def create_app(
             page=page,
             total_pages=total_pages,
             total_events=len(all_events),
+            demo_mode=demo_mode,
         )
 
     @app.get("/files/<path:relative_path>")
@@ -327,6 +364,7 @@ def create_app(
             audit_log_filename=app_config.classifier.audit_log_filename,
             config_frame_number=app_config.classifier.event_frame_number,
             message=request.args.get("message"),
+            demo_mode=demo_mode,
         )
 
     @app.post("/classifier-review/<item_id>/<decision>")
@@ -340,6 +378,8 @@ def create_app(
                     abort(400)
                 queued = motion_service.classifier.retry(item_id)
                 message = "Classification retry queued" if queued else "Classifier is busy; retry remains in Errors"
+                if request.form.get("format") == "json":
+                    return jsonify(ok=bool(queued), message=message, item_id=item_id)
                 return redirect(url_for("classifier_review", state="errors", message=message))
             record = classifier_store.review(item_id, decision, request.form.get("approval_label"))
         except KeyError:
@@ -347,6 +387,14 @@ def create_app(
         except (OSError, ValueError):
             abort(400)
         message = f"Event labeled {record['display_label']}"
+        if request.form.get("format") == "json":
+            return jsonify(
+                ok=True,
+                message=message,
+                item_id=item_id,
+                classification_status=record["classification_status"],
+                display_label=record["display_label"],
+            )
         destination = "errors" if record["classification_status"] == "unclassified" else record["classification_status"]
         return redirect(url_for("classifier_review", state=destination, message=message))
 
@@ -436,6 +484,18 @@ def create_app(
             event["snapshot_url"] = url_for("output_file", relative_path=snapshot) if snapshot else None
             event["clip_url"] = url_for("output_file", relative_path=clip) if clip else None
         return jsonify(events=events, count=len(events))
+
+    @app.get("/api/classifier-review")
+    def api_classifier_review() -> Any:
+        state = request.args.get("state", "review")
+        if state not in CLASSIFICATION_VIEWS:
+            abort(404)
+        limit = request.args.get("limit", default=REVIEW_QUEUE_API_LIMIT, type=int) or REVIEW_QUEUE_API_LIMIT
+        limit = min(max(limit, 1), 500)
+        overview = classifier_store.overview()
+        counts = {view: len(items) for view, items in overview.items()}
+        items = [_review_item_payload(item) for item in overview[state][:limit]]
+        return jsonify(state=state, counts=counts, items=items, limit=limit)
 
     @app.errorhandler(Exception)
     def report_flask_error(exc: Exception) -> Any:

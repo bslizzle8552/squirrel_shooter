@@ -262,6 +262,36 @@ class ClassifierEvidenceStore:
     def counts(self) -> dict[str, int]:
         return {view: len(self.list_items(view)) for view in CLASSIFICATION_VIEWS}
 
+    def overview(self) -> dict[str, list[dict[str, Any]]]:
+        """Return every view's items from a single evidence-directory scan.
+
+        Polling clients (the Pi console) need items plus per-view counts; one
+        rglob pass keeps that refresh cheap compared with per-view listings.
+        """
+        self.prepare()
+        grouped: dict[str, list[dict[str, Any]]] = {view: [] for view in CLASSIFICATION_VIEWS}
+        for path in self.events_root.rglob(CLASSIFICATION_FILENAME):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                view = _classification_view(payload)
+                if view not in grouped:
+                    continue
+                event_relative = path.parent.relative_to(self.events_root).as_posix()
+                payload["event_snapshot_relative"] = (
+                    f"{event_relative}/snapshot.jpg" if (path.parent / "snapshot.jpg").is_file() else None
+                )
+                payload["event_clip_relative"] = (
+                    f"{event_relative}/clip.avi" if (path.parent / "clip.avi").is_file() else None
+                )
+                grouped[view].append(payload)
+            except (OSError, json.JSONDecodeError):
+                continue
+        for items in grouped.values():
+            items.sort(key=lambda item: str(item.get("classifier_timestamp", "")), reverse=True)
+        return grouped
+
     def get_record(self, item_id: str) -> dict[str, Any]:
         path = self._record_path(item_id)
         try:

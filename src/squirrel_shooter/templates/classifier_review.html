@@ -8,6 +8,12 @@
       <p class="eyebrow">Unified event labels</p>
       <h1>Object review</h1>
       <p class="subtitle">Every motion event is retained. Classification adds a label; it never decides whether the event is saved.</p>
+      <div class="chip-row">
+        <span class="chip chip-accent"><b>{{ counts.review }}</b> needs review</span>
+        <span class="chip"><b>{{ counts.known }}</b> known</span>
+        <span class="chip"><b>{{ counts.unknown }}</b> unknown</span>
+        <span class="chip"><b>{{ counts.errors }}</b> errors</span>
+      </div>
     </div>
     <div class="hero-actions"><a class="button" href="{{ url_for('dashboard') }}">Back to live camera</a></div>
   </section>
@@ -15,11 +21,11 @@
   <section class="panel standalone">
     <div class="review-toolbar">
       <nav class="review-tabs" aria-label="Classification views">
-        <a class="{{ 'selected' if selected_state == 'review' else '' }}" href="{{ url_for('classifier_review', state='review') }}">Needs review {{ counts.review }}</a>
-        <a class="{{ 'selected' if selected_state == 'unknown' else '' }}" href="{{ url_for('classifier_review', state='unknown') }}">Unknown {{ counts.unknown }}</a>
-        <a class="{{ 'selected' if selected_state == 'known' else '' }}" href="{{ url_for('classifier_review', state='known') }}">Known {{ counts.known }}</a>
-        <a class="{{ 'selected' if selected_state == 'errors' else '' }}" href="{{ url_for('classifier_review', state='errors') }}">Errors {{ counts.errors }}</a>
-        <a class="{{ 'selected' if selected_state == 'false_positive' else '' }}" href="{{ url_for('classifier_review', state='false_positive') }}">False positives {{ counts.false_positive }}</a>
+        <a class="{{ 'selected' if selected_state == 'review' else '' }}" href="{{ url_for('classifier_review', state='review') }}" {{ 'aria-current="page"'|safe if selected_state == 'review' }}>Needs review <b>{{ counts.review }}</b></a>
+        <a class="{{ 'selected' if selected_state == 'unknown' else '' }}" href="{{ url_for('classifier_review', state='unknown') }}" {{ 'aria-current="page"'|safe if selected_state == 'unknown' }}>Unknown <b>{{ counts.unknown }}</b></a>
+        <a class="{{ 'selected' if selected_state == 'known' else '' }}" href="{{ url_for('classifier_review', state='known') }}" {{ 'aria-current="page"'|safe if selected_state == 'known' }}>Known <b>{{ counts.known }}</b></a>
+        <a class="{{ 'selected' if selected_state == 'errors' else '' }}" href="{{ url_for('classifier_review', state='errors') }}" {{ 'aria-current="page"'|safe if selected_state == 'errors' }}>Errors <b>{{ counts.errors }}</b></a>
+        <a class="{{ 'selected' if selected_state == 'false_positive' else '' }}" href="{{ url_for('classifier_review', state='false_positive') }}" {{ 'aria-current="page"'|safe if selected_state == 'false_positive' }}>False positives <b>{{ counts.false_positive }}</b></a>
       </nav>
       <a class="button ghost" href="{{ url_for('log_file', relative_path=audit_log_filename) }}">Classification audit log</a>
     </div>
@@ -29,7 +35,7 @@
       <div class="classifier-grid">
         {% for item in items %}
           <article class="classifier-card">
-            <a class="classifier-image-link" href="{{ url_for('classifier_file', item_id=item.item_id) }}"><img src="{{ url_for('classifier_file', item_id=item.item_id) }}" alt="Classifier input for {{ item.event_id }}" loading="lazy"></a>
+            <a class="classifier-media" href="{{ url_for('classifier_file', item_id=item.item_id) }}"><img src="{{ url_for('classifier_file', item_id=item.item_id) }}" alt="Classifier input for {{ item.event_id }}" loading="lazy"></a>
             <div class="classifier-details">
               <span class="decision-badge {{ item.classification_status }}">{{ item.classification_status|replace('_', ' ') }}</span>
               <h2>{{ item.display_label }}</h2>
@@ -57,12 +63,14 @@
                   <form class="approve-form" method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}">
                     <input type="hidden" name="review_token" value="{{ review_token }}">
                     <label for="approval-label-{{ item.item_id }}">Confirm or correct the known label</label>
-                    <select id="approval-label-{{ item.item_id }}" name="approval_label" required>
-                      <option value="" selected disabled>Choose car or person</option>
-                      <option value="car">Car</option>
-                      <option value="person">Person</option>
-                    </select>
-                    <button class="approve-button" type="submit">Save known label</button>
+                    <div class="approve-row">
+                      <select id="approval-label-{{ item.item_id }}" name="approval_label" required>
+                        <option value="" selected disabled>Choose car or person</option>
+                        <option value="car">Car</option>
+                        <option value="person">Person</option>
+                      </select>
+                      <button class="approve-button" type="submit">Save known label</button>
+                    </div>
                   </form>
                   <div class="secondary-review-actions">
                     <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='unknown') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="unknown-button" type="submit">Keep Unknown</button></form>

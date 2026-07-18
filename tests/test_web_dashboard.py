@@ -102,9 +102,13 @@ def test_dashboard_loads_when_camera_is_unavailable(
     assert b"Camera offline" in response.data
     assert b"LEARNING background" in response.data
     assert b"No physical outputs" in response.data
-    assert response.data.count(b'class="status-card"') == 4
+    assert b'id="stat-fps"' in response.data
+    assert b'id="stat-temp"' in response.data
+    assert b'id="stat-queue"' in response.data
+    assert b'id="stat-mode"' in response.data
     assert b'id="blob-count"' not in response.data
     assert b"squirrel-squirter-logo.png" in response.data
+    assert b"console.css" in response.data and b"console.js" in response.data
     assert camera.start_calls == 1
     assert vision.start_calls == 1
 
@@ -247,7 +251,7 @@ def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) ->
     app.config.update(TESTING=True)
 
     body = app.test_client().get("/").get_data(as_text=True)
-    assert body.count('class="capture-card event-card"') == 5
+    assert body.count('data-kind="recent"') == 5
     assert "Event event-0" in body and "Event event-4" in body
     assert "Event event-5" not in body
     assert "Car" in body and "Unknown" in body and "Motion: small animal candidate" in body
@@ -256,8 +260,8 @@ def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) ->
     assert api_events[0]["display_label"] == "Car" and api_events[1]["display_label"] == "Unknown"
     assert api_events[0]["snapshot_url"].endswith("/snapshot.jpg")
     assert api_events[0]["clip_url"].endswith("/clip.avi")
-    assert 'id="recent-events-content"' in body
-    assert "refreshRecentEvents" in body and ".slice(0, 5)" in body
+    assert 'id="queue-list"' in body and 'id="recent-list"' in body
+    assert "console.js" in body and "reviewToken" in body
 
 
 def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> None:
