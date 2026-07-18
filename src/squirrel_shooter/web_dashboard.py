@@ -380,6 +380,9 @@ def create_app(
         supplied_token = request.form.get("review_token", "")
         if not hmac.compare_digest(supplied_token, classifier_review_token):
             abort(403)
+        return_state = request.form.get("return_state")
+        if return_state not in CLASSIFICATION_VIEWS:
+            return_state = None
         try:
             if decision == "retry":
                 if motion_service is None or not hasattr(motion_service, "classifier"):
@@ -388,8 +391,9 @@ def create_app(
                 message = "Classification retry queued" if queued else "Classifier is busy; retry remains in Errors"
                 if request.form.get("format") == "json":
                     return jsonify(ok=bool(queued), message=message, item_id=item_id)
-                return redirect(url_for("classifier_review", state="errors", message=message))
-            record = classifier_store.review(item_id, decision, request.form.get("approval_label"))
+                return redirect(url_for("classifier_review", state=return_state or "errors", message=message))
+            approval_label = request.form.get("custom_label", "").strip() or request.form.get("approval_label")
+            record = classifier_store.review(item_id, decision, approval_label)
         except KeyError:
             abort(404)
         except (OSError, ValueError):
@@ -408,7 +412,37 @@ def create_app(
                 training_dataset_status=record.get("training_dataset_status"),
             )
         destination = "errors" if record["classification_status"] == "unclassified" else record["classification_status"]
-        return redirect(url_for("classifier_review", state=destination, message=message))
+        return redirect(url_for("classifier_review", state=return_state or destination, message=message))
+
+    @app.post("/classifier-review/bulk")
+    def classifier_bulk_decision() -> Any:
+        supplied_token = request.form.get("review_token", "")
+        if not hmac.compare_digest(supplied_token, classifier_review_token):
+            abort(403)
+        return_state = request.form.get("return_state", "review")
+        if return_state not in CLASSIFICATION_VIEWS:
+            return_state = "review"
+        item_ids = list(dict.fromkeys(request.form.getlist("item_ids")))
+        if not item_ids:
+            return redirect(url_for("classifier_review", state=return_state, message="Select at least one event"))
+
+        bulk_action = request.form.get("bulk_action")
+        if bulk_action not in {"confirm-model", "approve", "unknown", "false-positive"}:
+            abort(400)
+        approval_label = request.form.get("custom_label", "").strip() or request.form.get("approval_label")
+        updated = 0
+        failed = 0
+        for item_id in item_ids:
+            try:
+                classifier_store.review(item_id, bulk_action, approval_label)
+                updated += 1
+            except (KeyError, OSError, ValueError):
+                failed += 1
+
+        message = f"Updated {updated} event{'s' if updated != 1 else ''}"
+        if failed:
+            message += f"; {failed} could not be updated"
+        return redirect(url_for("classifier_review", state=return_state, message=message))
 
     @app.get("/classifier-files/<item_id>")
     def classifier_file(item_id: str) -> Any:

@@ -346,12 +346,16 @@ or other unsupported animal remains visible for the normal 30-day event retentio
 A high-confidence `dog`, for example, remains Unknown because this MVP only trusts
 person and car as visible labels; the raw dog suggestion is still recorded.
 
-The Object Review page supports three human-truth paths: confirm the model's exact
-suggestion, type a corrected animal/object label, or mark the image Unknown/False
-Positive. Typed values such as `Eastern Gray-Squirrel` are normalized to stable
-class names such as `eastern_gray_squirrel`; the page offers common backyard
-wildlife labels and reuses labels already present in the dataset. Model-load and
-queue errors can still be labeled manually or retried from their exact saved input.
+The Object Review page preselects the model's guess in a dropdown containing the
+classifier's VOC classes, common backyard wildlife, and labels already present in
+the dataset. Confirm that choice, select a correction, or type an unlisted animal
+or object; a typed value takes precedence. Values such as `Eastern Gray-Squirrel`
+are normalized to stable class names such as `eastern_gray_squirrel`. Unknown and
+False Positive remain dedicated actions. Every action returns to the review tab
+you were using, and the page supports selecting multiple cards to confirm each
+model guess, apply one label, keep Unknown, or mark False Positive in bulk.
+Model-load and queue errors can still be labeled manually or retried from their
+exact saved input.
 
 Every attempt records the submitted frame number, crop and source boxes, model,
 all detections, confidence, inference time, automatic/manual decision, error, and

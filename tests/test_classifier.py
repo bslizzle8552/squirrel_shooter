@@ -451,6 +451,10 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
 
     page = client.get("/classifier-review")
     assert page.status_code == 200 and b"review-event" in page.data and b"Known-class possibility" in page.data
+    assert b'<option value="person" selected>Person (model guess)</option>' in page.data
+    assert b'value="aeroplane"' in page.data
+    assert b'name="custom_label"' in page.data
+    assert b'action="/classifier-review/bulk"' in page.data
     assert client.get("/classifier-files/review-event").status_code == 200
     assert client.post("/classifier-review/review-event/approve").status_code == 403
     token_match = re.search(rb'name="review_token" value="([^"]+)"', page.data)
@@ -466,14 +470,21 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     ).status_code == 400
     confirmed = client.post(
         "/classifier-review/review-event/confirm-model",
-        data={"review_token": token},
+        data={"review_token": token, "return_state": "review"},
     )
     assert confirmed.status_code == 302
+    assert "state=review" in confirmed.location
     approved = client.post(
         "/classifier-review/unknown-event/approve",
-        data={"review_token": token, "approval_label": "Eastern Gray Squirrel"},
+        data={
+            "review_token": token,
+            "return_state": "unknown",
+            "approval_label": "car",
+            "custom_label": "Eastern Gray Squirrel",
+        },
     )
     assert approved.status_code == 302
+    assert "state=unknown" in approved.location
     known_page = client.get("/classifier-review?state=known").data
     assert b"review-event" in known_page and b"Person" in known_page
     assert b"unknown-event" in known_page and b"Eastern Gray Squirrel" in known_page
@@ -482,10 +493,11 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
 
     response = client.post(
         "/classifier-review/false-event/false-positive",
-        data={"review_token": token},
+        data={"review_token": token, "return_state": "unknown"},
     )
 
     assert response.status_code == 302
+    assert "state=unknown" in response.location
     false_positive_page = client.get("/classifier-review?state=false_positive").data
     assert b"false-event" in false_positive_page and b"False Positive" in false_positive_page
     assert store.training_summary()["labels"] == {
@@ -493,6 +505,75 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
         "eastern_gray_squirrel": 1,
         "person": 1,
     }
+
+
+def test_classifier_review_bulk_actions_keep_current_view_and_use_each_model_guess(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    store.save_classification(
+        task(tmp_path, "dog-event"),
+        [ClassifierDetection("dog", 0.8, (1, 1, 10, 10))],
+        100.0,
+        "test-model",
+    )
+    store.save_classification(
+        task(tmp_path, "bird-event"),
+        [ClassifierDetection("bird", 0.7, (1, 1, 10, 10))],
+        100.0,
+        "test-model",
+    )
+
+    camera = SimpleNamespace(
+        start=lambda: None,
+        status=lambda: CameraStatus(False, 1280, 720, 0.0, "offline"),
+    )
+    vision = SimpleNamespace(
+        start=lambda: None,
+        status=lambda: VisionStatus(
+            "READY", True, 10.0, 0, 0, 1, 1, 1, 0, 1,
+            None, None, None, None, None, True, True,
+        ),
+        recent_events=lambda: [],
+    )
+    app = create_app(
+        app_config=config,
+        camera_service=camera,  # type: ignore[arg-type]
+        vision_service=vision,  # type: ignore[arg-type]
+        start_camera=False,
+        start_vision=False,
+        temperature_reader=lambda: 45.0,
+    )
+    app.config.update(TESTING=True)
+    client = app.test_client()
+
+    page = client.get("/classifier-review?state=unknown")
+    token_match = re.search(rb'name="review_token" value="([^"]+)"', page.data)
+    assert token_match is not None
+    token = token_match.group(1).decode()
+    assert page.data.count(b'name="item_ids"') == 2
+
+    no_selection = client.post(
+        "/classifier-review/bulk",
+        data={"review_token": token, "return_state": "unknown", "bulk_action": "unknown"},
+    )
+    assert no_selection.status_code == 302
+    assert "state=unknown" in no_selection.location
+
+    response = client.post(
+        "/classifier-review/bulk",
+        data={
+            "review_token": token,
+            "return_state": "unknown",
+            "bulk_action": "confirm-model",
+            "item_ids": ["dog-event", "bird-event"],
+        },
+    )
+
+    assert response.status_code == 302
+    assert "state=unknown" in response.location
+    assert store.get_record("dog-event")["training_label"] == "dog"
+    assert store.get_record("bird-event")["training_label"] == "bird"
+    assert store.training_summary()["labels"] == {"bird": 1, "dog": 1}
 
 
 def test_classifier_review_json_api_lists_items_and_accepts_decisions(tmp_path: Path) -> None:

@@ -330,7 +330,15 @@ class ClassifierEvidenceStore:
             for sample in self._training_samples(eligible_only=True)
             if sample.get("label") not in {None, "", "background"}
         }
-        return tuple(dict.fromkeys((*TRAINING_LABEL_SUGGESTIONS, *sorted(observed))))
+        return tuple(
+            dict.fromkeys(
+                (
+                    *TRAINING_LABEL_SUGGESTIONS,
+                    *VOC_LABELS[1:],
+                    *sorted(observed),
+                )
+            )
+        )
 
     def overview(self) -> dict[str, list[dict[str, Any]]]:
         """Return every view's items from a single evidence-directory scan.

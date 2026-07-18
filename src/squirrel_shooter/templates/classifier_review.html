@@ -36,11 +36,36 @@
     {% if message %}<p class="review-message">{{ message }}</p>{% endif %}
 
     {% if items %}
+      <form id="bulk-review-form" class="bulk-review-form" method="post" action="{{ url_for('classifier_bulk_decision') }}">
+        <input type="hidden" name="review_token" value="{{ review_token }}">
+        <input type="hidden" name="return_state" value="{{ selected_state }}">
+        <label class="bulk-select-all"><input id="select-all-events" type="checkbox"> Select all on this page</label>
+        <label>Bulk action
+          <select id="bulk-action" name="bulk_action" required>
+            <option value="">Choose an action</option>
+            <option value="confirm-model">Confirm each model guess</option>
+            <option value="approve">Apply one label to all selected</option>
+            <option value="unknown">Keep as Unknown</option>
+            <option value="false-positive">Mark as False Positive</option>
+          </select>
+        </label>
+        <label>Label (for “Apply one label”)
+          <select name="approval_label">
+            <option value="">Choose a classifier or wildlife label</option>
+            {% for label in training_label_suggestions %}<option value="{{ label }}">{{ label|replace('_', ' ')|title }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Or type a different label
+          <input name="custom_label" placeholder="e.g. eastern cottontail" maxlength="40" autocomplete="off">
+        </label>
+        <button class="approve-button" type="submit">Update selected</button>
+      </form>
       <div class="classifier-grid">
         {% for item in items %}
           <article class="classifier-card">
             <a class="classifier-media" href="{{ url_for('classifier_file', item_id=item.item_id) }}"><img src="{{ url_for('classifier_file', item_id=item.item_id) }}" alt="Classifier input for {{ item.event_id }}" loading="lazy"></a>
             <div class="classifier-details">
+              <label class="card-selector"><input class="review-select" type="checkbox" name="item_ids" value="{{ item.item_id }}" form="bulk-review-form"> Select event</label>
               <span class="decision-badge {{ item.classification_status }}">{{ item.classification_status|replace('_', ' ') }}</span>
               <h2>{{ item.display_label }}</h2>
               {% if item.review_suggestion_label %}<p>Known-class possibility: <strong>{{ item.review_suggestion_label }}</strong> at {{ '%.1f%%'|format(item.review_suggestion_confidence * 100) }}</p>{% elif item.top_label %}<p>Model suggestion: <strong>{{ item.top_label }}</strong> at {{ '%.1f%%'|format(item.top_confidence * 100) }}</p>{% else %}<p>No model class exceeded the detection threshold.</p>{% endif %}
@@ -61,28 +86,32 @@
               {% if selected_state == 'errors' %}
                 <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='retry') }}">
                   <input type="hidden" name="review_token" value="{{ review_token }}">
+                  <input type="hidden" name="return_state" value="{{ selected_state }}">
                   <button class="approve-button" type="submit">Retry classification</button>
                 </form>
               {% endif %}
                 <div class="review-actions stacked">
-                  {% if item.model_suggestion %}
-                  <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='confirm-model') }}">
-                    <input type="hidden" name="review_token" value="{{ review_token }}">
-                    <button class="approve-button" type="submit">Confirm model label: {{ item.model_suggestion|replace('_', ' ')|title }}</button>
-                  </form>
-                  {% endif %}
                   <form class="approve-form" method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}">
                     <input type="hidden" name="review_token" value="{{ review_token }}">
-                    <label for="approval-label-{{ item.item_id }}">Type the correct animal or object</label>
+                    <input type="hidden" name="return_state" value="{{ selected_state }}">
+                    {% set selected_label = item.human_label if item.human_label not in (none, 'unknown', 'false_positive') else item.model_suggestion %}
+                    <label for="approval-label-{{ item.item_id }}">Confirm or correct the classifier label</label>
+                    <select id="approval-label-{{ item.item_id }}" name="approval_label">
+                      <option value="">Choose a classifier or wildlife label</option>
+                      {% for label in training_label_suggestions %}
+                        <option value="{{ label }}"{% if selected_label == label %} selected{% endif %}>{{ label|replace('_', ' ')|title }}{% if item.model_suggestion == label %} (model guess){% endif %}</option>
+                      {% endfor %}
+                    </select>
+                    <label for="custom-label-{{ item.item_id }}">Not listed? Type the correct animal or object</label>
                     <div class="approve-row">
-                      <input id="approval-label-{{ item.item_id }}" name="approval_label" list="training-label-suggestions" value="{{ item.human_label if item.human_label not in ('unknown', 'false_positive') else '' }}" placeholder="squirrel, rabbit, raccoon..." maxlength="40" required autocomplete="off">
+                      <input id="custom-label-{{ item.item_id }}" name="custom_label" placeholder="e.g. eastern cottontail" maxlength="40" autocomplete="off">
                       <button class="approve-button" type="submit">Save verified label</button>
                     </div>
-                    <small>Spaces and hyphens are normalized so repeated labels stay consistent.</small>
+                    <small>The model guess is preselected when available. A typed label overrides the list.</small>
                   </form>
                   <div class="secondary-review-actions">
-                    <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='unknown') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="unknown-button" type="submit">Keep Unknown</button></form>
-                    <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='false-positive') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="reject-button" type="submit">False Positive</button></form>
+                    <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='unknown') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><input type="hidden" name="return_state" value="{{ selected_state }}"><button class="unknown-button" type="submit">Keep Unknown</button></form>
+                    <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='false-positive') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><input type="hidden" name="return_state" value="{{ selected_state }}"><button class="reject-button" type="submit">False Positive</button></form>
                   </div>
                 </div>
             </div>
@@ -91,7 +120,17 @@
       </div>
     {% else %}<div class="empty-state"><p>No events in {{ selected_state|replace('_', ' ') }}.</p><small>Unknown events remain available for the normal 30-day retention period. Human-verified training copies do not expire with events.</small></div>{% endif %}
   </section>
-  <datalist id="training-label-suggestions">
-    {% for label in training_label_suggestions %}<option value="{{ label }}">{{ label|replace('_', ' ')|title }}</option>{% endfor %}
-  </datalist>
+  <script>
+    const selectAll = document.getElementById("select-all-events");
+    const eventSelectors = Array.from(document.querySelectorAll(".review-select"));
+    if (selectAll) {
+      selectAll.addEventListener("change", () => {
+        eventSelectors.forEach((checkbox) => { checkbox.checked = selectAll.checked; });
+      });
+      eventSelectors.forEach((checkbox) => checkbox.addEventListener("change", () => {
+        selectAll.checked = eventSelectors.length > 0 && eventSelectors.every((item) => item.checked);
+        selectAll.indeterminate = eventSelectors.some((item) => item.checked) && !selectAll.checked;
+      }));
+    }
+  </script>
 {% endblock %}
