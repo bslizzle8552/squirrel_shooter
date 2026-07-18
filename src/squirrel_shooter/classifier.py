@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -27,11 +28,30 @@ VOC_LABELS = (
     "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor",
 )
 CLASSIFICATION_VIEWS = frozenset({"review", "unknown", "known", "errors", "false_positive"})
-MANUAL_APPROVAL_LABELS = frozenset({"car", "person"})
-HUMAN_LABELS = frozenset({"car", "person", "unknown", "false_positive"})
+LEGACY_APPROVAL_LABELS = frozenset({"car", "person"})
+TRAINING_LABEL_SUGGESTIONS = (
+    "squirrel",
+    "chipmunk",
+    "rabbit",
+    "bird",
+    "raccoon",
+    "opossum",
+    "groundhog",
+    "deer",
+    "fox",
+    "skunk",
+    "cat",
+    "dog",
+    "person",
+    "car",
+    "other_animal",
+)
 SAFE_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
+SAFE_TRAINING_LABEL = re.compile(r"[a-z][a-z0-9_]{1,39}")
 CLASSIFICATION_FILENAME = "classification.json"
 CLASSIFIER_INPUT_FILENAME = "classifier-input.jpg"
+TRAINING_DATASET_DIRECTORY = "training-dataset"
+TRAINING_MANIFEST_FILENAME = "manifest.jsonl"
 
 
 @dataclass(frozen=True)
@@ -130,6 +150,23 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _atomic_text(path: Path, content: str) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def normalize_training_label(value: str) -> str:
+    """Create one stable, filesystem-safe class name from human-entered truth."""
+
+    normalized = re.sub(r"_+", "_", re.sub(r"[\s-]+", "_", value.strip().lower())).strip("_")
+    if not SAFE_TRAINING_LABEL.fullmatch(normalized):
+        raise ValueError("Label must be 2-40 characters using letters, numbers, spaces, hyphens, or underscores")
+    if normalized in {"unknown", "false_positive", "background"}:
+        raise ValueError("Use the dedicated Unknown or False Positive action for this label")
+    return normalized
+
+
 class ClassifierEvidenceStore:
     """Persist exact classifier inputs, decisions, and append-only audit records."""
 
@@ -142,6 +179,9 @@ class ClassifierEvidenceStore:
         self.config = config.classifier
         self.legacy_root = self.config.evidence_directory
         self.events_root = config.camera.output_directory / "events"
+        self.training_root = config.camera.output_directory / TRAINING_DATASET_DIRECTORY
+        self.training_samples_root = self.training_root / "samples"
+        self.training_manifest_path = self.training_root / TRAINING_MANIFEST_FILENAME
         self.audit_path = config.logging.directory / self.config.audit_log_filename
         self._image_writer = image_writer
         self._lock = threading.Lock()
@@ -153,8 +193,10 @@ class ClassifierEvidenceStore:
             if self._prepared:
                 return
             self.events_root.mkdir(parents=True, exist_ok=True)
+            self.training_samples_root.mkdir(parents=True, exist_ok=True)
             self.audit_path.parent.mkdir(parents=True, exist_ok=True)
             self._migrate_legacy_evidence()
+            self._rebuild_training_manifest()
             self._prepared = True
 
     def save_classification(
@@ -198,7 +240,7 @@ class ClassifierEvidenceStore:
         image_path = task.event_directory / CLASSIFIER_INPUT_FILENAME
         metadata_path = task.event_directory / CLASSIFICATION_FILENAME
         record = {
-            "schema_version": 2,
+            "schema_version": 3,
             "item_id": item_id,
             "event_id": task.event_id,
             "source_event_directory": str(task.event_directory),
@@ -226,6 +268,11 @@ class ClassifierEvidenceStore:
             "auto_accepted": outcome == "auto_labeled",
             "approved_label": automatic_label.label if automatic_label is not None else None,
             "human_label": None,
+            "human_label_action": None,
+            "human_verified": False,
+            "training_label": None,
+            "training_dataset_status": "not_human_verified",
+            "training_sample_relative": None,
             "error": error,
             "latency_ms": None if latency_ms is None else round(latency_ms, 2),
             "input_image_path": str(image_path),
@@ -261,6 +308,29 @@ class ClassifierEvidenceStore:
 
     def counts(self) -> dict[str, int]:
         return {view: len(self.list_items(view)) for view in CLASSIFICATION_VIEWS}
+
+    def training_summary(self) -> dict[str, Any]:
+        self.prepare()
+        samples = self._training_samples(eligible_only=True)
+        labels: dict[str, int] = {}
+        for sample in samples:
+            label = str(sample.get("label", ""))
+            if label:
+                labels[label] = labels.get(label, 0) + 1
+        return {
+            "eligible_samples": len(samples),
+            "labels": dict(sorted(labels.items())),
+            "manifest_relative": f"{TRAINING_DATASET_DIRECTORY}/{TRAINING_MANIFEST_FILENAME}",
+        }
+
+    def training_label_suggestions(self) -> tuple[str, ...]:
+        self.prepare()
+        observed = {
+            str(sample.get("label"))
+            for sample in self._training_samples(eligible_only=True)
+            if sample.get("label") not in {None, "", "background"}
+        }
+        return tuple(dict.fromkeys((*TRAINING_LABEL_SUGGESTIONS, *sorted(observed))))
 
     def overview(self) -> dict[str, list[dict[str, Any]]]:
         """Return every view's items from a single evidence-directory scan.
@@ -332,46 +402,183 @@ class ClassifierEvidenceStore:
         if SAFE_ITEM_ID.fullmatch(item_id) is None:
             raise ValueError("Unsafe classifier evidence id")
         if decision == "approve":
-            label = approval_label.strip().lower() if isinstance(approval_label, str) else None
-            if label not in MANUAL_APPROVAL_LABELS:
-                raise ValueError("Manual approval requires a car or person label")
+            if not isinstance(approval_label, str):
+                raise ValueError("A corrected label is required")
+            label = normalize_training_label(approval_label)
+            record = self.get_record(item_id)
+            model_label = str(record.get("model_suggestion") or "")
+            action = "model_confirmed" if label == model_label else "human_corrected"
+        elif decision == "confirm-model":
+            record = self.get_record(item_id)
+            suggestion = record.get("model_suggestion") or record.get("top_label")
+            if not isinstance(suggestion, str) or not suggestion:
+                raise ValueError("This event has no model suggestion to confirm")
+            label = normalize_training_label(suggestion)
+            action = "model_confirmed"
         elif decision in {"unknown", "reject"}:
             label = "unknown"
+            action = "marked_unknown"
         elif decision == "false-positive":
             label = "false_positive"
+            action = "marked_false_positive"
         else:
             raise ValueError("Unknown classifier review decision")
-        return self.set_label(item_id, label)
+        return self.set_label(item_id, label, label_action=action)
 
-    def set_label(self, item_id: str, label: str) -> dict[str, Any]:
+    def set_label(self, item_id: str, label: str, *, label_action: str = "human_corrected") -> dict[str, Any]:
         if SAFE_ITEM_ID.fullmatch(item_id) is None:
             raise ValueError("Unsafe classifier evidence id")
-        normalized_label = label.strip().lower()
-        if normalized_label not in HUMAN_LABELS:
-            raise ValueError("Human label must be car, person, unknown, or false_positive")
+        normalized_label = label if label in {"unknown", "false_positive"} else normalize_training_label(label)
         metadata_path = self._record_path(item_id)
         with self._lock:
             try:
                 record = json.loads(metadata_path.read_text(encoding="utf-8"))
             except FileNotFoundError as exc:
                 raise KeyError(item_id) from exc
-            status = "known" if normalized_label in MANUAL_APPROVAL_LABELS else normalized_label
+            status = normalized_label if normalized_label in {"unknown", "false_positive"} else "known"
             display_label = normalized_label.replace("_", " ").title()
+            reviewed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            training_label = "background" if normalized_label == "false_positive" else (
+                None if normalized_label == "unknown" else normalized_label
+            )
             record.update(
+                schema_version=3,
                 classification_status=status,
                 display_label=display_label,
                 label_source="human",
                 review_state="complete",
                 outcome="human_labeled",
-                approved_label=normalized_label if normalized_label in MANUAL_APPROVAL_LABELS else None,
-                decision_label=normalized_label if normalized_label in MANUAL_APPROVAL_LABELS else None,
+                approved_label=normalized_label if status == "known" else None,
+                decision_label=normalized_label if status == "known" else None,
                 decision_confidence=None,
                 human_label=normalized_label,
-                reviewed_at=datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                human_label_action=label_action,
+                human_verified=True,
+                reviewed_at=reviewed_at,
             )
+            if training_label is None:
+                self._exclude_training_sample(item_id, "human_marked_unknown", reviewed_at)
+                record.update(
+                    training_label=None,
+                    training_dataset_status="excluded_unknown",
+                    training_sample_relative=None,
+                )
+            else:
+                sample_relative = self._write_training_sample(
+                    metadata_path,
+                    record,
+                    training_label,
+                    label_action,
+                    reviewed_at,
+                )
+                record.update(
+                    training_label=training_label,
+                    training_dataset_status="included",
+                    training_sample_relative=sample_relative,
+                )
             _atomic_json(metadata_path, record)
+            self._update_event_truth(metadata_path.parent, record)
             self._append_audit({"action": "human_labeled", **record})
         return record
+
+    def _write_training_sample(
+        self,
+        metadata_path: Path,
+        record: dict[str, Any],
+        training_label: str,
+        label_action: str,
+        labeled_at: str,
+    ) -> str:
+        source_image = metadata_path.parent / CLASSIFIER_INPUT_FILENAME
+        if not source_image.is_file():
+            raise OSError(f"Classifier input is missing: {source_image}")
+        sample_directory = self.training_samples_root / str(record["item_id"])
+        sample_directory.mkdir(parents=True, exist_ok=True)
+        image_path = sample_directory / "image.jpg"
+        shutil.copy2(source_image, image_path)
+        image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        event: dict[str, Any] = {}
+        try:
+            loaded_event = json.loads((metadata_path.parent / "event.json").read_text(encoding="utf-8"))
+            event = loaded_event if isinstance(loaded_event, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            pass
+        image_relative = image_path.relative_to(self.training_root).as_posix()
+        sample = {
+            "schema_version": 1,
+            "sample_id": record["item_id"],
+            "event_id": record.get("event_id"),
+            "task": "small_wildlife_image_classification",
+            "label": training_label,
+            "human_verified": True,
+            "training_eligible": True,
+            "label_action": label_action,
+            "labeled_at": labeled_at,
+            "image_relative_path": image_relative,
+            "image_sha256": image_hash,
+            "source": {
+                "classifier_model": record.get("model"),
+                "model_suggestion": record.get("model_suggestion"),
+                "top_label": record.get("top_label"),
+                "top_confidence": record.get("top_confidence"),
+                "detections": record.get("detections", []),
+                "classifier_frame_number": record.get("frame_number"),
+                "source_bounding_box": record.get("source_bounding_box"),
+                "crop_bounding_box": record.get("crop_bounding_box"),
+                "event_start_timestamp": event.get("start_timestamp"),
+                "motion_category": event.get("provisional_category"),
+                "movement_attributes": event.get("movement_attributes", []),
+            },
+        }
+        _atomic_json(sample_directory / "sample.json", sample)
+        self._rebuild_training_manifest()
+        return f"{TRAINING_DATASET_DIRECTORY}/{image_relative}"
+
+    def _exclude_training_sample(self, item_id: str, reason: str, excluded_at: str) -> None:
+        sample_path = self.training_samples_root / item_id / "sample.json"
+        try:
+            sample = json.loads(sample_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._rebuild_training_manifest()
+            return
+        if isinstance(sample, dict):
+            sample.update(training_eligible=False, exclusion_reason=reason, excluded_at=excluded_at)
+            _atomic_json(sample_path, sample)
+        self._rebuild_training_manifest()
+
+    def _training_samples(self, *, eligible_only: bool) -> list[dict[str, Any]]:
+        samples: list[dict[str, Any]] = []
+        for path in self.training_samples_root.glob("*/sample.json"):
+            try:
+                sample = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(sample, dict) and (not eligible_only or sample.get("training_eligible") is True):
+                    samples.append(sample)
+            except (OSError, json.JSONDecodeError):
+                continue
+        return sorted(samples, key=lambda item: str(item.get("sample_id", "")))
+
+    def _rebuild_training_manifest(self) -> None:
+        samples = self._training_samples(eligible_only=True)
+        content = "".join(json.dumps(sample, default=str, sort_keys=True) + "\n" for sample in samples)
+        _atomic_text(self.training_manifest_path, content)
+
+    @staticmethod
+    def _update_event_truth(event_directory: Path, record: dict[str, Any]) -> None:
+        event_path = event_directory / "event.json"
+        try:
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(event, dict):
+            return
+        event.update(
+            human_review_label=record.get("human_label"),
+            human_review_notes=f"Classifier review: {record.get('human_label_action')}",
+            human_reviewed_at=record.get("reviewed_at"),
+            training_label=record.get("training_label"),
+            training_sample_relative=record.get("training_sample_relative"),
+        )
+        _atomic_json(event_path, event)
 
     def _record_path(self, item_id: str) -> Path:
         if SAFE_ITEM_ID.fullmatch(item_id) is None:
@@ -647,14 +854,14 @@ def _migrate_legacy_record(legacy: dict[str, Any], event_directory: Path) -> dic
         (
             str(item.get("label"))
             for item in detections
-            if isinstance(item, dict) and item.get("label") in MANUAL_APPROVAL_LABELS
+            if isinstance(item, dict) and item.get("label") in LEGACY_APPROVAL_LABELS
         ),
         None,
     )
     approved = str(legacy.get("approved_label") or "").lower()
     outcome = str(legacy.get("outcome") or "")
     error = legacy.get("error")
-    if approved in MANUAL_APPROVAL_LABELS and outcome == "manual_approved":
+    if approved in LEGACY_APPROVAL_LABELS and outcome == "manual_approved":
         status, display_label, label_source, review_state = "known", approved.title(), "human", "complete"
         final_label = approved
     elif error or outcome == "classifier_error":
@@ -662,7 +869,7 @@ def _migrate_legacy_record(legacy: dict[str, Any], event_directory: Path) -> dic
             "unclassified", "Classification unavailable", None, "error"
         )
         final_label = None
-    elif approved in MANUAL_APPROVAL_LABELS:
+    elif approved in LEGACY_APPROVAL_LABELS:
         status, display_label, label_source, review_state = "known", approved.title(), "automatic", "complete"
         final_label = approved
     elif outcome == "edge_case" and known_suggestion:
@@ -673,7 +880,7 @@ def _migrate_legacy_record(legacy: dict[str, Any], event_directory: Path) -> dic
         final_label = None
     return {
         **legacy,
-        "schema_version": 2,
+        "schema_version": 3,
         "source_event_directory": str(event_directory),
         "classification_status": status,
         "display_label": display_label,
@@ -683,6 +890,11 @@ def _migrate_legacy_record(legacy: dict[str, Any], event_directory: Path) -> dic
         "decision_label": final_label,
         "approved_label": final_label,
         "human_label": final_label if label_source == "human" else None,
+        "human_label_action": "legacy_manual" if label_source == "human" else None,
+        "human_verified": label_source == "human",
+        "training_label": None,
+        "training_dataset_status": "legacy_requires_reconfirmation",
+        "training_sample_relative": None,
         "input_image_path": str(event_directory / CLASSIFIER_INPUT_FILENAME),
         "legacy_migrated": True,
     }

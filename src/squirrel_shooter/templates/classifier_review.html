@@ -13,6 +13,7 @@
         <span class="chip"><b>{{ counts.known }}</b> known</span>
         <span class="chip"><b>{{ counts.unknown }}</b> unknown</span>
         <span class="chip"><b>{{ counts.errors }}</b> errors</span>
+        <span class="chip chip-accent"><b>{{ training.eligible_samples }}</b> training samples</span>
       </div>
     </div>
     <div class="hero-actions"><a class="button" href="{{ url_for('dashboard') }}">Back to live camera</a></div>
@@ -27,7 +28,10 @@
         <a class="{{ 'selected' if selected_state == 'errors' else '' }}" href="{{ url_for('classifier_review', state='errors') }}" {{ 'aria-current="page"'|safe if selected_state == 'errors' }}>Errors <b>{{ counts.errors }}</b></a>
         <a class="{{ 'selected' if selected_state == 'false_positive' else '' }}" href="{{ url_for('classifier_review', state='false_positive') }}" {{ 'aria-current="page"'|safe if selected_state == 'false_positive' }}>False positives <b>{{ counts.false_positive }}</b></a>
       </nav>
-      <a class="button ghost" href="{{ url_for('log_file', relative_path=audit_log_filename) }}">Classification audit log</a>
+      <div class="evidence-links">
+        <a class="button ghost" href="{{ url_for('log_file', relative_path=audit_log_filename) }}">Classification audit log</a>
+        <a class="button ghost" href="{{ url_for('output_file', relative_path=training.manifest_relative) }}" download>Training manifest</a>
+      </div>
     </div>
     {% if message %}<p class="review-message">{{ message }}</p>{% endif %}
 
@@ -45,6 +49,7 @@
                 <div><dt>Inference</dt><dd>{{ ('%.0f ms'|format(item.latency_ms)) if item.latency_ms is not none else 'Unavailable' }}</dd></div>
                 <div><dt>Source</dt><dd>{{ item.label_source or 'Not labeled' }}</dd></div>
                 <div><dt>Event</dt><dd>{{ item.event_id }}</dd></div>
+                <div><dt>Training</dt><dd>{{ item.training_label or 'Not verified' }}</dd></div>
               </dl>
               {% if item.error %}<p class="classifier-error">{{ item.error }}</p>{% endif %}
               <div class="evidence-links">
@@ -58,30 +63,35 @@
                   <input type="hidden" name="review_token" value="{{ review_token }}">
                   <button class="approve-button" type="submit">Retry classification</button>
                 </form>
-              {% else %}
+              {% endif %}
                 <div class="review-actions stacked">
+                  {% if item.model_suggestion %}
+                  <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='confirm-model') }}">
+                    <input type="hidden" name="review_token" value="{{ review_token }}">
+                    <button class="approve-button" type="submit">Confirm model label: {{ item.model_suggestion|replace('_', ' ')|title }}</button>
+                  </form>
+                  {% endif %}
                   <form class="approve-form" method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='approve') }}">
                     <input type="hidden" name="review_token" value="{{ review_token }}">
-                    <label for="approval-label-{{ item.item_id }}">Confirm or correct the known label</label>
+                    <label for="approval-label-{{ item.item_id }}">Type the correct animal or object</label>
                     <div class="approve-row">
-                      <select id="approval-label-{{ item.item_id }}" name="approval_label" required>
-                        <option value="" selected disabled>Choose car or person</option>
-                        <option value="car">Car</option>
-                        <option value="person">Person</option>
-                      </select>
-                      <button class="approve-button" type="submit">Save known label</button>
+                      <input id="approval-label-{{ item.item_id }}" name="approval_label" list="training-label-suggestions" value="{{ item.human_label if item.human_label not in ('unknown', 'false_positive') else '' }}" placeholder="squirrel, rabbit, raccoon..." maxlength="40" required autocomplete="off">
+                      <button class="approve-button" type="submit">Save verified label</button>
                     </div>
+                    <small>Spaces and hyphens are normalized so repeated labels stay consistent.</small>
                   </form>
                   <div class="secondary-review-actions">
                     <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='unknown') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="unknown-button" type="submit">Keep Unknown</button></form>
                     <form method="post" action="{{ url_for('classifier_decision', item_id=item.item_id, decision='false-positive') }}"><input type="hidden" name="review_token" value="{{ review_token }}"><button class="reject-button" type="submit">False Positive</button></form>
                   </div>
                 </div>
-              {% endif %}
             </div>
           </article>
         {% endfor %}
       </div>
-    {% else %}<div class="empty-state"><p>No events in {{ selected_state|replace('_', ' ') }}.</p><small>Unknown events remain available for the normal 30-day retention period.</small></div>{% endif %}
+    {% else %}<div class="empty-state"><p>No events in {{ selected_state|replace('_', ' ') }}.</p><small>Unknown events remain available for the normal 30-day retention period. Human-verified training copies do not expire with events.</small></div>{% endif %}
   </section>
+  <datalist id="training-label-suggestions">
+    {% for label in training_label_suggestions %}<option value="{{ label }}">{{ label|replace('_', ' ')|title }}</option>{% endfor %}
+  </datalist>
 {% endblock %}

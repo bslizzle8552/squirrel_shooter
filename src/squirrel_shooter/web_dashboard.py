@@ -176,6 +176,11 @@ def _review_item_payload(item: dict[str, Any]) -> dict[str, Any]:
         "top_confidence": item.get("top_confidence"),
         "review_suggestion_label": item.get("review_suggestion_label"),
         "review_suggestion_confidence": item.get("review_suggestion_confidence"),
+        "model_suggestion": item.get("model_suggestion"),
+        "human_label": item.get("human_label"),
+        "human_verified": item.get("human_verified", False),
+        "training_label": item.get("training_label"),
+        "training_dataset_status": item.get("training_dataset_status"),
         "latency_ms": item.get("latency_ms"),
         "frame_number": item.get("frame_number"),
         "error": item.get("error"),
@@ -355,6 +360,7 @@ def create_app(
         state = request.args.get("state", "review")
         if state not in CLASSIFICATION_VIEWS:
             abort(404)
+        training = classifier_store.training_summary()
         return render_template(
             "classifier_review.html",
             items=classifier_store.list_items(state),
@@ -363,6 +369,8 @@ def create_app(
             review_token=classifier_review_token,
             audit_log_filename=app_config.classifier.audit_log_filename,
             config_frame_number=app_config.classifier.event_frame_number,
+            training=training,
+            training_label_suggestions=classifier_store.training_label_suggestions(),
             message=request.args.get("message"),
             demo_mode=demo_mode,
         )
@@ -387,6 +395,8 @@ def create_app(
         except (OSError, ValueError):
             abort(400)
         message = f"Event labeled {record['display_label']}"
+        if record.get("training_dataset_status") == "included":
+            message += f"; verified {record['training_label']} sample saved for training"
         if request.form.get("format") == "json":
             return jsonify(
                 ok=True,
@@ -394,6 +404,8 @@ def create_app(
                 item_id=item_id,
                 classification_status=record["classification_status"],
                 display_label=record["display_label"],
+                training_label=record.get("training_label"),
+                training_dataset_status=record.get("training_dataset_status"),
             )
         destination = "errors" if record["classification_status"] == "unclassified" else record["classification_status"]
         return redirect(url_for("classifier_review", state=destination, message=message))

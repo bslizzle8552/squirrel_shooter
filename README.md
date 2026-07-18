@@ -177,6 +177,12 @@ captures/
         classifier-input.jpg  # exact crop submitted to the object model
         classification.json   # model output, visible label, and human decision
   classifier/                 # legacy evidence preserved during automatic migration
+  training-dataset/           # human-verified data, outside 30-day event retention
+    manifest.jsonl            # one current, training-eligible row per sample
+    samples/
+      <event-id>/
+        image.jpg             # unannotated classifier crop used for future training
+        sample.json           # human truth, hashes, model output, boxes, and event provenance
   manual/
   rejections/                 # only when rejection snapshots are enabled
   logs/
@@ -340,11 +346,12 @@ or other unsupported animal remains visible for the normal 30-day event retentio
 A high-confidence `dog`, for example, remains Unknown because this MVP only trusts
 person and car as visible labels; the raw dog suggestion is still recorded.
 
-Human actions are Confirm Person, Confirm Car, Keep Unknown, and False Positive.
-Only a human can mark an event false positive. Model-load and queue errors appear
-as Classification unavailable in the Errors view and can be retried from the exact
-saved input after the model is available. Existing automatic person/car labels can
-also be corrected back to Unknown.
+The Object Review page supports three human-truth paths: confirm the model's exact
+suggestion, type a corrected animal/object label, or mark the image Unknown/False
+Positive. Typed values such as `Eastern Gray-Squirrel` are normalized to stable
+class names such as `eastern_gray_squirrel`; the page offers common backyard
+wildlife labels and reuses labels already present in the dataset. Model-load and
+queue errors can still be labeled manually or retried from their exact saved input.
 
 Every attempt records the submitted frame number, crop and source boxes, model,
 all detections, confidence, inference time, automatic/manual decision, error, and
@@ -356,6 +363,28 @@ such as `small_animal_candidate` remains visible only as secondary diagnostic da
 This classifier
 uses the VOC label set, which includes people, cars, birds, cats, and dogs but not
 squirrels or rabbits.
+
+Every human-confirmed or human-corrected label copies the clean, unannotated
+classifier crop into `captures/training-dataset`. It also stores SHA-256, model
+suggestions and detections, source/crop boxes, frame number, event time, motion
+category, and movement attributes. This dataset is intentionally outside
+`captures/events`, so the verified copy survives normal 30-day event retention.
+Relabeling updates the same sample and rebuilds the canonical manifest without
+duplicates. Unknown is excluded because it is not ground truth; a human-marked
+False Positive is included as `background`, which provides useful negative
+training examples. Automatically accepted model labels do not enter training
+until a human confirms them.
+
+To copy the eventual dataset from the Pi without touching event retention:
+
+```bash
+scp -r PI_USER@PI_TAILSCALE_HOSTNAME:PI_REPOSITORY_PATH/captures/training-dataset ./training-dataset
+```
+
+Replace the three placeholders with the Pi account, Tailnet hostname, and actual
+repository path. `manifest.jsonl` is the source of truth for training-eligible
+samples; do not train by blindly scanning every sample directory because excluded
+samples are intentionally retained for audit history.
 
 On first start after upgrading, legacy `captures/classifier/pending`, `accepted`,
 and `rejected` records are copied into their matching event folders. Old files are

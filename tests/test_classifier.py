@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -117,6 +118,7 @@ def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tm
         assert (classifier_task.event_directory / "classifier-input.jpg").is_file()
         assert (classifier_task.event_directory / "classification.json").is_file()
     assert store.counts() == {"known": 1, "unknown": 2, "review": 1, "errors": 0, "false_positive": 0}
+    assert store.training_summary()["eligible_samples"] == 0
     audit = config.logging.directory / config.classifier.audit_log_filename
     assert [json.loads(line)["action"] for line in audit.read_text(encoding="utf-8").splitlines()] == [
         "classified",
@@ -125,17 +127,90 @@ def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tm
         "classified",
     ]
 
-    with pytest.raises(ValueError, match="car or person"):
+    with pytest.raises(ValueError, match="corrected label"):
         store.review("review-event", "approve")
     reviewed = store.review("review-event", "approve", "car")
 
     assert reviewed["classification_status"] == "known" and reviewed["display_label"] == "Car"
     assert reviewed["human_label"] == "car" and reviewed["label_source"] == "human"
+    assert reviewed["training_label"] == "car" and reviewed["training_dataset_status"] == "included"
+    assert (config.camera.output_directory / reviewed["training_sample_relative"]).is_file()
+    assert store.training_summary()["labels"] == {"car": 1}
     assert json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])["action"] == "human_labeled"
 
     corrected = store.review("person-event", "unknown")
     assert corrected["classification_status"] == "unknown" and corrected["display_label"] == "Unknown"
     assert corrected["label_source"] == "human" and corrected["human_label"] == "unknown"
+
+
+def test_human_truth_builds_durable_current_training_manifest(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    wildlife_task = task(tmp_path, "wildlife-event")
+    (wildlife_task.event_directory / "event.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "event_id": wildlife_task.event_id,
+                "start_timestamp": "2026-07-18T08:00:00-04:00",
+                "provisional_category": "small_animal_candidate",
+                "movement_attributes": ["coherent_travel"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.save_classification(
+        wildlife_task,
+        [ClassifierDetection("dog", 0.78, (2, 3, 12, 14))],
+        110.0,
+        "test-model",
+    )
+
+    confirmed = store.review("wildlife-event", "confirm-model")
+    assert confirmed["human_label"] == "dog"
+    assert confirmed["human_label_action"] == "model_confirmed"
+    assert confirmed["human_verified"] is True
+    sample_image = config.camera.output_directory / str(confirmed["training_sample_relative"])
+    assert sample_image.is_file()
+    sample = json.loads((sample_image.parent / "sample.json").read_text(encoding="utf-8"))
+    assert sample["label"] == "dog" and sample["training_eligible"] is True
+    assert sample["source"]["motion_category"] == "small_animal_candidate"
+    assert sample["image_sha256"] == hashlib.sha256(sample_image.read_bytes()).hexdigest()
+
+    corrected = store.review("wildlife-event", "approve", "Eastern Gray-Squirrel")
+    assert corrected["human_label"] == "eastern_gray_squirrel"
+    manifest_rows = [
+        json.loads(line)
+        for line in store.training_manifest_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(manifest_rows) == 1
+    assert manifest_rows[0]["label"] == "eastern_gray_squirrel"
+    assert store.training_summary()["labels"] == {"eastern_gray_squirrel": 1}
+    event = json.loads((wildlife_task.event_directory / "event.json").read_text(encoding="utf-8"))
+    assert event["human_review_label"] == "eastern_gray_squirrel"
+    assert event["training_label"] == "eastern_gray_squirrel"
+
+    shutil.rmtree(wildlife_task.event_directory)
+    assert sample_image.is_file()
+    assert store.training_manifest_path.is_file()
+
+
+def test_unknown_is_excluded_and_false_positive_becomes_background_training_data(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    uncertain_task = task(tmp_path, "uncertain-event")
+    background_task = task(tmp_path, "background-event")
+    store.save_classification(uncertain_task, [], 100.0, "test-model")
+    store.save_classification(background_task, [], 100.0, "test-model")
+
+    store.review("uncertain-event", "approve", "squirrel")
+    excluded = store.review("uncertain-event", "unknown")
+    background = store.review("background-event", "false-positive")
+
+    assert excluded["training_dataset_status"] == "excluded_unknown"
+    assert background["training_label"] == "background"
+    manifest = [json.loads(line) for line in store.training_manifest_path.read_text(encoding="utf-8").splitlines()]
+    assert [sample["label"] for sample in manifest] == ["background"]
 
 
 def test_legacy_classifier_evidence_is_copied_without_deleting_originals(tmp_path: Path) -> None:
@@ -349,6 +424,7 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
         "test-model",
     )
     store.save_classification(task(tmp_path, "unknown-event"), [], 100.0, "test-model")
+    store.save_classification(task(tmp_path, "false-event"), [], 100.0, "test-model")
 
     camera = SimpleNamespace(
         start=lambda: None,
@@ -386,24 +462,37 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     ).status_code == 400
     assert client.post(
         "/classifier-review/review-event/approve",
-        data={"review_token": token, "approval_label": "squirrel"},
+        data={"review_token": token, "approval_label": "?"},
     ).status_code == 400
+    confirmed = client.post(
+        "/classifier-review/review-event/confirm-model",
+        data={"review_token": token},
+    )
+    assert confirmed.status_code == 302
     approved = client.post(
-        "/classifier-review/review-event/approve",
-        data={"review_token": token, "approval_label": "person"},
+        "/classifier-review/unknown-event/approve",
+        data={"review_token": token, "approval_label": "Eastern Gray Squirrel"},
     )
     assert approved.status_code == 302
     known_page = client.get("/classifier-review?state=known").data
-    assert b"review-event" in known_page and b"Person" in known_page and b"human" in known_page
+    assert b"review-event" in known_page and b"Person" in known_page
+    assert b"unknown-event" in known_page and b"Eastern Gray Squirrel" in known_page
+    assert b"Training manifest" in known_page and b"training samples" in known_page
+    assert client.get("/files/training-dataset/manifest.jsonl").status_code == 200
 
     response = client.post(
-        "/classifier-review/unknown-event/false-positive",
+        "/classifier-review/false-event/false-positive",
         data={"review_token": token},
     )
 
     assert response.status_code == 302
     false_positive_page = client.get("/classifier-review?state=false_positive").data
-    assert b"unknown-event" in false_positive_page and b"False Positive" in false_positive_page
+    assert b"false-event" in false_positive_page and b"False Positive" in false_positive_page
+    assert store.training_summary()["labels"] == {
+        "background": 1,
+        "eastern_gray_squirrel": 1,
+        "person": 1,
+    }
 
 
 def test_classifier_review_json_api_lists_items_and_accepts_decisions(tmp_path: Path) -> None:
@@ -468,10 +557,13 @@ def test_classifier_review_json_api_lists_items_and_accepts_decisions(tmp_path: 
     assert decided.json["ok"] is True
     assert decided.json["classification_status"] == "known"
     assert decided.json["display_label"] == "Car"
+    assert decided.json["training_label"] == "car"
+    assert decided.json["training_dataset_status"] == "included"
 
     updated = client.get("/api/classifier-review?state=review").json
     assert updated["counts"]["review"] == 0
     assert updated["counts"]["known"] == 1
+    assert store.training_summary()["labels"] == {"car": 1}
 
 
 def test_classifier_image_route_resolves_pi_style_relative_capture_path(
