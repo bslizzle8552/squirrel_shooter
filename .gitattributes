@@ -9,3 +9,5 @@
 *.md text eol=lf
 *.css text eol=lf
 *.html text eol=lf
+*.service text eol=lf
+*.txt text eol=lf

@@ -1,0 +1,68 @@
+SQUIRREL SQUIRTER - RASPBERRY PI COMMANDS
+
+
+ONE-TIME SERVICE INSTALL
+
+If the program is currently running in the terminal, press Ctrl+C once first.
+
+cd ~/squirrel_shooter
+mkdir -p ~/.config/systemd/user
+install -m 644 deploy/systemd/squirrel-squirter.service ~/.config/systemd/user/squirrel-squirter.service
+sudo loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user enable --now squirrel-squirter.service
+systemctl --user status squirrel-squirter.service --no-pager
+
+After this succeeds, the Pi keeps the program running when SSH disconnects or the
+laptop turns off. It also starts automatically after the Pi reboots.
+
+
+EVERYDAY CONTROLS
+
+Start:
+systemctl --user start squirrel-squirter.service
+
+Stop safely and completely:
+systemctl --user stop squirrel-squirter.service
+
+Restart safely:
+systemctl --user restart squirrel-squirter.service
+
+Check whether it is running:
+systemctl --user status squirrel-squirter.service --no-pager
+
+Watch live logs (press Ctrl+C to stop watching logs only; the service keeps running):
+journalctl --user -u squirrel-squirter.service -f
+
+Show recent logs without following:
+journalctl --user -u squirrel-squirter.service -n 100 --no-pager
+
+
+PULL, TEST, AND RESTART AFTER A GITHUB UPDATE
+
+systemctl --user stop squirrel-squirter.service && \
+cd ~/squirrel_shooter && \
+git pull --ff-only origin main && \
+source .venv/bin/activate && \
+python -m pip install -e ".[test]" && \
+python -m pytest && \
+install -m 644 deploy/systemd/squirrel-squirter.service ~/.config/systemd/user/squirrel-squirter.service && \
+systemctl --user daemon-reload && \
+systemctl --user start squirrel-squirter.service && \
+systemctl --user status squirrel-squirter.service --no-pager
+
+The && chain intentionally leaves the service stopped if pull, install, or tests
+fail. Fix the reported error before starting it again.
+
+
+MANUAL FOREGROUND START (ONLY FOR TROUBLESHOOTING)
+
+First stop the service so two processes do not compete for the camera:
+systemctl --user stop squirrel-squirter.service
+
+cd ~/squirrel_shooter
+source .venv/bin/activate
+python -m squirrel_shooter.app --headless
+
+Ctrl+C stops this manual foreground run safely. Start the service again afterward:
+systemctl --user start squirrel-squirter.service
