@@ -227,10 +227,14 @@ camera:
   reopen_delay_seconds: 2.0
 ```
 
-`requested_fps` is only the USB request. `event.json` separately records actual
-dimensions and `measured_camera_fps`. Do not change either mode field unless there
-is direct evidence. The `camera.reopen_*` values remain compatibility fallbacks;
-the combined app uses the explicit `shared_camera` reconnect settings below.
+The camera setup requests MJPEG first, then the configured width, height, and FPS.
+Those are requests, not guarantees. Startup logs report the actual width, height,
+OpenCV-reported FPS, and readable FOURCC (for example `MJPG`). If MJPEG is not
+accepted, capture continues with the camera's available format. `event.json`
+separately records actual dimensions and `measured_camera_fps`. Do not change either
+mode field unless there is direct evidence. The `camera.reopen_*` values remain
+compatibility fallbacks; the combined app uses the explicit `shared_camera`
+reconnect settings below.
 
 ### Shared runtime and dashboard
 
@@ -323,7 +327,8 @@ filtering. This is motion filtering, not animal or object recognition.
 ```yaml
 classifier:
   enabled: true
-  event_frame_number: 1
+  frame_selection: best
+  fallback_event_frame_number: 1
   crop_margin_percent: 30.0
   detection_confidence: 0.25
   auto_accept_confidence: 0.60
@@ -331,12 +336,20 @@ classifier:
   worker_queue_capacity: 1
 ```
 
-Only a confirmed motion event can submit work. Each event submits exactly once,
-using frame 1 by default (frame 2 is also allowed). The group box is expanded by
-30 percent to retain useful context and copied into a bounded one-item queue. A
-single background worker performs OpenCV DNN inference, so the motion loop never
-waits for the normal classifier path. The bounded queue also prevents inference
-work from accumulating when the Pi is busy.
+Only a completed confirmed motion event can submit work, and each event submits
+exactly once. `best` selects the valid motion box with the largest area, using
+contour area as a tie-breaker. Boxes below the existing minimum motion area or
+within one percent (at least two pixels) of an image edge are rejected. If no valid
+candidate exists, selection tries `fallback_event_frame_number`, the middle event
+frame, then the first readable frame, and logs the fallback. The selected group box
+is expanded by 30 percent to retain useful context and copied into the existing
+bounded one-item queue. A single background worker performs OpenCV DNN inference,
+so the motion loop never waits for the normal classifier path. The bounded queue
+also prevents inference work from accumulating when the Pi is busy.
+
+If `frame_selection` is absent, it defaults to `best`. Older configurations that
+still use `event_frame_number` remain loadable; that value becomes the fallback
+frame number. Set `frame_selection: configured` only to retain fixed-frame selection.
 
 The motion event is always saved first. Classification can label it, but can never
 discard it. `person` and `car` detections at or above 60 percent are labeled
@@ -357,10 +370,11 @@ model guess, apply one label, keep Unknown, or mark False Positive in bulk.
 Model-load and queue errors can still be labeled manually or retried from their
 exact saved input.
 
-Every attempt records the submitted frame number, crop and source boxes, model,
-all detections, confidence, inference time, automatic/manual decision, error, and
-exact submitted crop. `captures/logs/classifier.jsonl` is append-only, while each
-event's `classification.json` reflects the newest decision. The recent-clips and
+Every attempt records the selected event-frame index, selection method, motion-box
+area when available, total frames considered, crop and source boxes, model, all
+detections, confidence, inference time, automatic/manual decision, error, and exact
+submitted crop. `captures/logs/classifier.jsonl` is append-only, while each event's
+`classification.json` reflects the newest decision. The recent-clips and
 event-archive cards read that same file, so their headline becomes Person, Car,
 Unknown, Classification unavailable, or False Positive. The original motion label
 such as `small_animal_candidate` remains visible only as secondary diagnostic data.

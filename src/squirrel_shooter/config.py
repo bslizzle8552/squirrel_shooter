@@ -68,7 +68,8 @@ class ClassifierConfig:
     enabled: bool
     model_definition: Path
     model_weights: Path
-    event_frame_number: int
+    frame_selection: str
+    fallback_event_frame_number: int
     crop_margin_percent: float
     detection_confidence: float
     auto_accept_confidence: float
@@ -510,9 +511,15 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     dashboard_quality = _int(dashboard.get("jpeg_quality"), "dashboard.jpeg_quality", minimum=1)
     if dashboard_quality > 100:
         raise ConfigError("dashboard.jpeg_quality must be at most 100")
-    classifier_frame = _int(classifier.get("event_frame_number"), "classifier.event_frame_number", minimum=1)
-    if classifier_frame not in {1, 2}:
-        raise ConfigError("classifier.event_frame_number must be 1 or 2")
+    frame_selection = _text(classifier.get("frame_selection", "best"), "classifier.frame_selection").lower()
+    if frame_selection not in {"best", "configured"}:
+        raise ConfigError("classifier.frame_selection must be best or configured")
+    legacy_classifier_frame = classifier.get("event_frame_number", 1)
+    fallback_classifier_frame = _int(
+        classifier.get("fallback_event_frame_number", legacy_classifier_frame),
+        "classifier.fallback_event_frame_number",
+        minimum=1,
+    )
     detection_confidence = _number(
         classifier.get("detection_confidence"), "classifier.detection_confidence", maximum=1.0
     )
@@ -582,7 +589,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _bool(classifier.get("enabled"), "classifier.enabled"),
             _path(classifier.get("model_definition"), "classifier.model_definition"),
             _path(classifier.get("model_weights"), "classifier.model_weights"),
-            classifier_frame,
+            frame_selection,
+            fallback_classifier_frame,
             _percent(classifier, "crop_margin_percent", "classifier"),
             detection_confidence,
             auto_accept_confidence,

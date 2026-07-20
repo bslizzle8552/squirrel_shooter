@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from time import perf_counter
 
@@ -9,6 +10,9 @@ import cv2
 import numpy as np
 
 from .config import CameraConfig
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class CameraOpenError(RuntimeError):
@@ -44,13 +48,9 @@ class FrameRateMeter:
 
 
 def open_camera(settings: CameraConfig) -> cv2.VideoCapture:
-    """Open the configured camera and request the configured video mode."""
+    """Open the configured camera and request MJPEG plus the configured mode."""
 
     capture = cv2.VideoCapture(settings.device_index)
-    capture.set(cv2.CAP_PROP_FRAME_WIDTH, settings.requested_width)
-    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.requested_height)
-    capture.set(cv2.CAP_PROP_FPS, settings.requested_fps)
-
     if not capture.isOpened():
         capture.release()
         raise CameraOpenError(
@@ -58,6 +58,43 @@ def open_camera(settings: CameraConfig) -> cv2.VideoCapture:
             "Run 'python -m squirrel_shooter.camera_diagnostic' and check "
             "the /dev/video* devices before changing config/default.yaml."
         )
+
+    mjpeg_requested = False
+    try:
+        mjpeg_requested = bool(
+            capture.set(
+                cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc(*"MJPG"),
+            )
+        )
+    except Exception as exc:
+        LOGGER.warning("Camera rejected the MJPEG request; continuing with its available format: %s", exc)
+    else:
+        if not mjpeg_requested:
+            LOGGER.warning("Camera did not accept the MJPEG request; continuing with its available format")
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, settings.requested_width)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.requested_height)
+    capture.set(cv2.CAP_PROP_FPS, settings.requested_fps)
+
+    width, height, reported_fps = capture_dimensions(capture)
+    fourcc = capture_fourcc(capture)
+    LOGGER.info(
+        "Camera initialized: width=%d height=%d reported_fps=%.2f fourcc=%s",
+        width,
+        height,
+        reported_fps,
+        fourcc,
+        extra={
+            "structured_data": {
+                "event": "camera_initialized",
+                "width": width,
+                "height": height,
+                "reported_fps": reported_fps,
+                "fourcc": fourcc,
+                "mjpeg_request_accepted": mjpeg_requested,
+            }
+        },
+    )
     return capture
 
 
@@ -68,6 +105,19 @@ def capture_dimensions(capture: cv2.VideoCapture) -> tuple[int, int, float]:
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     return width, height, fps
+
+
+def capture_fourcc(capture: cv2.VideoCapture) -> str:
+    """Return the camera's actual FOURCC as readable text when possible."""
+
+    try:
+        value = int(capture.get(cv2.CAP_PROP_FOURCC))
+    except Exception:
+        return "unknown"
+    if value <= 0:
+        return "unknown"
+    text = "".join(chr((value >> (8 * index)) & 0xFF) for index in range(4))
+    return text if all(character.isprintable() and not character.isspace() for character in text) else str(value)
 
 
 def annotate_frame(frame: np.ndarray, fps: float) -> np.ndarray:

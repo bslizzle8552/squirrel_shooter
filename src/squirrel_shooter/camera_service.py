@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .camera_common import FrameRateMeter, capture_dimensions, open_camera
+from .camera_common import FrameRateMeter, capture_dimensions, capture_fourcc, open_camera
 from .config import CameraConfig, SharedCameraConfig
 
 
@@ -303,6 +303,7 @@ class CameraService:
                 capture = self._capture_factory(self.settings)
                 meter = FrameRateMeter()
                 width, height, reported_fps = capture_dimensions(capture)
+                fourcc = capture_fourcc(capture)
                 with self._condition:
                     self._capture = capture
                     self._camera_open_count += 1
@@ -315,8 +316,12 @@ class CameraService:
                     self._condition.notify_all()
                 first_open = False
                 LOGGER.info(
-                    "Shared camera opened",
-                    extra={"structured_data": {"event": "camera_opened", "width": self._width, "height": self._height, "reported_fps": reported_fps, "open_count": self._camera_open_count}},
+                    "Shared camera opened: width=%d height=%d reported_fps=%.2f fourcc=%s",
+                    self._width,
+                    self._height,
+                    reported_fps,
+                    fourcc,
+                    extra={"structured_data": {"event": "camera_opened", "width": self._width, "height": self._height, "reported_fps": reported_fps, "fourcc": fourcc, "open_count": self._camera_open_count}},
                 )
                 consecutive_failures = 0
                 while not self._stop_event.is_set():

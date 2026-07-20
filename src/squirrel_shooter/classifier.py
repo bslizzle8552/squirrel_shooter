@@ -78,6 +78,9 @@ class ClassifierTask:
     source_bounding_box: tuple[int, int, int, int]
     crop_bounding_box: tuple[int, int, int, int]
     submitted_at: str
+    selection_method: str = "configured_fallback"
+    selected_motion_bounding_box_area: int | None = None
+    total_event_frames_considered: int = 1
 
 
 @dataclass(frozen=True)
@@ -240,13 +243,17 @@ class ClassifierEvidenceStore:
         image_path = task.event_directory / CLASSIFIER_INPUT_FILENAME
         metadata_path = task.event_directory / CLASSIFICATION_FILENAME
         record = {
-            "schema_version": 3,
+            "schema_version": 4,
             "item_id": item_id,
             "event_id": task.event_id,
             "source_event_directory": str(task.event_directory),
             "classifier_timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
             "submitted_at": task.submitted_at,
             "frame_number": task.frame_number,
+            "selected_event_frame_index": task.frame_number,
+            "frame_selection_method": task.selection_method,
+            "selected_motion_bounding_box_area": task.selected_motion_bounding_box_area,
+            "total_event_frames_considered": task.total_event_frames_considered,
             "source_bounding_box": _box_dict(task.source_bounding_box),
             "crop_bounding_box": _box_dict(task.crop_bounding_box),
             "model": model_name,
@@ -283,6 +290,28 @@ class ClassifierEvidenceStore:
                 raise OSError(f"Could not save classifier input image: {image_path}")
             _atomic_json(metadata_path, record)
             self._append_audit({"action": "classified", **record})
+        LOGGER.info(
+            "Event classified: event_id=%s frame=%d method=%s motion_box_area=%s frames_considered=%d result=%s confidence=%s",
+            task.event_id,
+            task.frame_number,
+            task.selection_method,
+            task.selected_motion_bounding_box_area,
+            task.total_event_frames_considered,
+            record["top_label"] or record["outcome"],
+            record["top_confidence"],
+            extra={
+                "structured_data": {
+                    "event": "event_classified",
+                    "event_id": task.event_id,
+                    "selected_event_frame_index": task.frame_number,
+                    "frame_selection_method": task.selection_method,
+                    "selected_motion_bounding_box_area": task.selected_motion_bounding_box_area,
+                    "total_event_frames_considered": task.total_event_frames_considered,
+                    "classifier_result": record["top_label"] or record["outcome"],
+                    "classifier_confidence": record["top_confidence"],
+                }
+            },
+        )
         return record
 
     def list_items(self, view: str) -> list[dict[str, Any]]:
@@ -691,6 +720,10 @@ class EventClassifier:
         frame_number: int,
         frame: np.ndarray,
         source_bounding_box: tuple[int, int, int, int],
+        *,
+        selection_method: str = "configured_fallback",
+        selected_motion_bounding_box_area: int | None = None,
+        total_event_frames_considered: int = 1,
     ) -> bool:
         with self._lock:
             paused = self._paused
@@ -705,6 +738,9 @@ class EventClassifier:
             source_bounding_box,
             crop_box,
             datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            selection_method,
+            selected_motion_bounding_box_area,
+            total_event_frames_considered,
         )
         return self._enqueue(task)
 
@@ -728,6 +764,9 @@ class EventClassifier:
             _dict_box(record.get("source_bounding_box")),
             _dict_box(record.get("crop_bounding_box")),
             datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            str(record.get("frame_selection_method", "configured_fallback")),
+            _optional_int(record.get("selected_motion_bounding_box_area")),
+            max(1, _optional_int(record.get("total_event_frames_considered")) or 1),
         )
         self.store.record_action("retry_requested", record)
         return self._enqueue(task)
@@ -849,6 +888,12 @@ def _dict_box(value: Any) -> tuple[int, int, int, int]:
     if not isinstance(value, dict):
         return (0, 0, 0, 0)
     return tuple(int(value.get(name, 0)) for name in ("x", "y", "width", "height"))  # type: ignore[return-value]
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
 
 
 def _classification_view(record: dict[str, Any]) -> str:
