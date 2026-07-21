@@ -122,57 +122,28 @@ refreshes the report. Do not power off the Pi while it is writing an event.
 ### Run continuously with systemd
 
 The manual command above is attached to its terminal and is intended for supervised
-testing. For unattended operation, install the repository's systemd user service.
-It continues after SSH disconnects or the laptop turns off, starts automatically
-after a Pi reboot, restarts after an application failure, and sends `SIGINT` for the
-same clean shutdown path used by `Ctrl+C`.
+testing. For unattended operation, use one of the two command scripts below. They
+hide the systemd setup and control details.
 
-Run this once on the Pi after the repository and virtual environment are ready:
+Start the current version:
 
 ```bash
 cd ~/squirrel_shooter
-mkdir -p ~/.config/systemd/user
-install -m 644 deploy/systemd/squirrel-squirter.service ~/.config/systemd/user/squirrel-squirter.service
-sudo loginctl enable-linger "$USER"
-systemctl --user daemon-reload
-systemctl --user enable --now squirrel-squirter.service
-systemctl --user status squirrel-squirter.service --no-pager
+./start.sh
 ```
 
-Normal controls are:
+Pull the newest `main`, install it, run tests, and start it:
 
 ```bash
-systemctl --user start squirrel-squirter.service
-systemctl --user stop squirrel-squirter.service
-systemctl --user restart squirrel-squirter.service
-systemctl --user status squirrel-squirter.service --no-pager
-journalctl --user -u squirrel-squirter.service -f
+cd ~/squirrel_shooter
+./pull-and-start.sh
 ```
 
-`Ctrl+C` while following `journalctl` stops only the log display; the service keeps
-running. Do not start a manual `squirrel_shooter.app`, `motion_watch`, dashboard,
-preview, or camera process while the service is active because only one process may
-own the camera. Stop the service first when troubleshooting manually.
-
-For a safe GitHub update, stop the service, pull and test, reinstall the service
-definition in case it changed, then start it again:
-
-```bash
-systemctl --user stop squirrel-squirter.service && \
-cd ~/squirrel_shooter && \
-git pull --ff-only origin main && \
-source .venv/bin/activate && \
-python -m pip install -e ".[test]" && \
-python -m pytest && \
-install -m 644 deploy/systemd/squirrel-squirter.service ~/.config/systemd/user/squirrel-squirter.service && \
-systemctl --user daemon-reload && \
-systemctl --user start squirrel-squirter.service && \
-systemctl --user status squirrel-squirter.service --no-pager
-```
-
-The `&&` chain deliberately leaves the service stopped if any update or test step
-fails. The same copy/paste commands are kept in
-`Misc/start squirrel shooter.txt`.
+The first `start.sh` run may ask for the Pi password once so it can enable startup
+after logout and reboot. After that, the service continues when SSH disconnects or
+the laptop turns off, starts after Pi reboots, restarts after application failures,
+and uses the same clean `SIGINT` shutdown path as `Ctrl+C`. The same two shortcuts
+are saved in `Misc/start squirrel shooter.txt`.
 
 ## Open the dashboard through Tailscale
 
