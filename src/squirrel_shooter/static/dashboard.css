@@ -295,6 +295,19 @@ h2 { margin-bottom: 4px; font-size: 1.3rem; letter-spacing: -0.02em; }
   font-size: 0.85rem;
   font-weight: 600;
 }
+.label-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+.label-key span { display: inline-flex; align-items: center; gap: 7px; }
+.label-key-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text); }
+.label-key-dot.classifier { background: var(--info); }
+.classifier-label-option, .classifier-label-selected { color: var(--info) !important; font-weight: 750; }
 .bulk-review-form {
   display: grid;
   grid-template-columns: auto minmax(180px, 0.8fr) minmax(220px, 1fr) minmax(220px, 1fr) auto;

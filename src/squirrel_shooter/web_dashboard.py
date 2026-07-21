@@ -20,7 +20,7 @@ from flask import Flask, abort, jsonify, redirect, render_template, request, sen
 from werkzeug.exceptions import HTTPException
 
 from .camera_service import CameraService, CameraStatus
-from .classifier import CLASSIFICATION_VIEWS, ClassifierEvidenceStore
+from .classifier import CLASSIFICATION_VIEWS, VOC_LABELS, ClassifierEvidenceStore
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .event_report import load_events
 from .motion_runtime import MotionProcessingService
@@ -370,6 +370,7 @@ def create_app(
             audit_log_filename=app_config.classifier.audit_log_filename,
             training=training,
             training_label_suggestions=classifier_store.training_label_suggestions(),
+            classifier_labels=frozenset(VOC_LABELS[1:]),
             message=request.args.get("message"),
             demo_mode=demo_mode,
         )

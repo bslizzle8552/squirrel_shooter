@@ -504,8 +504,10 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
 
     page = client.get("/classifier-review")
     assert page.status_code == 200 and b"review-event" in page.data and b"Known-class possibility" in page.data
-    assert b'<option value="person" selected>Person (model guess)</option>' in page.data
-    assert b'value="aeroplane"' in page.data
+    assert b'<option value="person" class="classifier-label-option" selected>Person (model guess)</option>' in page.data
+    assert b'<option value="dog" class="classifier-label-option">Dog</option>' in page.data
+    assert b'<option value="squirrel">Squirrel</option>' in page.data
+    assert b"Blue = built into the current classifier" in page.data
     assert b'name="custom_label"' in page.data
     assert b'action="/classifier-review/bulk"' in page.data
     assert client.get("/classifier-files/review-event").status_code == 200

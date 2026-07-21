@@ -36,6 +36,10 @@
     {% if message %}<p class="review-message">{{ message }}</p>{% endif %}
 
     {% if items %}
+      <div class="label-key" aria-label="Label color key">
+        <span><i class="label-key-dot classifier" aria-hidden="true"></i> Blue = built into the current classifier</span>
+        <span><i class="label-key-dot review" aria-hidden="true"></i> White = our review and training labels</span>
+      </div>
       <form id="bulk-review-form" class="bulk-review-form" method="post" action="{{ url_for('classifier_bulk_decision') }}">
         <input type="hidden" name="review_token" value="{{ review_token }}">
         <input type="hidden" name="return_state" value="{{ selected_state }}">
@@ -50,9 +54,9 @@
           </select>
         </label>
         <label>Label (for “Apply one label”)
-          <select name="approval_label">
+          <select class="training-label-select" name="approval_label">
             <option value="">Choose a classifier or wildlife label</option>
-            {% for label in training_label_suggestions %}<option value="{{ label }}">{{ label|replace('_', ' ')|title }}</option>{% endfor %}
+            {% for label in training_label_suggestions %}<option value="{{ label }}"{% if label in classifier_labels %} class="classifier-label-option"{% endif %}>{{ label|replace('_', ' ')|title }}</option>{% endfor %}
           </select>
         </label>
         <label>Or type a different label
@@ -96,10 +100,10 @@
                     <input type="hidden" name="return_state" value="{{ selected_state }}">
                     {% set selected_label = item.human_label if item.human_label not in (none, 'unknown', 'false_positive') else item.model_suggestion %}
                     <label for="approval-label-{{ item.item_id }}">Confirm or correct the classifier label</label>
-                    <select id="approval-label-{{ item.item_id }}" name="approval_label">
+                    <select class="training-label-select" id="approval-label-{{ item.item_id }}" name="approval_label">
                       <option value="">Choose a classifier or wildlife label</option>
                       {% for label in training_label_suggestions %}
-                        <option value="{{ label }}"{% if selected_label == label %} selected{% endif %}>{{ label|replace('_', ' ')|title }}{% if item.model_suggestion == label %} (model guess){% endif %}</option>
+                        <option value="{{ label }}"{% if label in classifier_labels %} class="classifier-label-option"{% endif %}{% if selected_label == label %} selected{% endif %}>{{ label|replace('_', ' ')|title }}{% if item.model_suggestion == label %} (model guess){% endif %}</option>
                       {% endfor %}
                     </select>
                     <label for="custom-label-{{ item.item_id }}">Not listed? Type the correct animal or object</label>
@@ -132,5 +136,15 @@
         selectAll.indeterminate = eventSelectors.some((item) => item.checked) && !selectAll.checked;
       }));
     }
+
+    const labelSelects = document.querySelectorAll(".training-label-select");
+    const updateLabelSelectColor = (select) => {
+      const selectedOption = select.options[select.selectedIndex];
+      select.classList.toggle("classifier-label-selected", selectedOption?.classList.contains("classifier-label-option"));
+    };
+    labelSelects.forEach((select) => {
+      updateLabelSelectColor(select);
+      select.addEventListener("change", () => updateLabelSelectColor(select));
+    });
   </script>
 {% endblock %}
