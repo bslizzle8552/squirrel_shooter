@@ -40,13 +40,14 @@ night_mode:
   enter_consecutive_frames: 5
   exit_consecutive_frames: 10
 
-# One asynchronous classification of frame 1 from each confirmed event. The
-# pinned MobileNet-SSD model is installed separately with classifier_setup.
+# One asynchronous classification of the best valid in-frame motion candidate
+# after each event completes. The pinned MobileNet-SSD model is unchanged.
 classifier:
   enabled: true
   model_definition: models/mobilenet-ssd/deploy.prototxt
   model_weights: models/mobilenet-ssd/mobilenet_iter_73000.caffemodel
-  event_frame_number: 1
+  frame_selection: best
+  fallback_event_frame_number: 1
   crop_margin_percent: 30.0
   detection_confidence: 0.25
   auto_accept_confidence: 0.60

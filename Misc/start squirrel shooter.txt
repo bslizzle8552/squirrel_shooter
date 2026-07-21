@@ -1,0 +1,10 @@
+SQUIRREL SQUIRTER START NOW
+
+cd ~/squirrel_shooter
+./start.sh
+
+
+SQUIRREL SQUIRTER PULL NEW UPDATES AND START
+
+cd ~/squirrel_shooter
+./pull-and-start.sh

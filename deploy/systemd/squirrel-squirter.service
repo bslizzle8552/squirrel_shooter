@@ -1,0 +1,17 @@
+[Unit]
+Description=Squirrel Squirter camera watcher and private dashboard
+
+[Service]
+Type=simple
+WorkingDirectory=%h/squirrel_shooter
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/squirrel_shooter/.venv/bin/python -m squirrel_shooter.app --headless
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

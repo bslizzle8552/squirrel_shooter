@@ -368,7 +368,6 @@ def create_app(
             selected_state=state,
             review_token=classifier_review_token,
             audit_log_filename=app_config.classifier.audit_log_filename,
-            config_frame_number=app_config.classifier.event_frame_number,
             training=training,
             training_label_suggestions=classifier_store.training_label_suggestions(),
             message=request.args.get("message"),

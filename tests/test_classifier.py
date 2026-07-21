@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from conftest import write_test_config
 from squirrel_shooter.camera_service import CameraStatus
@@ -23,7 +24,7 @@ from squirrel_shooter.classifier import (
     MobileNetSSDDetector,
 )
 from squirrel_shooter.classifier_setup import ModelFile, install_model
-from squirrel_shooter.config import ConfigError, load_config
+from squirrel_shooter.config import load_config
 from squirrel_shooter.motion_runtime import MotionProcessingService
 from squirrel_shooter.vision_service import VisionStatus
 from squirrel_shooter.web_dashboard import create_app
@@ -141,6 +142,32 @@ def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tm
     corrected = store.review("person-event", "unknown")
     assert corrected["classification_status"] == "unknown" and corrected["display_label"] == "Unknown"
     assert corrected["label_source"] == "human" and corrected["human_label"] == "unknown"
+
+
+def test_selection_metadata_is_saved_with_classification_result(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    selected_task = replace(
+        task(tmp_path, "selected-event"),
+        frame_number=4,
+        selection_method="best",
+        selected_motion_bounding_box_area=1200,
+        total_event_frames_considered=7,
+    )
+
+    record = store.save_classification(
+        selected_task,
+        [ClassifierDetection("person", 0.91, (1, 2, 20, 21))],
+        123.4,
+        "test-model",
+    )
+    saved = json.loads((selected_task.event_directory / "classification.json").read_text(encoding="utf-8"))
+
+    assert record["selected_event_frame_index"] == 4
+    assert saved["frame_selection_method"] == "best"
+    assert saved["selected_motion_bounding_box_area"] == 1200
+    assert saved["total_event_frames_considered"] == 7
+    assert saved["top_label"] == "person" and saved["top_confidence"] == 0.91
 
 
 def test_human_truth_builds_durable_current_training_manifest(tmp_path: Path) -> None:
@@ -342,24 +369,32 @@ def test_model_installer_verifies_checksum_before_replacing_file(tmp_path: Path,
     assert installed[0].read_bytes() == content
 
 
-@pytest.mark.parametrize("configured_frame", [1, 2])
-def test_motion_submits_only_configured_event_frame_once(tmp_path: Path, configured_frame: int) -> None:
-    config = classifier_config(tmp_path, classifier__event_frame_number=configured_frame)
+def test_motion_submits_best_frame_once_after_event_completes(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
 
     class Classifier:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, int]] = []
+            self.calls: list[tuple[str, int, dict[str, object]]] = []
 
         def set_paused(self, _paused: bool) -> None:
             return None
 
-        def submit(self, event_id: str, _directory: Path, frame_number: int, _frame: np.ndarray, _box: tuple[int, int, int, int]) -> bool:
-            self.calls.append((event_id, frame_number))
+        def submit(
+            self,
+            event_id: str,
+            _directory: Path,
+            frame_number: int,
+            _frame: np.ndarray,
+            _box: tuple[int, int, int, int],
+            **metadata: object,
+        ) -> bool:
+            self.calls.append((event_id, frame_number, metadata))
             return True
 
     class Recorder:
         def __init__(self) -> None:
             self.active: dict[int, object] = {}
+            self.updates = 0
 
         def begin(self, track_id: int, *_args: object, **_kwargs: object) -> object:
             directory = tmp_path / "captures" / "events" / "event-one"
@@ -369,10 +404,18 @@ def test_motion_submits_only_configured_event_frame_once(tmp_path: Path, configu
             return event
 
         def update(self, *_args: object, **_kwargs: object) -> None:
-            return None
+            self.updates += 1
 
         def should_finish(self, *_args: object, **_kwargs: object) -> bool:
-            return False
+            return self.updates >= 2
+
+        def finish(self, track_id: int, **_kwargs: object) -> dict[str, object]:
+            event = self.active.pop(track_id)
+            return {
+                "event_id": event.event_id,
+                "snapshot_path": str(event.directory / "snapshot.jpg"),
+                "clip_path": str(event.directory / "clip.avi"),
+            }
 
     classifier = Classifier()
     motion = MotionProcessingService(SimpleNamespace(), config, classifier_service=classifier)  # type: ignore[arg-type]
@@ -386,14 +429,24 @@ def test_motion_submits_only_configured_event_frame_once(tmp_path: Path, configu
         provisional_category="small_animal_candidate",
         movement_attributes=("coherent_travel",),
         bounding_box=(20, 20, 30, 20),
+        contour_area=600.0,
     )
-    later = SimpleNamespace(**{**first.__dict__, "newly_confirmed": False})
+    second = SimpleNamespace(**{**first.__dict__, "newly_confirmed": False, "bounding_box": (20, 20, 45, 25)})
+    third = SimpleNamespace(**{**first.__dict__, "newly_confirmed": False, "bounding_box": (20, 20, 35, 25)})
 
     motion._handle_events(packet, SimpleNamespace(groups=(first,)), frame, 1.0, 10.0)  # type: ignore[arg-type]
-    motion._handle_events(packet, SimpleNamespace(groups=(later,)), frame, 1.1, 10.0)  # type: ignore[arg-type]
-    motion._handle_events(packet, SimpleNamespace(groups=(later,)), frame, 1.2, 10.0)  # type: ignore[arg-type]
+    motion._handle_events(packet, SimpleNamespace(groups=(second,)), frame, 1.1, 10.0)  # type: ignore[arg-type]
+    assert classifier.calls == []
+    motion._handle_events(packet, SimpleNamespace(groups=(third,)), frame, 1.2, 10.0)  # type: ignore[arg-type]
 
-    assert classifier.calls == [("event-one", configured_frame)]
+    assert len(classifier.calls) == 1
+    event_id, frame_number, metadata = classifier.calls[0]
+    assert (event_id, frame_number) == ("event-one", 2)
+    assert metadata == {
+        "selection_method": "best",
+        "selected_motion_bounding_box_area": 1125,
+        "total_event_frames_considered": 3,
+    }
 
 
 def test_classifier_rejects_new_work_while_night_mode_is_paused(tmp_path: Path) -> None:
@@ -698,7 +751,15 @@ def test_classifier_image_route_resolves_pi_style_relative_capture_path(
     assert response.status_code == 200 and response.content_type == "image/jpeg"
 
 
-def test_classifier_config_rejects_frame_outside_first_two(tmp_path: Path) -> None:
-    path = write_test_config(tmp_path, classifier__event_frame_number=3)
-    with pytest.raises(ConfigError, match="event_frame_number must be 1 or 2"):
-        load_config(path)
+def test_classifier_config_defaults_to_best_and_uses_legacy_frame_as_fallback(tmp_path: Path) -> None:
+    path = write_test_config(tmp_path)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["classifier"].pop("frame_selection")
+    raw["classifier"].pop("fallback_event_frame_number")
+    raw["classifier"]["event_frame_number"] = 3
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config.classifier.frame_selection == "best"
+    assert config.classifier.fallback_event_frame_number == 3

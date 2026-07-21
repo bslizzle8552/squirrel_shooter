@@ -21,6 +21,7 @@ from .diagnostics import cleanup_oldest
 from .event_report import generate_reports, load_events
 from .event_storage import EventLogWriter, EventRecorder, RollingFrameBuffer, SessionLog, enforce_retention, recover_incomplete_events
 from .files import timestamped_output_path
+from .frame_selection import BestEventFrameSelector
 from .watch_detection import MotionWatcherDetector, WatchDetectionResult, annotate_watch_frame
 
 
@@ -110,8 +111,8 @@ class MotionProcessingService:
         self._latest_result: WatchDetectionResult | None = None
         self._latest_sequence = -1
         self._force_event_requested = False
-        self._classifier_event_frames: dict[int, int] = {}
-        self._classifier_submitted: set[int] = set()
+        self._classifier_selectors: dict[str, BestEventFrameSelector] = {}
+        self._classifier_clip_offsets: dict[str, int] = {}
         self._live_group_holds: dict[int, tuple[float, Any]] = {}
         self._recent_events: deque[dict[str, Any]] = deque(maxlen=config.motion.recent_event_limit)
         self._logs: EventLogWriter | None = None
@@ -379,8 +380,8 @@ class MotionProcessingService:
                 completed = self._recorder.finish_all(now=now, notes="night vision pause")
             for record in completed:
                 self._record_completed_event(record)
-            self._classifier_event_frames.clear()
-            self._classifier_submitted.clear()
+            self._classifier_selectors.clear()
+            self._classifier_clip_offsets.clear()
             with self._condition:
                 self._active_events = 0
                 self._force_event_requested = False
@@ -494,12 +495,13 @@ class MotionProcessingService:
         for group in result.groups:
             should_begin = group.newly_confirmed or group.track_id == forced_track
             if should_begin and group.track_id not in self._recorder.active:
+                pre_event_frames = self._prebuffer.frames()
                 event = self._recorder.begin(
                     group.track_id,
                     group,
                     packet.frame,
                     annotated,
-                    self._prebuffer.frames(),
+                    pre_event_frames,
                     now=now,
                     measured_fps=measured_fps,
                 )
@@ -515,20 +517,29 @@ class MotionProcessingService:
                     }
                 if self._session is not None:
                     self._session.increment("confirmed_events")
-                self._classifier_event_frames[group.track_id] = 1
-                self._submit_classifier_if_due(event.event_id, event.directory, group, packet.frame)
+                if self.config.classifier.enabled:
+                    selector = BestEventFrameSelector(
+                        fallback_frame_number=self.config.classifier.fallback_event_frame_number,
+                        minimum_motion_area=self.config.motion.min_blob_area,
+                        selection_mode=self.config.classifier.frame_selection,
+                    )
+                    self._classifier_selectors[event.event_id] = selector
+                    self._classifier_clip_offsets[event.event_id] = len(pre_event_frames)
+                    self._consider_classifier_frame(selector, group, packet.frame)
             elif group.track_id in self._recorder.active:
                 self._recorder.update(group.track_id, group, annotated, now=now)
-                self._classifier_event_frames[group.track_id] = self._classifier_event_frames.get(group.track_id, 1) + 1
                 event = self._recorder.active[group.track_id]
-                self._submit_classifier_if_due(event.event_id, event.directory, group, packet.frame)
+                selector = self._classifier_selectors.get(event.event_id)
+                if selector is not None:
+                    self._consider_classifier_frame(selector, group, packet.frame)
         for track_id, event in list(self._recorder.active.items()):
             if track_id not in groups_by_track:
                 self._recorder.update(track_id, None, annotated, now=now)
+                selector = self._classifier_selectors.get(event.event_id)
+                if selector is not None:
+                    self._consider_classifier_frame(selector, None, packet.frame)
             if self._recorder.should_finish(event, now):
                 self._record_completed_event(self._recorder.finish(track_id, now=now))
-                self._classifier_event_frames.pop(track_id, None)
-                self._classifier_submitted.discard(track_id)
                 active = {item.directory for item in self._recorder.active.values()}
                 actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention, active_directories=active)
                 if self._session is not None:
@@ -536,23 +547,86 @@ class MotionProcessingService:
         with self._condition:
             self._active_events = len(self._recorder.active)
 
-    def _submit_classifier_if_due(
-        self,
-        event_id: str,
-        event_directory: Path,
-        group: Any,
-        frame: np.ndarray,
+    @staticmethod
+    def _consider_classifier_frame(
+        selector: BestEventFrameSelector,
+        group: Any | None,
+        frame: np.ndarray | None,
     ) -> None:
-        if self._night_mode_paused:
+        frame_number = selector.total_frames_considered + 1
+        motion_area = None
+        if group is not None:
+            motion_area = getattr(group, "contour_area", None)
+            if motion_area is None:
+                motion_area = getattr(group, "foreground_pixels", None)
+        selector.consider(
+            frame_number,
+            frame,
+            None if group is None else group.bounding_box,
+            None if motion_area is None else float(motion_area),
+        )
+
+    def _submit_completed_event(self, record: dict[str, Any]) -> None:
+        event_id = str(record.get("event_id", ""))
+        selector = self._classifier_selectors.pop(event_id, None)
+        clip_offset = self._classifier_clip_offsets.pop(event_id, 0)
+        if selector is None or self._night_mode_paused:
             return
-        track_id = int(group.track_id)
-        frame_number = self._classifier_event_frames.get(track_id, 0)
-        if track_id in self._classifier_submitted or frame_number != self.config.classifier.event_frame_number:
+        clip_path = Path(str(record.get("clip_path", "")))
+        selected = selector.select(
+            lambda frame_number: self._load_event_clip_frame(clip_path, clip_offset + frame_number - 1)
+        )
+        if selected is None:
+            LOGGER.warning(
+                "No readable frame was available for event classification: %s",
+                event_id,
+                extra={"structured_data": {"event": "classifier_frame_unavailable", "event_id": event_id}},
+            )
             return
-        self._classifier_submitted.add(track_id)
-        self.classifier.submit(event_id, event_directory, frame_number, frame, group.bounding_box)
+        if selected.method != "best":
+            LOGGER.warning(
+                "Classifier frame fallback selected: event_id=%s frame=%d method=%s",
+                event_id,
+                selected.frame_number,
+                selected.method,
+                extra={
+                    "structured_data": {
+                        "event": "classifier_frame_fallback",
+                        "event_id": event_id,
+                        "selected_event_frame_index": selected.frame_number,
+                        "frame_selection_method": selected.method,
+                        "total_event_frames_considered": selected.total_frames_considered,
+                    }
+                },
+            )
+        event_directory = Path(str(record.get("snapshot_path", ""))).parent
+        self.classifier.submit(
+            event_id,
+            event_directory,
+            selected.frame_number,
+            selected.frame,
+            selected.bounding_box,
+            selection_method=selected.method,
+            selected_motion_bounding_box_area=selected.bounding_box_area,
+            total_event_frames_considered=selected.total_frames_considered,
+        )
+
+    @staticmethod
+    def _load_event_clip_frame(clip_path: Path, zero_based_frame_number: int) -> np.ndarray | None:
+        if not clip_path.is_file() or zero_based_frame_number < 0:
+            return None
+        capture = cv2.VideoCapture(str(clip_path))
+        try:
+            if not capture.isOpened():
+                return None
+            capture.set(cv2.CAP_PROP_POS_FRAMES, zero_based_frame_number)
+            ok, frame = capture.read()
+            return frame if ok else None
+        finally:
+            capture.release()
 
     def _record_completed_event(self, record: dict[str, Any]) -> None:
+        self._submit_completed_event(record)
         with self._condition:
             self._recent_events.append(record)
             self._last_event_summary = dict(record)
