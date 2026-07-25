@@ -166,6 +166,7 @@ def _review_item_payload(item: dict[str, Any]) -> dict[str, Any]:
     item_id = str(item.get("item_id", ""))
     snapshot_relative = item.get("event_snapshot_relative")
     clip_relative = item.get("event_clip_relative")
+    original_frame_relative = item.get("event_original_frame_relative")
     return {
         "item_id": item_id,
         "event_id": item.get("event_id"),
@@ -188,6 +189,11 @@ def _review_item_payload(item: dict[str, Any]) -> dict[str, Any]:
         "image_url": url_for("classifier_file", item_id=item_id),
         "event_snapshot_url": url_for("event_file", relative_path=snapshot_relative) if snapshot_relative else None,
         "event_clip_url": url_for("event_file", relative_path=clip_relative) if clip_relative else None,
+        "event_original_frame_url": (
+            url_for("event_file", relative_path=original_frame_relative)
+            if original_frame_relative
+            else None
+        ),
     }
 
 

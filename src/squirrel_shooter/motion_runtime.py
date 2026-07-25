@@ -123,6 +123,8 @@ class MotionProcessingService:
         self._last_session_save = monotonic()
         self._last_camera_read_failures = 0
         self._camera_metadata: dict[str, Any] = {
+            "source_camera": f"opencv_device_{config.camera.device_index}",
+            "camera_device_index": config.camera.device_index,
             "requested_width": config.camera.requested_width,
             "requested_height": config.camera.requested_height,
             "requested_fps": config.camera.requested_fps,
@@ -250,6 +252,7 @@ class MotionProcessingService:
             "ir_mode_if_explicitly_detected_or_configured": self.config.camera.ir_mode_if_explicitly_detected_or_configured,
         }
         self._session = SessionLog(self.config, requested)
+        self._camera_metadata["session_id"] = self._session.data["session_id"]
         recovered = recover_incomplete_events(self.config.camera.output_directory / "events")
         if recovered:
             self._session.data["recovered_incomplete_events"] = [str(path) for path in recovered]

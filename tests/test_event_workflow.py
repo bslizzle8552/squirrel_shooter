@@ -64,6 +64,9 @@ class FakeWriter:
 
 def camera_metadata() -> dict[str, object]:
     return {
+        "session_id": "session-one",
+        "source_camera": "opencv_device_0",
+        "camera_device_index": 0,
         "measured_camera_fps": 9.9,
         "requested_width": 1280,
         "requested_height": 720,
@@ -111,6 +114,11 @@ def test_event_json_csv_and_jsonl_are_completed_and_flushed(tmp_path: Path) -> N
     record = recorder.finish(7, now=4.2)
     assert record["provisional_category"] == "small_animal_candidate"
     assert record["ir_mode_if_explicitly_detected_or_configured"] == "unknown"
+    assert record["session_id"] == "session-one"
+    assert record["capture_method"] == "automatic_motion_event"
+    assert record["source_camera"] == "opencv_device_0"
+    assert record["snapshot_file_role"] == "annotated_review_frame"
+    assert record["clip_file_role"] == "annotated_review_clip"
     assert record["components"][0][0]["contour"]
     assert not active.marker.exists() and active.clip_path.exists() and active.snapshot_path.exists()
     event = json.loads((active.directory / "event.json").read_text(encoding="utf-8"))

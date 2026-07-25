@@ -54,6 +54,7 @@ def task(tmp_path: Path, event_id: str = "event-one") -> ClassifierTask:
         source_bounding_box=(10, 20, 30, 40),
         crop_bounding_box=(4, 12, 42, 56),
         submitted_at="2026-07-16T18:00:00-04:00",
+        original_image=np.full((72, 128, 3), 80, dtype=np.uint8),
     )
 
 
@@ -112,11 +113,14 @@ def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tm
 
     assert known["classification_status"] == "known" and known["display_label"] == "Person"
     assert known["label_source"] == "automatic" and known["decision_confidence"] == 0.92
+    assert known["input_image_role"] == "unannotated_target_crop"
+    assert known["original_frame_path"].endswith("original-frame.jpg")
     assert unknown["classification_status"] == "unknown" and unknown["display_label"] == "Unknown"
     assert other_class["classification_status"] == "unknown" and other_class["model_suggestion"] == "dog"
     assert review["classification_status"] == "review" and review["review_suggestion_label"] == "car"
     for classifier_task in (person_task, unknown_task, other_class_task, review_task):
         assert (classifier_task.event_directory / "classifier-input.jpg").is_file()
+        assert (classifier_task.event_directory / "original-frame.jpg").is_file()
         assert (classifier_task.event_directory / "classification.json").is_file()
     assert store.counts() == {"known": 1, "unknown": 2, "review": 1, "errors": 0, "false_positive": 0}
     assert store.training_summary()["eligible_samples"] == 0
@@ -134,6 +138,7 @@ def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tm
 
     assert reviewed["classification_status"] == "known" and reviewed["display_label"] == "Car"
     assert reviewed["human_label"] == "car" and reviewed["label_source"] == "human"
+    assert reviewed["schema_version"] == 5
     assert reviewed["training_label"] == "car" and reviewed["training_dataset_status"] == "included"
     assert (config.camera.output_directory / reviewed["training_sample_relative"]).is_file()
     assert store.training_summary()["labels"] == {"car": 1}
@@ -170,6 +175,27 @@ def test_selection_metadata_is_saved_with_classification_result(tmp_path: Path) 
     assert saved["top_label"] == "person" and saved["top_confidence"] == 0.91
 
 
+def test_original_frame_write_failure_is_recorded_without_losing_classification(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+
+    def image_writer(path: str, _image: np.ndarray) -> bool:
+        if path.endswith("original-frame.jpg"):
+            return False
+        Path(path).write_bytes(b"classifier crop")
+        return True
+
+    store = ClassifierEvidenceStore(config, image_writer=image_writer)
+    classifier_task = task(tmp_path, "original-write-failure")
+
+    record = store.save_classification(classifier_task, [], 100.0, "test-model")
+
+    assert record["classification_status"] == "unknown"
+    assert record["original_frame_path"] is None
+    assert "Could not save original event frame" in record["original_frame_error"]
+    assert (classifier_task.event_directory / "classifier-input.jpg").is_file()
+    assert (classifier_task.event_directory / "classification.json").is_file()
+
+
 def test_human_truth_builds_durable_current_training_manifest(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
@@ -180,8 +206,18 @@ def test_human_truth_builds_durable_current_training_manifest(tmp_path: Path) ->
                 "status": "complete",
                 "event_id": wildlife_task.event_id,
                 "start_timestamp": "2026-07-18T08:00:00-04:00",
+                "session_id": "session-one",
+                "capture_method": "automatic_motion_event",
+                "source_camera": "opencv_device_0",
+                "camera_device_index": 0,
+                "actual_width": 1280,
+                "actual_height": 720,
+                "software_version": "0.3.0",
+                "git_commit_sha": "abc123",
                 "provisional_category": "small_animal_candidate",
                 "movement_attributes": ["coherent_travel"],
+                "snapshot_file_role": "annotated_review_frame",
+                "clip_file_role": "annotated_review_clip",
             }
         ),
         encoding="utf-8",
@@ -203,6 +239,20 @@ def test_human_truth_builds_durable_current_training_manifest(tmp_path: Path) ->
     assert sample["label"] == "dog" and sample["training_eligible"] is True
     assert sample["source"]["motion_category"] == "small_animal_candidate"
     assert sample["image_sha256"] == hashlib.sha256(sample_image.read_bytes()).hexdigest()
+    original_frame = sample_image.parent / "original-frame.jpg"
+    assert original_frame.is_file()
+    assert sample["original_frame_sha256"] == hashlib.sha256(original_frame.read_bytes()).hexdigest()
+    assert sample["image_role"] == "unannotated_target_crop"
+    assert sample["original_frame_role"] == "unannotated_full_resolution_context"
+    assert sample["split_group_event_id"] == "wildlife-event"
+    assert sample["split_group_session_id"] == "session-one"
+    assert sample["source"]["source_camera"] == {
+        "source_camera": "opencv_device_0",
+        "camera_device_index": 0,
+        "actual_width": 1280,
+        "actual_height": 720,
+    }
+    assert sample["source"]["git_commit_sha"] == "abc123"
 
     corrected = store.review("wildlife-event", "approve", "Eastern Gray-Squirrel")
     assert corrected["human_label"] == "eastern_gray_squirrel"
@@ -216,13 +266,17 @@ def test_human_truth_builds_durable_current_training_manifest(tmp_path: Path) ->
     event = json.loads((wildlife_task.event_directory / "event.json").read_text(encoding="utf-8"))
     assert event["human_review_label"] == "eastern_gray_squirrel"
     assert event["training_label"] == "eastern_gray_squirrel"
+    assert event["classifier_input_role"] == "unannotated_target_crop"
+    assert event["original_frame_role"] == "unannotated_full_resolution_context"
+    assert event["predicted_class"] == "dog"
 
     shutil.rmtree(wildlife_task.event_directory)
     assert sample_image.is_file()
+    assert original_frame.is_file()
     assert store.training_manifest_path.is_file()
 
 
-def test_unknown_is_excluded_and_false_positive_becomes_background_training_data(tmp_path: Path) -> None:
+def test_unknown_is_excluded_and_false_positive_becomes_canonical_negative_training_data(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
     uncertain_task = task(tmp_path, "uncertain-event")
@@ -235,9 +289,66 @@ def test_unknown_is_excluded_and_false_positive_becomes_background_training_data
     background = store.review("background-event", "false-positive")
 
     assert excluded["training_dataset_status"] == "excluded_unknown"
-    assert background["training_label"] == "background"
+    assert background["training_label"] == "background_or_false_positive"
     manifest = [json.loads(line) for line in store.training_manifest_path.read_text(encoding="utf-8").splitlines()]
-    assert [sample["label"] for sample in manifest] == ["background"]
+    assert [sample["label"] for sample in manifest] == ["background_or_false_positive"]
+
+
+def test_prepare_canonicalizes_legacy_negative_training_labels(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    event_directory = config.camera.output_directory / "events" / "2026-07-16" / "legacy-negative"
+    event_directory.mkdir(parents=True)
+    (event_directory / "event.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "event_id": "legacy-negative",
+                "training_label": "background",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (event_directory / "classification.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "item_id": "legacy-negative",
+                "event_id": "legacy-negative",
+                "training_label": "background",
+                "human_label": "false_positive",
+                "human_label_action": "marked_false_positive",
+                "reviewed_at": "2026-07-16T18:00:00-04:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    sample_directory = config.camera.output_directory / "training-dataset" / "samples" / "legacy-negative"
+    sample_directory.mkdir(parents=True)
+    (sample_directory / "sample.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "sample_id": "legacy-negative",
+                "label": "background",
+                "training_eligible": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = ClassifierEvidenceStore(config)
+    store.prepare()
+
+    sample = json.loads((sample_directory / "sample.json").read_text(encoding="utf-8"))
+    classification = json.loads((event_directory / "classification.json").read_text(encoding="utf-8"))
+    event = json.loads((event_directory / "event.json").read_text(encoding="utf-8"))
+    manifest = [json.loads(line) for line in store.training_manifest_path.read_text(encoding="utf-8").splitlines()]
+    assert sample["label"] == "background_or_false_positive"
+    assert sample["label_migrated_from"] == "background"
+    assert classification["training_label"] == "background_or_false_positive"
+    assert classification["schema_version"] == 5
+    assert event["training_label"] == "background_or_false_positive"
+    assert [row["label"] for row in manifest] == ["background_or_false_positive"]
 
 
 def test_legacy_classifier_evidence_is_copied_without_deleting_originals(tmp_path: Path) -> None:
@@ -303,6 +414,43 @@ def test_classifier_worker_is_backgrounded_and_records_one_task(tmp_path: Path) 
     status = worker.status()
     assert status.submitted == status.completed == status.auto_accepted == 1
     assert status.queued_for_review == 0 and status.last_latency_ms == 12.5
+
+
+def test_inference_exception_preserves_images_and_unavailable_metadata(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+
+    class Detector:
+        model_name = "failing-detector"
+
+        def classify(self, _image: np.ndarray):
+            raise RuntimeError("synthetic inference failure")
+
+    worker = EventClassifier(config.classifier, store, detector_factory=Detector)  # type: ignore[arg-type]
+    event_directory = tmp_path / "captures" / "events" / "inference-error"
+    event_directory.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit(
+            "inference-error",
+            event_directory,
+            1,
+            np.zeros((40, 60, 3), dtype=np.uint8),
+            (20, 10, 20, 16),
+        )
+        deadline = time.monotonic() + 2
+        while not (event_directory / "classification.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        worker.stop()
+
+    record = store.get_record("inference-error")
+    assert record["classification_status"] == "unclassified"
+    assert record["outcome"] == "classifier_error"
+    assert record["error"] == "RuntimeError: synthetic inference failure"
+    assert (event_directory / "classifier-input.jpg").is_file()
+    assert (event_directory / "original-frame.jpg").is_file()
+    assert worker.status().errors == 1
 
 
 def test_failed_classification_can_retry_from_saved_input(tmp_path: Path) -> None:
@@ -504,6 +652,7 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
 
     page = client.get("/classifier-review")
     assert page.status_code == 200 and b"review-event" in page.data and b"Known-class possibility" in page.data
+    assert b"Download clean full frame" in page.data
     assert b'<option value="person" class="classifier-label-option" selected>Person (model guess)</option>' in page.data
     assert b'<option value="dog" class="classifier-label-option">Dog</option>' in page.data
     assert b'<option value="squirrel">Squirrel</option>' in page.data
@@ -556,7 +705,7 @@ def test_classifier_review_page_serves_input_and_requires_token_for_decision(tmp
     false_positive_page = client.get("/classifier-review?state=false_positive").data
     assert b"false-event" in false_positive_page and b"False Positive" in false_positive_page
     assert store.training_summary()["labels"] == {
-        "background": 1,
+        "background_or_false_positive": 1,
         "eastern_gray_squirrel": 1,
         "person": 1,
     }

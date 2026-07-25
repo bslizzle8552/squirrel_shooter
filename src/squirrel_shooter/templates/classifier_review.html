@@ -83,6 +83,7 @@
               {% if item.error %}<p class="classifier-error">{{ item.error }}</p>{% endif %}
               <div class="evidence-links">
                 <a class="text-link" href="{{ url_for('classifier_file', item_id=item.item_id) }}" download>Download classifier image</a>
+                {% if item.event_original_frame_relative %}<a class="text-link" href="{{ url_for('event_file', relative_path=item.event_original_frame_relative) }}" download>Download clean full frame</a>{% endif %}
                 {% if item.event_snapshot_relative %}<a class="text-link" href="{{ url_for('event_file', relative_path=item.event_snapshot_relative) }}" download>Download event picture</a>{% endif %}
                 {% if item.event_clip_relative %}<a class="text-link" href="{{ url_for('event_file', relative_path=item.event_clip_relative) }}">Video clip</a>{% endif %}
               </div>

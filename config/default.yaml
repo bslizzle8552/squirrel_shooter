@@ -1,5 +1,6 @@
-# Conservative starting values for a fixed 1280x720 garden camera currently
-# observed near 10 FPS.  Tune these after reviewing saved events.
+# Conservative starting values for a fixed 1280x720 garden camera requested at
+# 30 FPS. Live event metadata currently measures about 30-39 FPS; tune again
+# after the camera is installed in its final garden view.
 camera:
   device_index: 0
   requested_width: 1280

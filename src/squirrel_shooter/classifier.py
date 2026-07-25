@@ -31,27 +31,34 @@ CLASSIFICATION_VIEWS = frozenset({"review", "unknown", "known", "errors", "false
 LEGACY_APPROVAL_LABELS = frozenset({"car", "person"})
 TRAINING_LABEL_SUGGESTIONS = (
     "squirrel",
-    "chipmunk",
+    "person",
+    "car",
     "rabbit",
+    "deer",
+    "other_animal",
+    "chipmunk",
     "bird",
     "raccoon",
     "opossum",
     "groundhog",
-    "deer",
     "fox",
     "skunk",
     "cat",
     "dog",
-    "person",
-    "car",
-    "other_animal",
 )
 SAFE_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
 SAFE_TRAINING_LABEL = re.compile(r"[a-z][a-z0-9_]{1,39}")
+CLASSIFICATION_SCHEMA_VERSION = 5
+TRAINING_SAMPLE_SCHEMA_VERSION = 2
 CLASSIFICATION_FILENAME = "classification.json"
 CLASSIFIER_INPUT_FILENAME = "classifier-input.jpg"
+ORIGINAL_FRAME_FILENAME = "original-frame.jpg"
 TRAINING_DATASET_DIRECTORY = "training-dataset"
 TRAINING_MANIFEST_FILENAME = "manifest.jsonl"
+CANONICAL_NEGATIVE_LABEL = "background_or_false_positive"
+RESERVED_TRAINING_LABELS = frozenset(
+    {"unknown", "false_positive", "background", CANONICAL_NEGATIVE_LABEL}
+)
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,7 @@ class ClassifierTask:
     selection_method: str = "configured_fallback"
     selected_motion_bounding_box_area: int | None = None
     total_event_frames_considered: int = 1
+    original_image: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +173,7 @@ def normalize_training_label(value: str) -> str:
     normalized = re.sub(r"_+", "_", re.sub(r"[\s-]+", "_", value.strip().lower())).strip("_")
     if not SAFE_TRAINING_LABEL.fullmatch(normalized):
         raise ValueError("Label must be 2-40 characters using letters, numbers, spaces, hyphens, or underscores")
-    if normalized in {"unknown", "false_positive", "background"}:
+    if normalized in RESERVED_TRAINING_LABELS:
         raise ValueError("Use the dedicated Unknown or False Positive action for this label")
     return normalized
 
@@ -199,6 +207,7 @@ class ClassifierEvidenceStore:
             self.training_samples_root.mkdir(parents=True, exist_ok=True)
             self.audit_path.parent.mkdir(parents=True, exist_ok=True)
             self._migrate_legacy_evidence()
+            self._canonicalize_negative_training_labels()
             self._rebuild_training_manifest()
             self._prepared = True
 
@@ -241,12 +250,32 @@ class ClassifierEvidenceStore:
             raise ValueError("Unsafe classifier evidence id")
         task.event_directory.mkdir(parents=True, exist_ok=True)
         image_path = task.event_directory / CLASSIFIER_INPUT_FILENAME
+        original_frame_path = task.event_directory / ORIGINAL_FRAME_FILENAME
         metadata_path = task.event_directory / CLASSIFICATION_FILENAME
+        event = self._load_event_record(task.event_directory)
+        source_camera = {
+            key: event.get(key)
+            for key in (
+                "source_camera",
+                "camera_device_index",
+                "actual_width",
+                "actual_height",
+                "camera_reported_fps",
+                "measured_camera_fps",
+            )
+            if event.get(key) is not None
+        }
         record = {
-            "schema_version": 4,
+            "schema_version": CLASSIFICATION_SCHEMA_VERSION,
             "item_id": item_id,
             "event_id": task.event_id,
             "source_event_directory": str(task.event_directory),
+            "event_timestamp": event.get("start_timestamp"),
+            "session_id": event.get("session_id"),
+            "capture_method": event.get("capture_method", "automatic_motion_event"),
+            "software_version": event.get("software_version"),
+            "git_commit_sha": event.get("git_commit_sha"),
+            "source_camera": source_camera,
             "classifier_timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
             "submitted_at": task.submitted_at,
             "frame_number": task.frame_number,
@@ -283,12 +312,24 @@ class ClassifierEvidenceStore:
             "error": error,
             "latency_ms": None if latency_ms is None else round(latency_ms, 2),
             "input_image_path": str(image_path),
+            "input_image_role": "unannotated_target_crop",
+            "original_frame_path": None,
+            "original_frame_role": "unannotated_full_resolution_context",
+            "original_frame_error": None,
             "reviewed_at": None,
         }
         with self._lock:
             if not self._image_writer(str(image_path), task.image):
                 raise OSError(f"Could not save classifier input image: {image_path}")
+            if task.original_image is not None:
+                if self._image_writer(str(original_frame_path), task.original_image):
+                    record["original_frame_path"] = str(original_frame_path)
+                else:
+                    record["original_frame_error"] = f"Could not save original event frame: {original_frame_path}"
+            elif original_frame_path.is_file():
+                record["original_frame_path"] = str(original_frame_path)
             _atomic_json(metadata_path, record)
+            self._update_event_classification_metadata(task.event_directory, record)
             self._append_audit({"action": "classified", **record})
         LOGGER.info(
             "Event classified: event_id=%s frame=%d method=%s motion_box_area=%s frames_considered=%d result=%s confidence=%s",
@@ -314,6 +355,33 @@ class ClassifierEvidenceStore:
         )
         return record
 
+    @staticmethod
+    def _load_event_record(event_directory: Path) -> dict[str, Any]:
+        try:
+            event = json.loads((event_directory / "event.json").read_text(encoding="utf-8"))
+            return event if isinstance(event, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    @staticmethod
+    def _update_event_classification_metadata(event_directory: Path, record: dict[str, Any]) -> None:
+        event_path = event_directory / "event.json"
+        event = ClassifierEvidenceStore._load_event_record(event_directory)
+        if not event:
+            return
+        event.update(
+            classification_path=str(event_directory / CLASSIFICATION_FILENAME),
+            classifier_input_path=record.get("input_image_path"),
+            classifier_input_role=record.get("input_image_role"),
+            original_frame_path=record.get("original_frame_path"),
+            original_frame_role=record.get("original_frame_role"),
+            predicted_class=record.get("top_label"),
+            prediction_confidence=record.get("top_confidence"),
+            classification_status=record.get("classification_status"),
+            classification_error=record.get("error"),
+        )
+        _atomic_json(event_path, event)
+
     def list_items(self, view: str) -> list[dict[str, Any]]:
         if view not in CLASSIFICATION_VIEWS:
             raise ValueError("Unknown classification view")
@@ -329,6 +397,11 @@ class ClassifierEvidenceStore:
                     )
                     payload["event_clip_relative"] = (
                         f"{event_relative}/clip.avi" if (path.parent / "clip.avi").is_file() else None
+                    )
+                    payload["event_original_frame_relative"] = (
+                        f"{event_relative}/{ORIGINAL_FRAME_FILENAME}"
+                        if (path.parent / ORIGINAL_FRAME_FILENAME).is_file()
+                        else None
                     )
                     items.append(payload)
             except (OSError, json.JSONDecodeError):
@@ -357,7 +430,7 @@ class ClassifierEvidenceStore:
         observed = {
             str(sample.get("label"))
             for sample in self._training_samples(eligible_only=True)
-            if sample.get("label") not in {None, "", "background"}
+            if sample.get("label") not in {None, "", *RESERVED_TRAINING_LABELS}
         }
         return tuple(
             dict.fromkeys(
@@ -391,6 +464,11 @@ class ClassifierEvidenceStore:
                 )
                 payload["event_clip_relative"] = (
                     f"{event_relative}/clip.avi" if (path.parent / "clip.avi").is_file() else None
+                )
+                payload["event_original_frame_relative"] = (
+                    f"{event_relative}/{ORIGINAL_FRAME_FILENAME}"
+                    if (path.parent / ORIGINAL_FRAME_FILENAME).is_file()
+                    else None
                 )
                 grouped[view].append(payload)
             except (OSError, json.JSONDecodeError):
@@ -475,11 +553,11 @@ class ClassifierEvidenceStore:
             status = normalized_label if normalized_label in {"unknown", "false_positive"} else "known"
             display_label = normalized_label.replace("_", " ").title()
             reviewed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
-            training_label = "background" if normalized_label == "false_positive" else (
+            training_label = CANONICAL_NEGATIVE_LABEL if normalized_label == "false_positive" else (
                 None if normalized_label == "unknown" else normalized_label
             )
             record.update(
-                schema_version=3,
+                schema_version=CLASSIFICATION_SCHEMA_VERSION,
                 classification_status=status,
                 display_label=display_label,
                 label_source="human",
@@ -534,6 +612,14 @@ class ClassifierEvidenceStore:
         image_path = sample_directory / "image.jpg"
         shutil.copy2(source_image, image_path)
         image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        source_original_frame = metadata_path.parent / ORIGINAL_FRAME_FILENAME
+        original_frame_path = sample_directory / ORIGINAL_FRAME_FILENAME
+        original_frame_relative: str | None = None
+        original_frame_hash: str | None = None
+        if source_original_frame.is_file():
+            shutil.copy2(source_original_frame, original_frame_path)
+            original_frame_relative = original_frame_path.relative_to(self.training_root).as_posix()
+            original_frame_hash = hashlib.sha256(original_frame_path.read_bytes()).hexdigest()
         event: dict[str, Any] = {}
         try:
             loaded_event = json.loads((metadata_path.parent / "event.json").read_text(encoding="utf-8"))
@@ -542,7 +628,7 @@ class ClassifierEvidenceStore:
             pass
         image_relative = image_path.relative_to(self.training_root).as_posix()
         sample = {
-            "schema_version": 1,
+            "schema_version": TRAINING_SAMPLE_SCHEMA_VERSION,
             "sample_id": record["item_id"],
             "event_id": record.get("event_id"),
             "task": "small_wildlife_image_classification",
@@ -553,7 +639,17 @@ class ClassifierEvidenceStore:
             "labeled_at": labeled_at,
             "image_relative_path": image_relative,
             "image_sha256": image_hash,
+            "image_role": "unannotated_target_crop",
+            "original_frame_relative_path": original_frame_relative,
+            "original_frame_sha256": original_frame_hash,
+            "original_frame_role": "unannotated_full_resolution_context",
+            "split_group_event_id": record.get("event_id"),
+            "split_group_session_id": event.get("session_id"),
             "source": {
+                "capture_method": event.get("capture_method", record.get("capture_method")),
+                "source_camera": record.get("source_camera", {}),
+                "software_version": event.get("software_version", record.get("software_version")),
+                "git_commit_sha": event.get("git_commit_sha", record.get("git_commit_sha")),
                 "classifier_model": record.get("model"),
                 "model_suggestion": record.get("model_suggestion"),
                 "top_label": record.get("top_label"),
@@ -565,6 +661,8 @@ class ClassifierEvidenceStore:
                 "event_start_timestamp": event.get("start_timestamp"),
                 "motion_category": event.get("provisional_category"),
                 "movement_attributes": event.get("movement_attributes", []),
+                "event_snapshot_role": event.get("snapshot_file_role"),
+                "event_clip_role": event.get("clip_file_role"),
             },
         }
         _atomic_json(sample_directory / "sample.json", sample)
@@ -582,6 +680,51 @@ class ClassifierEvidenceStore:
             sample.update(training_eligible=False, exclusion_reason=reason, excluded_at=excluded_at)
             _atomic_json(sample_path, sample)
         self._rebuild_training_manifest()
+
+    def _canonicalize_negative_training_labels(self) -> None:
+        """Upgrade the two legacy negative labels without losing audit provenance."""
+
+        classification_paths = {
+            path.parent.name: path
+            for path in self.events_root.rglob(CLASSIFICATION_FILENAME)
+        }
+        for sample_path in self.training_samples_root.glob("*/sample.json"):
+            try:
+                sample = json.loads(sample_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(sample, dict) or sample.get("label") not in {"background", "false_positive"}:
+                continue
+            previous_label = str(sample["label"])
+            sample.update(
+                schema_version=max(
+                    TRAINING_SAMPLE_SCHEMA_VERSION,
+                    int(sample.get("schema_version", 0) or 0),
+                ),
+                label=CANONICAL_NEGATIVE_LABEL,
+                label_migrated_from=previous_label,
+            )
+            _atomic_json(sample_path, sample)
+
+            item_id = str(sample.get("sample_id") or sample_path.parent.name)
+            metadata_path = classification_paths.get(item_id)
+            if metadata_path is None:
+                continue
+            try:
+                record = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(record, dict) and record.get("training_label") in {"background", "false_positive"}:
+                record.update(
+                    schema_version=max(
+                        CLASSIFICATION_SCHEMA_VERSION,
+                        int(record.get("schema_version", 0) or 0),
+                    ),
+                    training_label=CANONICAL_NEGATIVE_LABEL,
+                    training_label_migrated_from=previous_label,
+                )
+                _atomic_json(metadata_path, record)
+                self._update_event_truth(metadata_path.parent, record)
 
     def _training_samples(self, *, eligible_only: bool) -> list[dict[str, Any]]:
         samples: list[dict[str, Any]] = []
@@ -731,16 +874,17 @@ class EventClassifier:
             return False
         crop, crop_box = _candidate_crop(frame, source_bounding_box, self.config.crop_margin_percent)
         task = ClassifierTask(
-            event_id,
-            event_directory,
-            frame_number,
-            crop,
-            source_bounding_box,
-            crop_box,
-            datetime.now().astimezone().isoformat(timespec="milliseconds"),
-            selection_method,
-            selected_motion_bounding_box_area,
-            total_event_frames_considered,
+            event_id=event_id,
+            event_directory=event_directory,
+            frame_number=frame_number,
+            image=crop,
+            source_bounding_box=source_bounding_box,
+            crop_bounding_box=crop_box,
+            submitted_at=datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            selection_method=selection_method,
+            selected_motion_bounding_box_area=selected_motion_bounding_box_area,
+            total_event_frames_considered=total_event_frames_considered,
+            original_image=frame.copy(),
         )
         return self._enqueue(task)
 
@@ -756,17 +900,22 @@ class EventClassifier:
         if image is None:
             raise OSError("Saved classifier input could not be read")
         event_directory = self.store._record_path(item_id).parent
+        original_image = cv2.imread(str(event_directory / ORIGINAL_FRAME_FILENAME), cv2.IMREAD_COLOR)
         task = ClassifierTask(
-            item_id,
-            event_directory,
-            int(record.get("frame_number", 1)),
-            image,
-            _dict_box(record.get("source_bounding_box")),
-            _dict_box(record.get("crop_bounding_box")),
-            datetime.now().astimezone().isoformat(timespec="milliseconds"),
-            str(record.get("frame_selection_method", "configured_fallback")),
-            _optional_int(record.get("selected_motion_bounding_box_area")),
-            max(1, _optional_int(record.get("total_event_frames_considered")) or 1),
+            event_id=item_id,
+            event_directory=event_directory,
+            frame_number=int(record.get("frame_number", 1)),
+            image=image,
+            source_bounding_box=_dict_box(record.get("source_bounding_box")),
+            crop_bounding_box=_dict_box(record.get("crop_bounding_box")),
+            submitted_at=datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            selection_method=str(record.get("frame_selection_method", "configured_fallback")),
+            selected_motion_bounding_box_area=_optional_int(record.get("selected_motion_bounding_box_area")),
+            total_event_frames_considered=max(
+                1,
+                _optional_int(record.get("total_event_frames_considered")) or 1,
+            ),
+            original_image=original_image,
         )
         self.store.record_action("retry_requested", record)
         return self._enqueue(task)
@@ -837,9 +986,27 @@ class EventClassifier:
                     error = detector_error or "classifier_unavailable"
                     model_name = MobileNetSSDDetector.model_name
                 else:
-                    detections, latency = detector.classify(task.image)
-                    error = None
-                    model_name = detector.model_name
+                    try:
+                        detections, latency = detector.classify(task.image)
+                        error = None
+                        model_name = detector.model_name
+                    except Exception as exc:
+                        detections, latency = [], None
+                        error = f"{type(exc).__name__}: {exc}"
+                        model_name = detector.model_name
+                        detector = None
+                        detector_error = error
+                        LOGGER.error(
+                            "Classifier inference failed",
+                            extra={
+                                "structured_data": {
+                                    "event": "classifier_inference_error",
+                                    "event_id": task.event_id,
+                                    "error": error,
+                                }
+                            },
+                            exc_info=True,
+                        )
                 record = self.store.save_classification(task, detections, latency, model_name, error=error)
                 with self._lock:
                     self._completed += 1

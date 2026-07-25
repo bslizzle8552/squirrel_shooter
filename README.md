@@ -197,9 +197,10 @@ captures/
   events/
     YYYY-MM-DD/
       <timestamp-and-unique-suffix>/
-        snapshot.jpg
-        clip.avi
-        event.json
+        snapshot.jpg          # annotated review frame
+        clip.avi              # annotated review clip
+        original-frame.jpg    # clean full-resolution selected source frame
+        event.json            # motion, camera, session, version, and file-role metadata
         classifier-input.jpg  # exact crop submitted to the object model
         classification.json   # model output, visible label, and human decision
   classifier/                 # legacy evidence preserved during automatic migration
@@ -208,6 +209,7 @@ captures/
     samples/
       <event-id>/
         image.jpg             # unannotated classifier crop used for future training
+        original-frame.jpg    # clean full-resolution context, when available
         sample.json           # human truth, hashes, model output, boxes, and event provenance
   manual/
   rejections/                 # only when rejection snapshots are enabled
@@ -225,10 +227,12 @@ captures/
 ```
 
 Open `captures/reports/latest-report.html` directly in a browser; it needs no
-server. Enter a human label and notes in `review.csv`. Suggested labels are
-`squirrel`, `bird`, `person`, `dog`, `plant`, `shadow`, `bug`, and `unknown`, but
-custom labels are allowed. Rebuilding preserves labels already entered in that
-CSV. The heuristic label remains separate.
+server. Enter a human label and notes in `review.csv`. Preferred top-level labels
+are `squirrel`, `person`, `car`, `rabbit`, `deer`, `other_animal`,
+`background_or_false_positive`, and `unknown`. Use the dedicated Unknown and
+False Positive review actions for the last two cases. More specific custom labels
+remain possible when they are genuinely useful, and rebuilding preserves labels
+already entered in the CSV. The heuristic label remains separate.
 
 An interrupted folder keeps `.recovered-incomplete` and a recovery `event.json`.
 It is intentionally excluded from normal counts and retention so Stephen can
@@ -393,14 +397,16 @@ are normalized to stable class names such as `eastern_gray_squirrel`. Unknown an
 False Positive remain dedicated actions. Every action returns to the review tab
 you were using, and the page supports selecting multiple cards to confirm each
 model guess, apply one label, keep Unknown, or mark False Positive in bulk.
-Model-load and queue errors can still be labeled manually or retried from their
-exact saved input.
+Model-load, inference, and queue errors become durable Classification Unavailable
+records with their saved inputs; they can still be labeled manually or retried.
 
 Every attempt records the selected event-frame index, selection method, motion-box
 area when available, total frames considered, crop and source boxes, model, all
-detections, confidence, inference time, automatic/manual decision, error, and exact
-submitted crop. `captures/logs/classifier.jsonl` is append-only, while each event's
-`classification.json` reflects the newest decision. The recent-clips and
+detections, confidence, inference time, automatic/manual decision, error, exact
+submitted crop, full clean source frame, capture method, camera source, session,
+software version, and Git commit. `captures/logs/classifier.jsonl` is append-only,
+while each event's `classification.json` reflects the newest decision. The
+recent-clips and
 event-archive cards read that same file, so their headline becomes Person, Car,
 Unknown, Classification unavailable, or False Positive. The original motion label
 such as `small_animal_candidate` remains visible only as secondary diagnostic data.
@@ -408,16 +414,24 @@ This classifier
 uses the VOC label set, which includes people, cars, birds, cats, and dogs but not
 squirrels or rabbits.
 
-Every human-confirmed or human-corrected label copies the clean, unannotated
-classifier crop into `captures/training-dataset`. It also stores SHA-256, model
-suggestions and detections, source/crop boxes, frame number, event time, motion
+Every human-confirmed or human-corrected label copies both the clean, unannotated
+classifier crop and the clean full-resolution source frame into
+`captures/training-dataset`. It also stores SHA-256 hashes, file roles, model
+suggestions and detections, source/crop boxes, frame number, event/session split
+groups, capture method, camera source, software/Git version, event time, motion
 category, and movement attributes. This dataset is intentionally outside
 `captures/events`, so the verified copy survives normal 30-day event retention.
 Relabeling updates the same sample and rebuilds the canonical manifest without
 duplicates. Unknown is excluded because it is not ground truth; a human-marked
-False Positive is included as `background`, which provides useful negative
-training examples. Automatically accepted model labels do not enter training
-until a human confirms them.
+False Positive is included as `background_or_false_positive`, which provides
+useful negative training examples. Older `background` samples are upgraded
+in-place to that canonical label without deleting their images or audit
+provenance. Automatically accepted model labels do not enter training until a
+human confirms them.
+
+Build train, validation, and test partitions by `split_group_event_id` or
+`split_group_session_id`; never randomly split neighboring frames or derivatives
+from one event across partitions.
 
 To copy the eventual dataset from the Pi without touching event retention:
 
@@ -537,7 +551,11 @@ Set limits below the SD card's actual free space. Logs are append-only and activ
 when an active event/rejection log reaches its limit it is closed and rotated, and
 only the configured number of inactive rotations is retained. The current active
 log is never deleted. Old session summaries are also bounded by
-`storage.max_log_files`.
+`storage.max_log_files`. The event limit includes clips, annotated snapshots,
+clean source frames, classifier crops, and metadata inside `captures/events`.
+Human-verified copies under `captures/training-dataset` are deliberately outside
+event retention and must be included in periodic disk checks and off-Pi backups;
+they are never automatically deleted.
 
 ## Expected false positives and rejections
 
@@ -554,8 +572,9 @@ Low FPS alone does not indicate night mode.
    intended garden area.
 2. Verify the Pi clock/time zone; event IDs and reports use local timestamps.
 3. Run the full tests and a supervised 10-15 minute watcher session.
-4. Press `e` during a real candidate and confirm `snapshot.jpg`, `clip.avi`, and
-   `event.json` all open correctly.
+4. Press `e` during a real candidate and confirm `snapshot.jpg`, `clip.avi`,
+   `original-frame.jpg`, `classifier-input.jpg`, `event.json`, and
+   `classification.json` all open correctly.
 5. Stop with `q` or `Ctrl+C`, rebuild the report, and confirm its links work.
 6. Review `rejections.jsonl` for repeated vibration/exposure/plant rejection.
 7. Check `df -h`, capture-directory permissions, retention limits, Pi temperature,
