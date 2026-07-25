@@ -32,6 +32,7 @@ Thumbs.db
 
 # Camera output and OpenCV test artifacts
 captures/
+logs/
 recordings/
 data/captures/
 data/videos/
