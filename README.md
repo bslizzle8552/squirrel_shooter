@@ -454,27 +454,46 @@ depth, completed count, last inference time, and last error. If motion processin
 rate drops materially or the queue fills, set `classifier.enabled: false`; the
 motion/event system continues unchanged.
 
-### Inclusion-zone polygon and sky mask
+### Inclusion-zone polygon and excluded-area mask
 
-The current default removes the sky above 26% of the image, matching a cutoff
-near row 187 in the 720p camera view. Foreground pixels outside this polygon are
-removed before global-motion measurements and object contours, so clouds cannot
-create candidates or inflate the displayed motion percentage:
+The current default is the first-pass mask for Dad's garden. It was normalized
+from the 1686x879 reference image so the same polygon scales to the watcher's
+640-pixel processing width and to the camera's full-resolution live frame.
+Foreground pixels outside this polygon are removed before morphology,
+global-motion measurements, and object contours, so movement in the excluded
+tree line and planted area cannot create candidates or inflate the displayed
+motion percentage:
 
 ```yaml
 motion:
   inclusion_zone:
     enabled: true
     polygon:
-      - [0.0, 0.26]
-      - [1.0, 0.26]
+      - [0.0, 0.569476]
+      - [0.103858, 0.552392]
+      - [0.183976, 0.461276]
+      - [0.264095, 0.290433]
+      - [0.700297, 0.290433]
+      - [1.0, 0.341686]
       - [1.0, 1.0]
       - [0.0, 1.0]
 ```
 
 `[0.0, 0.0]` is top-left and `[1.0, 1.0]` is bottom-right. Keep at least three
-points, all between 0 and 1. The live feed remains uncropped and outlines the
-active detection zone, making the boundary visible while tuning it.
+points, all between 0 and 1. The live feed remains uncropped, darkens excluded
+areas, and outlines the active detection zone in blue.
+
+To save a single annotated mask check from an existing camera image:
+
+```bash
+python -m squirrel_shooter.mask_preview --image dad-garden.jpg --output debug/dad-garden-mask.jpg
+```
+
+Omit `--image` to capture one frame from the configured camera while the main
+application is stopped. A blob crossing the boundary is clipped first; its
+contour, box, centroid, and area measurements use only the in-mask pixels. If the
+remaining in-mask area is below the unchanged minimum blob threshold, it is
+discarded.
 
 ### Fragment grouping
 

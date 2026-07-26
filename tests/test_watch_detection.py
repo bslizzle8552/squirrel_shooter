@@ -13,8 +13,10 @@ from squirrel_shooter.watch_detection import (
     MotionWatcherDetector,
     WatchState,
     classify_candidate,
+    draw_inclusion_zone,
     evaluate_event_eligibility,
     group_components,
+    inclusion_zone_points,
 )
 
 
@@ -166,6 +168,59 @@ def test_inclusion_zone_keeps_motion_below_sky_cutoff(tmp_path: Path) -> None:
 
     assert len(result.groups) == 1
     assert result.groups[0].bounding_box == (40, 40, 15, 15)
+
+
+def test_default_inclusion_zone_scales_to_reference_image_pixels(tmp_path: Path) -> None:
+    config = load_config(write_test_config(tmp_path)).motion
+
+    points = inclusion_zone_points(config, 1686, 879)
+
+    assert points.tolist() == [
+        [0, 500],
+        [175, 485],
+        [310, 405],
+        [445, 255],
+        [1180, 255],
+        [1685, 300],
+        [1685, 878],
+        [0, 878],
+    ]
+
+
+def test_motion_crossing_zone_boundary_is_clipped_and_measured_in_mask(tmp_path: Path) -> None:
+    config = watch_config(tmp_path, persistence_frames=1)
+    zone = replace(
+        config.inclusion_zone,
+        enabled=True,
+        polygon=((0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.5, 1.0)),
+    )
+    crossing = box_mask((45, 30, 20, 15))
+    detector = MotionWatcherDetector(
+        replace(config, inclusion_zone=zone),
+        subtractor=MaskSubtractor([box_mask(), crossing]),
+    )
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    detector.process(frame, now=0)
+
+    result = detector.process(frame, now=0.1)
+
+    assert len(result.groups) == 1
+    group = result.groups[0]
+    assert group.bounding_box == (50, 30, 15, 15)
+    assert group.foreground_pixels == 225
+    assert group.touched_zone_boundary is True
+
+
+def test_inclusion_zone_annotation_darkens_excluded_area_and_draws_blue_boundary() -> None:
+    frame = np.full((100, 100, 3), 200, dtype=np.uint8)
+    zone = np.zeros((100, 100), dtype=np.uint8)
+    zone[:, 50:] = 255
+
+    annotated = draw_inclusion_zone(frame, zone)
+
+    assert annotated[50, 10].tolist() == [120, 120, 120]
+    assert annotated[50, 75].tolist() == [200, 200, 200]
+    assert annotated[50, 50].tolist() == [255, 0, 0]
 
 
 def test_large_lighting_change_and_scene_obstruction_are_rejected(tmp_path: Path) -> None:

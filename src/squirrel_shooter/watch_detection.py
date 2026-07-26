@@ -364,14 +364,15 @@ class MotionWatcherDetector:
         blurred = cv2.GaussianBlur(reduced, (self.config.blur_kernel, self.config.blur_kernel), 0)
         raw = self._subtractor.apply(blurred)
         _, foreground = cv2.threshold(raw, 200, 255, cv2.THRESH_BINARY)
+        zone_mask = inclusion_zone_mask(self.config, foreground.shape)
+        analysis_raw = cv2.bitwise_and(raw, zone_mask)
+        foreground = cv2.bitwise_and(foreground, zone_mask)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.config.morphology_kernel, self.config.morphology_kernel))
         cleaned = foreground
         if self.config.open_iterations:
             cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=self.config.open_iterations)
         if self.config.close_iterations:
             cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=self.config.close_iterations)
-        zone_mask = self._zone_mask(cleaned.shape)
-        analysis_raw = cv2.bitwise_and(raw, zone_mask)
         analysis_cleaned = cv2.bitwise_and(cleaned, zone_mask)
         measurement = self._measure_global(reduced, analysis_raw, analysis_cleaned, zone_mask)
         self._frame_count += 1
@@ -457,16 +458,6 @@ class MotionWatcherDetector:
             len(contours),
             self._processing_fps,
         )
-
-    def _zone_mask(self, shape: tuple[int, int]) -> np.ndarray:
-        height, width = shape
-        mask = np.zeros(shape, dtype=np.uint8)
-        if not self.config.inclusion_zone.enabled:
-            mask[:] = 255
-            return mask
-        points = np.array([[min(width - 1, round(x * width)), min(height - 1, round(y * height))] for x, y in self.config.inclusion_zone.polygon], dtype=np.int32)
-        cv2.fillPoly(mask, [points], 255)
-        return mask
 
     def _measure_global(self, frame: np.ndarray, raw: np.ndarray, cleaned: np.ndarray, zone_mask: np.ndarray) -> GlobalMotionMeasurement:
         pixels = max(1, raw.size)
@@ -587,17 +578,68 @@ class MotionWatcherDetector:
         return output
 
 
+def inclusion_zone_points(config: MotionConfig, width: int, height: int) -> np.ndarray:
+    """Scale the configured normalized polygon to pixel coordinates."""
+
+    return np.array(
+        [
+            [
+                round(x * max(0, width - 1)),
+                round(y * max(0, height - 1)),
+            ]
+            for x, y in config.inclusion_zone.polygon
+        ],
+        dtype=np.int32,
+    )
+
+
+def inclusion_zone_mask(config: MotionConfig, shape: tuple[int, int]) -> np.ndarray:
+    """Build the active binary inclusion mask for a frame or processing image."""
+
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if not config.inclusion_zone.enabled:
+        mask[:] = 255
+        return mask
+    cv2.fillPoly(mask, [inclusion_zone_points(config, width, height)], 255)
+    return mask
+
+
+def draw_inclusion_zone(
+    frame: np.ndarray,
+    zone_mask: np.ndarray,
+    *,
+    excluded_overlay_alpha: float = 0.40,
+) -> np.ndarray:
+    """Darken excluded pixels and draw the active polygon boundary in blue."""
+
+    annotated = frame.copy()
+    height, width = annotated.shape[:2]
+    zone = (
+        cv2.resize(zone_mask, (width, height), interpolation=cv2.INTER_NEAREST)
+        if zone_mask.shape != (height, width)
+        else zone_mask
+    )
+    if excluded_overlay_alpha > 0:
+        dark_overlay = cv2.bitwise_and(annotated, annotated, mask=zone)
+        cv2.addWeighted(
+            annotated,
+            1.0 - excluded_overlay_alpha,
+            dark_overlay,
+            excluded_overlay_alpha,
+            0,
+            dst=annotated,
+        )
+    zone_contours, _ = cv2.findContours(zone, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(annotated, zone_contours, -1, (255, 0, 0), 2)
+    return annotated
+
+
 def annotate_watch_frame(frame: np.ndarray, result: WatchDetectionResult, *, event_id: str | None = None, measured_fps: float = 0.0) -> np.ndarray:
     """Draw the inclusion polygon, grouped objects, components, paths, and metrics."""
 
-    annotated = frame.copy()
+    annotated = draw_inclusion_zone(frame, result.zone_mask)
     height, width = frame.shape[:2]
-    if result.zone_mask.shape != frame.shape[:2]:
-        zone = cv2.resize(result.zone_mask, (width, height), interpolation=cv2.INTER_NEAREST)
-    else:
-        zone = result.zone_mask
-    zone_contours, _ = cv2.findContours(zone, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(annotated, zone_contours, -1, (255, 180, 0), 2)
     for group in result.groups:
         color = (30, 220, 80) if group.confirmed else ((120, 120, 120) if not group.event_eligible else (0, 190, 255))
         x, y, box_width, box_height = group.bounding_box

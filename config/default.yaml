@@ -77,13 +77,18 @@ motion:
     seconds: 12.0
     minimum_frames: 60
 
-  # Ignore the sky above 26% of the frame. This matches the visible tree-line
-  # cutoff near y=187 on the current 1280x720 camera view.
+  # Dad's garden inclusion zone, normalized from the 1686x879 reference image.
+  # It keeps the gate/ground approach and lower-right yard while excluding the
+  # distant tree line and most of the planted garden at far left.
   inclusion_zone:
     enabled: true
     polygon:
-      - [0.0, 0.26]
-      - [1.0, 0.26]
+      - [0.0, 0.569476]
+      - [0.103858, 0.552392]
+      - [0.183976, 0.461276]
+      - [0.264095, 0.290433]
+      - [0.700297, 0.290433]
+      - [1.0, 0.341686]
       - [1.0, 1.0]
       - [0.0, 1.0]
 
