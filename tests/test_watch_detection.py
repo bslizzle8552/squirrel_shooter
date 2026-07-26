@@ -179,9 +179,9 @@ def test_default_inclusion_zone_scales_to_reference_image_pixels(tmp_path: Path)
         [0, 500],
         [175, 485],
         [310, 405],
-        [445, 255],
-        [1180, 255],
-        [1685, 300],
+        [476, 252],
+        [493, 187],
+        [1685, 192],
         [1685, 878],
         [0, 878],
     ]
