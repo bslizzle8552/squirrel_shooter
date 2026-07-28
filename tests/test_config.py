@@ -43,6 +43,11 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     )
     assert config.motion.persistence.frames == 5
     assert config.motion.candidate_filter.require_coherent_small_motion is True
+    assert config.motion.candidate_filter.ignore_localized_lighting_changes is True
+    assert config.motion.candidate_filter.localized_lighting_minimum_luminance_delta == 8.0
+    assert config.motion.candidate_filter.localized_lighting_minimum_background_luminance == 8.0
+    assert config.motion.candidate_filter.localized_lighting_maximum_chromaticity_delta == 0.10
+    assert config.motion.candidate_filter.localized_lighting_minimum_fraction == 0.85
 
 
 def test_rejects_missing_camera_setting(tmp_path: Path) -> None:

@@ -342,13 +342,26 @@ motion:
     minimum_frame_percent: 0.15
     ignore_tiny_motion: true
     ignore_plant_or_shadow_flicker: true
+    ignore_localized_lighting_changes: true
+    localized_lighting_minimum_luminance_delta: 8.0
+    localized_lighting_minimum_background_luminance: 8.0
+    localized_lighting_maximum_chromaticity_delta: 0.10
+    localized_lighting_minimum_fraction: 0.85
     require_coherent_small_motion: true
     small_motion_minimum_travel_pixels: 10.0
 ```
 
 Small candidates must travel consistently before they can create an event. A
 gray box marked `FILTERED` is still useful tuning evidence; the dashboard shows
-the specific reason. If real squirrels are being filtered, lower
+the specific reason. The localized-lighting check compares each motion contour
+with MOG2's learned background and rejects it only when the configured fraction
+changes brightness while retaining the same color. It does not change blob-area
+thresholds, mask a garden region, or extend the event cooldown.
+
+For immediate rollback, set
+`motion.candidate_filter.ignore_localized_lighting_changes: false` and restart
+with the normal start command. If real squirrels are being filtered, disable
+that check first; otherwise lower
 `small_motion_minimum_travel_pixels` gradually before disabling coherent-motion
 filtering. This is motion filtering, not animal or object recognition.
 

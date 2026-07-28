@@ -114,6 +114,11 @@ class CandidateFilterConfig:
     minimum_frame_percent: float
     ignore_tiny_motion: bool
     ignore_plant_or_shadow_flicker: bool
+    ignore_localized_lighting_changes: bool
+    localized_lighting_minimum_luminance_delta: float
+    localized_lighting_minimum_background_luminance: float
+    localized_lighting_maximum_chromaticity_delta: float
+    localized_lighting_minimum_fraction: float
     require_coherent_small_motion: bool
     small_motion_minimum_travel_pixels: float
 
@@ -441,6 +446,33 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _bool(
                 candidate_filter.get("ignore_plant_or_shadow_flicker"),
                 "motion.candidate_filter.ignore_plant_or_shadow_flicker",
+            ),
+            _bool(
+                candidate_filter.get("ignore_localized_lighting_changes"),
+                "motion.candidate_filter.ignore_localized_lighting_changes",
+            ),
+            _number(
+                candidate_filter.get("localized_lighting_minimum_luminance_delta"),
+                "motion.candidate_filter.localized_lighting_minimum_luminance_delta",
+                exclusive=True,
+                maximum=255.0,
+            ),
+            _number(
+                candidate_filter.get("localized_lighting_minimum_background_luminance"),
+                "motion.candidate_filter.localized_lighting_minimum_background_luminance",
+                maximum=255.0,
+            ),
+            _number(
+                candidate_filter.get("localized_lighting_maximum_chromaticity_delta"),
+                "motion.candidate_filter.localized_lighting_maximum_chromaticity_delta",
+                exclusive=True,
+                maximum=2.0,
+            ),
+            _number(
+                candidate_filter.get("localized_lighting_minimum_fraction"),
+                "motion.candidate_filter.localized_lighting_minimum_fraction",
+                exclusive=True,
+                maximum=1.0,
             ),
             _bool(
                 candidate_filter.get("require_coherent_small_motion"),

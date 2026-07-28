@@ -104,6 +104,13 @@ motion:
     minimum_frame_percent: 0.15
     ignore_tiny_motion: true
     ignore_plant_or_shadow_flicker: true
+    # Reject local motion that changes brightness while preserving the learned
+    # grass/background color. Set this switch to false for immediate rollback.
+    ignore_localized_lighting_changes: true
+    localized_lighting_minimum_luminance_delta: 8.0
+    localized_lighting_minimum_background_luminance: 8.0
+    localized_lighting_maximum_chromaticity_delta: 0.10
+    localized_lighting_minimum_fraction: 0.85
     require_coherent_small_motion: true
     small_motion_minimum_travel_pixels: 10.0
 

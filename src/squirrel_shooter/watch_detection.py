@@ -30,6 +30,7 @@ class MotionComponent:
     centroid: tuple[float, float]
     contour: tuple[tuple[int, int], ...] = ()
     velocity: tuple[float, float] = (0.0, 0.0)
+    localized_lighting_fraction: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         x, y, width, height = self.bounding_box
@@ -40,6 +41,7 @@ class MotionComponent:
             "centroid": {"x": round(self.centroid[0], 2), "y": round(self.centroid[1], 2)},
             "contour": [[x, y] for x, y in self.contour],
             "velocity": {"x": round(self.velocity[0], 2), "y": round(self.velocity[1], 2)},
+            "localized_lighting_fraction": round(self.localized_lighting_fraction, 3),
         }
 
 
@@ -53,6 +55,7 @@ class GroupedCandidate:
     frame_percent: float
     inclusion_zone_percent: float
     grouping_confidence: float
+    localized_lighting_fraction: float = 0.0
     track_id: int = 0
     persistence_count: int = 1
     path: tuple[tuple[float, float], ...] = ()
@@ -101,6 +104,7 @@ class GroupedCandidate:
             "frame_percentage_covered": round(self.frame_percent, 4),
             "inclusion_zone_percentage_covered": round(self.inclusion_zone_percent, 4),
             "grouping_confidence": round(self.grouping_confidence, 3),
+            "localized_lighting_fraction": round(self.localized_lighting_fraction, 3),
             "persistence_count": self.persistence_count,
             "duration": round(self.duration, 3),
             "travel_distance": round(self.travel_distance, 2),
@@ -256,6 +260,8 @@ def group_components(components: Iterable[MotionComponent], config: GroupingConf
             100.0 * foreground / max(1, frame_area),
             100.0 * foreground / max(1, zone_area),
             confidence,
+            sum(item.localized_lighting_fraction * item.foreground_pixels for item in selected)
+            / max(1, foreground),
             dispersed_motion=len(selected) >= 5 and confidence < 0.65,
         ))
     return tuple(results)
@@ -300,7 +306,12 @@ def evaluate_event_eligibility(candidate: GroupedCandidate, config: CandidateFil
 
     reason: str | None = None
     if config.enabled:
-        if config.ignore_tiny_motion and candidate.provisional_category == "tiny_motion":
+        if (
+            config.ignore_localized_lighting_changes
+            and candidate.localized_lighting_fraction >= config.localized_lighting_minimum_fraction
+        ):
+            reason = "localized_lighting_change"
+        elif config.ignore_tiny_motion and candidate.provisional_category == "tiny_motion":
             reason = "tiny_motion"
         elif config.ignore_plant_or_shadow_flicker and candidate.provisional_category == "plant_or_shadow_flicker":
             reason = "plant_or_shadow_flicker"
@@ -363,6 +374,7 @@ class MotionWatcherDetector:
         reduced = cv2.resize(frame, (target_width, max(1, round(frame.shape[0] * scale))), interpolation=cv2.INTER_AREA)
         blurred = cv2.GaussianBlur(reduced, (self.config.blur_kernel, self.config.blur_kernel), 0)
         raw = self._subtractor.apply(blurred)
+        background = self._background_image(blurred.shape)
         _, foreground = cv2.threshold(raw, 200, 255, cv2.THRESH_BINARY)
         zone_mask = inclusion_zone_mask(self.config, foreground.shape)
         analysis_raw = cv2.bitwise_and(raw, zone_mask)
@@ -427,6 +439,11 @@ class MotionWatcherDetector:
                 int(cv2.countNonZero(local) * inverse * inverse),
                 (center_reduced[0] * inverse, center_reduced[1] * inverse),
                 points,
+                localized_lighting_fraction=self._localized_lighting_fraction(
+                    blurred,
+                    background,
+                    contour,
+                ),
             ))
 
         moving_components: list[MotionComponent] = []
@@ -458,6 +475,66 @@ class MotionWatcherDetector:
             len(contours),
             self._processing_fps,
         )
+
+    def _background_image(self, expected_shape: tuple[int, ...]) -> np.ndarray | None:
+        getter = getattr(self._subtractor, "getBackgroundImage", None)
+        if getter is None:
+            return None
+        try:
+            background = getter()
+        except (AttributeError, cv2.error):
+            return None
+        if not isinstance(background, np.ndarray) or background.shape != expected_shape:
+            return None
+        return background
+
+    def _localized_lighting_fraction(
+        self,
+        current: np.ndarray,
+        background: np.ndarray | None,
+        contour: np.ndarray,
+    ) -> float:
+        """Measure contour pixels whose color is stable despite a brightness change."""
+
+        settings = self.config.candidate_filter
+        if not settings.ignore_localized_lighting_changes or background is None:
+            return 0.0
+        x, y, width, height = cv2.boundingRect(contour)
+        if width <= 0 or height <= 0:
+            return 0.0
+        local_contour = contour - np.array([[[x, y]]], dtype=contour.dtype)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.drawContours(mask, [local_contour], -1, 255, cv2.FILLED)
+        selected = mask > 0
+        if not np.any(selected):
+            return 0.0
+
+        current_roi = current[y : y + height, x : x + width].astype(np.float32) + 1.0
+        background_roi = background[y : y + height, x : x + width].astype(np.float32) + 1.0
+        current_luminance = cv2.cvtColor(current_roi, cv2.COLOR_BGR2GRAY)
+        background_luminance = cv2.cvtColor(background_roi, cv2.COLOR_BGR2GRAY)
+        changed = selected & (
+            background_luminance
+            >= settings.localized_lighting_minimum_background_luminance
+        ) & (
+            np.abs(current_luminance - background_luminance)
+            >= settings.localized_lighting_minimum_luminance_delta
+        )
+        changed_pixels = int(np.count_nonzero(changed))
+        if changed_pixels == 0:
+            return 0.0
+
+        current_chromaticity = current_roi / np.sum(current_roi, axis=2, keepdims=True)
+        background_chromaticity = background_roi / np.sum(background_roi, axis=2, keepdims=True)
+        chromaticity_delta = np.sum(
+            np.abs(current_chromaticity - background_chromaticity),
+            axis=2,
+        )
+        luminance_only = changed & (
+            chromaticity_delta
+            <= settings.localized_lighting_maximum_chromaticity_delta
+        )
+        return float(np.count_nonzero(luminance_only) / changed_pixels)
 
     def _measure_global(self, frame: np.ndarray, raw: np.ndarray, cleaned: np.ndarray, zone_mask: np.ndarray) -> GlobalMotionMeasurement:
         pixels = max(1, raw.size)

@@ -21,8 +21,9 @@ from squirrel_shooter.watch_detection import (
 
 
 class MaskSubtractor:
-    def __init__(self, masks: list[np.ndarray]) -> None:
+    def __init__(self, masks: list[np.ndarray], background: np.ndarray | None = None) -> None:
         self.masks = masks
+        self.background = background
         self.index = 0
 
     def apply(self, frame: np.ndarray) -> np.ndarray:
@@ -30,6 +31,9 @@ class MaskSubtractor:
         mask = self.masks[min(self.index, len(self.masks) - 1)]
         self.index += 1
         return mask.copy()
+
+    def getBackgroundImage(self) -> np.ndarray | None:
+        return None if self.background is None else self.background.copy()
 
 
 def watch_config(tmp_path: Path, *, global_enabled: bool = False, persistence_frames: int = 2) -> MotionConfig:
@@ -361,3 +365,64 @@ def test_small_motion_requires_coherent_travel_before_confirmation(tmp_path: Pat
     assert accepted is not None
     assert accepted.event_eligible and accepted.confirmed and accepted.newly_confirmed
     assert accepted.travel_distance >= 10
+
+
+def test_localized_luminance_change_is_filtered_but_colored_motion_remains_eligible(
+    tmp_path: Path,
+) -> None:
+    config = watch_config(tmp_path, persistence_frames=1)
+    mask = box_mask((30, 30, 20, 20))
+    background = np.zeros((100, 100, 3), dtype=np.uint8)
+    background[:] = (40, 80, 40)
+
+    lighting_frame = background.copy()
+    lighting_frame[30:50, 30:50] = (80, 160, 80)
+    lighting_detector = MotionWatcherDetector(
+        config,
+        subtractor=MaskSubtractor([box_mask(), mask], background),
+    )
+    lighting_detector.process(background, now=0)
+    lighting = lighting_detector.process(lighting_frame, now=0.1).groups[0]
+
+    animal_frame = background.copy()
+    animal_frame[30:50, 30:50] = (45, 65, 130)
+    animal_detector = MotionWatcherDetector(
+        config,
+        subtractor=MaskSubtractor([box_mask(), mask], background),
+    )
+    animal_detector.process(background, now=0)
+    animal = animal_detector.process(animal_frame, now=0.1).groups[0]
+
+    assert lighting.localized_lighting_fraction >= 0.85
+    assert lighting.event_filter_reason == "localized_lighting_change"
+    assert not lighting.confirmed
+    assert animal.localized_lighting_fraction < 0.85
+    assert animal.event_eligible and animal.confirmed
+
+
+def test_localized_lighting_filter_has_configuration_rollback(tmp_path: Path) -> None:
+    config = watch_config(tmp_path, persistence_frames=1)
+    config = replace(
+        config,
+        candidate_filter=replace(
+            config.candidate_filter,
+            ignore_localized_lighting_changes=False,
+        ),
+    )
+    background = np.zeros((100, 100, 3), dtype=np.uint8)
+    background[:] = (40, 80, 40)
+    lighting_frame = background.copy()
+    lighting_frame[30:50, 30:50] = (80, 160, 80)
+    detector = MotionWatcherDetector(
+        config,
+        subtractor=MaskSubtractor(
+            [box_mask(), box_mask((30, 30, 20, 20))],
+            background,
+        ),
+    )
+
+    detector.process(background, now=0)
+    result = detector.process(lighting_frame, now=0.1).groups[0]
+
+    assert result.localized_lighting_fraction == 0.0
+    assert result.event_eligible and result.confirmed
