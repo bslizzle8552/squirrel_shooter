@@ -1,14 +1,17 @@
 # Squirrel Squirter
 
-Squirrel Squirter is currently a **vision-only** Raspberry Pi garden watcher:
+Squirrel Squirter's normal application is currently a **vision-only** Raspberry Pi garden watcher:
 
 **one shared USB camera -> motion groups -> one lightweight event classification -> private review dashboard**
 
-It does not recognize squirrels, aim, move anything, or control water. A small
+The normal application does not recognize squirrels, aim, move anything, or
+control water. A small
 MobileNet-SSD stress test can label common VOC objects such as `person` and `car`,
-but those labels are not squirrel recognition. It imports
-no GPIO, I2C, PCA9685, servo, MOSFET, solenoid, or valve driver. The existing
-disabled-valve placeholder remains closed and raises an error if asked to open.
+but those labels are not squirrel recognition. A separate, supervised pan/tilt
+bench utility can control two servos through a PCA9685; it is not imported or
+started by the camera/detection runtime. No MOSFET, solenoid, or live valve driver
+is implemented. The existing disabled-valve placeholder remains closed and raises
+an error if asked to open.
 
 The motion watcher's labels remain size/movement heuristics. The optional object
 classifier is a separate record and never outputs a definitive `squirrel`
@@ -66,6 +69,118 @@ are recorded separately as `unknown` unless configuration or actual image eviden
 says otherwise. `probable_ir_mode_switch` requires a scene-wide visual transition;
 frame rate alone can never produce it.
 
+## Pan/tilt servo foundation
+
+The reusable `PanTiltController` is intentionally separate from live detection.
+Constructing it configures the PCA9685 channels but does not command either servo,
+center automatically, or run a sweep. Because the servos provide no physical
+position feedback, the controller never reads `servo.angle`. It reports an
+uncommanded software state until it has written both axes, then retains only the
+last commanded position.
+
+The bench-verified defaults in `config/default.yaml` are:
+
+```yaml
+pan_tilt:
+  i2c_address: 0x40
+  pan_channel: 0
+  tilt_channel: 1
+  pan_pulse_min_us: 600
+  pan_pulse_max_us: 2400
+  tilt_pulse_min_us: 600
+  tilt_pulse_max_us: 2400
+  pan_min: 30
+  pan_center: 90
+  pan_max: 150
+  tilt_min: 70
+  tilt_center: 85
+  tilt_max: 150
+  park_pan: 90
+  park_tilt: 85
+  movement_speed: 45.0
+  fast_acquisition_speed: 120.0
+  step_interval_seconds: 0.02
+  settling_delay_seconds: 0.15
+  release_pwm_after_movement: false
+  park_on_cleanup: true
+```
+
+Every command clamps to the calibrated limits. Smooth and fast two-axis moves use
+one interpolated path so pan and tilt finish at approximately the same time. Fast
+movement increases the configured path speed; it does not jump straight to an
+endpoint. On the first interpolated command in a process, the configured center is
+used as the software path reference because no feedback exists. Movement still
+occurs only after an explicit command.
+
+### Install the Pi servo dependencies
+
+The verified target is Raspberry Pi OS with Python 3.13. Use the project's existing
+`.venv`; do not install these packages into the system Python:
+
+```bash
+cd ~/squirrel_shooter
+source .venv/bin/activate
+python -m pip install -e ".[test,servo]"
+```
+
+The `servo` extra installs `adafruit-circuitpython-servokit`,
+`adafruit-circuitpython-pca9685`, and the Linux `adafruit-lgpio` backend. The
+controller imports ServoKit only when real hardware is constructed, so tests and
+camera-only operation remain hardware-independent. The `adafruit-lgpio` package is
+selected specifically for Python 3.13 or newer on Raspberry Pi ARM systems.
+
+### Supervised bench commands
+
+Stop the normal application before a bench session, confirm the mechanism is clear,
+then activate `.venv`. The basic commands are:
+
+```bash
+python -m squirrel_shooter.servo_bench center
+python -m squirrel_shooter.servo_bench park
+python -m squirrel_shooter.servo_bench move 120 100
+python -m squirrel_shooter.servo_bench pan 60
+python -m squirrel_shooter.servo_bench tilt 110
+python -m squirrel_shooter.servo_bench position
+python -m squirrel_shooter.servo_bench release
+```
+
+The complete supervised exercises are:
+
+```bash
+python -m squirrel_shooter.servo_bench range-test
+python -m squirrel_shooter.servo_bench tracking-demo
+python -m squirrel_shooter.servo_bench fast-demo
+```
+
+Put `--hold` or `--release-after` before the command to override the configured
+post-movement PWM behavior for that run:
+
+```bash
+python -m squirrel_shooter.servo_bench --release-after move 120 100
+```
+
+Each invocation is a new process, so `position` by itself correctly reports
+`uncommanded`; command output prints the resulting position before the process
+exits. `Ctrl+C` and handled failures attempt the configured park action and cleanup.
+If a cleanup action also fails, it is logged without replacing the original error.
+
+Future camera-coordinate work can import the controller without starting it from
+the live detector:
+
+```python
+from squirrel_shooter.config import load_config
+from squirrel_shooter.pan_tilt import PanTiltController
+
+config = load_config()
+controller = PanTiltController(config.pan_tilt)
+controller.move_to_fast(105, 95)
+# Later, during an intentional shutdown:
+controller.cleanup()
+```
+
+This task does not translate camera coordinates, subscribe to detections, or
+control the valve. Those remain separate later integration steps.
+
 ## Deploy the changes to the Raspberry Pi
 
 The repository and GitHub remain the source of truth. Run these exact commands in
@@ -83,7 +198,7 @@ python -m pytest
 The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
 weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
 installing them under the ignored `models/` directory. Expected test result for
-this revision: **81 passed** without opening the USB camera. Then stop any old
+this revision: **125 passed** without opening the USB camera. Then stop any old
 dashboard, preview, recorder, or watcher process that already owns the camera and
 start the complete system:
 

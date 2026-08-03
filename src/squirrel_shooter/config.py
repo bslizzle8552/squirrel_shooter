@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .pan_tilt import PanTiltConfig
+
 
 DEFAULT_CONFIG_PATH = Path("config/default.yaml")
 
@@ -258,6 +260,7 @@ class AppConfig:
     dashboard: DashboardConfig
     night_mode: NightModeConfig
     classifier: ClassifierConfig
+    pan_tilt: PanTiltConfig
     motion: MotionConfig
     storage: StorageConfig
     retention: RetentionConfig
@@ -347,6 +350,73 @@ def _zone(raw: dict[str, Any]) -> InclusionZoneConfig:
     return InclusionZoneConfig(_bool(raw.get("enabled"), "motion.inclusion_zone.enabled"), tuple(normalized))
 
 
+def _pan_tilt_config(raw: dict[str, Any]) -> PanTiltConfig:
+    defaults = PanTiltConfig()
+    try:
+        return PanTiltConfig(
+            i2c_address=_int(raw.get("i2c_address", defaults.i2c_address), "pan_tilt.i2c_address"),
+            pan_channel=_int(raw.get("pan_channel", defaults.pan_channel), "pan_tilt.pan_channel"),
+            tilt_channel=_int(raw.get("tilt_channel", defaults.tilt_channel), "pan_tilt.tilt_channel"),
+            pan_pulse_min_us=_int(
+                raw.get("pan_pulse_min_us", defaults.pan_pulse_min_us),
+                "pan_tilt.pan_pulse_min_us",
+                minimum=1,
+            ),
+            pan_pulse_max_us=_int(
+                raw.get("pan_pulse_max_us", defaults.pan_pulse_max_us),
+                "pan_tilt.pan_pulse_max_us",
+                minimum=1,
+            ),
+            tilt_pulse_min_us=_int(
+                raw.get("tilt_pulse_min_us", defaults.tilt_pulse_min_us),
+                "pan_tilt.tilt_pulse_min_us",
+                minimum=1,
+            ),
+            tilt_pulse_max_us=_int(
+                raw.get("tilt_pulse_max_us", defaults.tilt_pulse_max_us),
+                "pan_tilt.tilt_pulse_max_us",
+                minimum=1,
+            ),
+            pan_min=_number(raw.get("pan_min", defaults.pan_min), "pan_tilt.pan_min"),
+            pan_center=_number(raw.get("pan_center", defaults.pan_center), "pan_tilt.pan_center"),
+            pan_max=_number(raw.get("pan_max", defaults.pan_max), "pan_tilt.pan_max"),
+            tilt_min=_number(raw.get("tilt_min", defaults.tilt_min), "pan_tilt.tilt_min"),
+            tilt_center=_number(raw.get("tilt_center", defaults.tilt_center), "pan_tilt.tilt_center"),
+            tilt_max=_number(raw.get("tilt_max", defaults.tilt_max), "pan_tilt.tilt_max"),
+            park_pan=_number(raw.get("park_pan", defaults.park_pan), "pan_tilt.park_pan"),
+            park_tilt=_number(raw.get("park_tilt", defaults.park_tilt), "pan_tilt.park_tilt"),
+            movement_speed=_number(
+                raw.get("movement_speed", defaults.movement_speed),
+                "pan_tilt.movement_speed",
+                exclusive=True,
+            ),
+            fast_acquisition_speed=_number(
+                raw.get("fast_acquisition_speed", defaults.fast_acquisition_speed),
+                "pan_tilt.fast_acquisition_speed",
+                exclusive=True,
+            ),
+            step_interval_seconds=_number(
+                raw.get("step_interval_seconds", defaults.step_interval_seconds),
+                "pan_tilt.step_interval_seconds",
+                exclusive=True,
+            ),
+            settling_delay_seconds=_number(
+                raw.get("settling_delay_seconds", defaults.settling_delay_seconds),
+                "pan_tilt.settling_delay_seconds",
+            ),
+            release_pwm_after_movement=_bool(
+                raw.get("release_pwm_after_movement", defaults.release_pwm_after_movement),
+                "pan_tilt.release_pwm_after_movement",
+            ),
+            park_on_cleanup=_bool(
+                raw.get("park_on_cleanup", defaults.park_on_cleanup),
+                "pan_tilt.park_on_cleanup",
+            ),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"Invalid pan_tilt configuration: {exc}") from exc
+
+
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     """Load a complete configuration and reject unsafe or ambiguous values."""
 
@@ -368,6 +438,9 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     dashboard = _mapping(raw, "dashboard")
     night_mode = _mapping(raw, "night_mode")
     classifier = _mapping(raw, "classifier")
+    pan_tilt_raw = raw.get("pan_tilt", {})
+    if not isinstance(pan_tilt_raw, dict):
+        raise ConfigError("pan_tilt must be a mapping when provided")
     roi = _mapping(motion, "roi")
     debug = _mapping(motion, "debug_outputs")
     warmup = _mapping(motion, "startup_warmup")
@@ -564,6 +637,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     if Path(audit_log_filename).name != audit_log_filename:
         raise ConfigError("classifier.audit_log_filename must be a filename, not a path")
 
+    pan_tilt_config = _pan_tilt_config(pan_tilt_raw)
+
     return AppConfig(
         camera=CameraConfig(
             _int(camera.get("device_index"), "camera.device_index"),
@@ -631,6 +706,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             audit_log_filename,
             _int(classifier.get("worker_queue_capacity"), "classifier.worker_queue_capacity", minimum=1),
         ),
+        pan_tilt=pan_tilt_config,
         motion=motion_config,
         storage=StorageConfig(*(_int(storage.get(name), f"storage.{name}", minimum=1) for name in ("max_event_captures", "max_debug_images", "max_log_files"))),
         retention=RetentionConfig(

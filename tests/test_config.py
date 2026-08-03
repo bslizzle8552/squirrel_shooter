@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from squirrel_shooter.config import ConfigError, load_config
+from squirrel_shooter.pan_tilt import PanTiltConfig
 from conftest import PROJECT_ROOT
 
 
@@ -29,6 +30,15 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.night_mode.pause_recording_and_classifier is True
     assert config.night_mode.enter_consecutive_frames == 5
     assert config.night_mode.exit_consecutive_frames == 10
+    assert config.pan_tilt.i2c_address == 0x40
+    assert config.pan_tilt.pan_channel == 0
+    assert config.pan_tilt.tilt_channel == 1
+    assert config.pan_tilt.pan_min == 30
+    assert config.pan_tilt.pan_center == 90
+    assert config.pan_tilt.pan_max == 150
+    assert config.pan_tilt.tilt_min == 70
+    assert config.pan_tilt.tilt_center == 85
+    assert config.pan_tilt.tilt_max == 150
     assert config.motion.min_blob_area == 500
     assert config.motion.inclusion_zone.enabled is True
     assert config.motion.inclusion_zone.polygon == (
@@ -90,3 +100,24 @@ def test_rejects_invalid_dashboard_port(tmp_path: Path) -> None:
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     with pytest.raises(ConfigError, match="dashboard.port"):
         load_config(config_path)
+
+
+def test_rejects_reversed_pan_tilt_limits(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["pan_tilt"].update(pan_min=150, pan_center=90, pan_max=30)
+    config_path = tmp_path / "bad-pan-tilt.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="pan limits"):
+        load_config(config_path)
+
+
+def test_older_config_without_pan_tilt_section_uses_safe_defaults(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    del raw["pan_tilt"]
+    config_path = tmp_path / "legacy.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.pan_tilt == PanTiltConfig()

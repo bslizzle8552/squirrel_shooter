@@ -59,6 +59,31 @@ classifier:
   audit_log_filename: classifier.jsonl
   worker_queue_capacity: 1
 
+# Bench-verified pan/tilt calibration. The normal camera application does not
+# construct this controller or move either servo. Use servo_bench explicitly.
+pan_tilt:
+  i2c_address: 0x40
+  pan_channel: 0
+  tilt_channel: 1
+  pan_pulse_min_us: 600
+  pan_pulse_max_us: 2400
+  tilt_pulse_min_us: 600
+  tilt_pulse_max_us: 2400
+  pan_min: 30
+  pan_center: 90
+  pan_max: 150
+  tilt_min: 70
+  tilt_center: 85
+  tilt_max: 150
+  park_pan: 90
+  park_tilt: 85
+  movement_speed: 45.0
+  fast_acquisition_speed: 120.0
+  step_interval_seconds: 0.02
+  settling_delay_seconds: 0.15
+  release_pwm_after_movement: false
+  park_on_cleanup: true
+
 motion:
   enabled: true
   processing_width: 640

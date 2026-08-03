@@ -1,26 +1,32 @@
-"""Future pan/tilt motion boundary.
+"""Compatibility imports for the permanent pan/tilt motion foundation.
 
-No GPIO, I2C, PCA9685, or servo library is imported here. Physical motion is
-intentionally unavailable until powered hardware can be tested safely.
+Live camera motion detection remains in ``watch_detection`` and
+``motion_runtime``. Importing this module does not construct hardware or move a
+servo; hardware is created only when ``PanTiltController`` is instantiated.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from .pan_tilt import (
+    PanTiltConfig,
+    PanTiltController,
+    PanTiltPosition,
+    ServoDriver,
+    ServoKitDriver,
+    clamp_angle,
+    generate_coordinated_path,
+)
 
 
-@dataclass(frozen=True)
-class PanTiltPosition:
-    """A future calibrated pan/tilt target in degrees."""
+MotionController = PanTiltController
 
-    pan_degrees: float
-    tilt_degrees: float
-
-
-class MotionController(Protocol):
-    """Interface to be implemented only during the dry-fire phase."""
-
-    def aim(self, target: PanTiltPosition) -> None:
-        """Move to a validated target without controlling water."""
-        ...
+__all__ = [
+    "MotionController",
+    "PanTiltConfig",
+    "PanTiltController",
+    "PanTiltPosition",
+    "ServoDriver",
+    "ServoKitDriver",
+    "clamp_angle",
+    "generate_coordinated_path",
+]

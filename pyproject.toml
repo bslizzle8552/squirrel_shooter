@@ -17,6 +17,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]
+servo = [
+    "adafruit-circuitpython-servokit",
+    "adafruit-circuitpython-pca9685",
+    "adafruit-lgpio>=0.2.2.0; sys_platform == 'linux' and python_version >= '3.13' and platform_machine in ('aarch64', 'armv7l')",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
