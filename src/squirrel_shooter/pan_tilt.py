@@ -48,12 +48,12 @@ class PanTiltConfig:
     tilt_pulse_min_us: int = 600
     tilt_pulse_max_us: int = 2400
     pan_min: float = 30.0
-    pan_center: float = 90.0
+    pan_center: float = 85.0
     pan_max: float = 150.0
     tilt_min: float = 70.0
     tilt_center: float = 85.0
     tilt_max: float = 150.0
-    park_pan: float = 90.0
+    park_pan: float = 85.0
     park_tilt: float = 85.0
     movement_speed: float = 45.0
     fast_acquisition_speed: float = 120.0

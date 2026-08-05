@@ -34,7 +34,7 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.pan_tilt.pan_channel == 0
     assert config.pan_tilt.tilt_channel == 1
     assert config.pan_tilt.pan_min == 30
-    assert config.pan_tilt.pan_center == 90
+    assert config.pan_tilt.pan_center == 85
     assert config.pan_tilt.pan_max == 150
     assert config.pan_tilt.tilt_min == 70
     assert config.pan_tilt.tilt_center == 85

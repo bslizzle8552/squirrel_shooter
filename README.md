@@ -90,12 +90,12 @@ pan_tilt:
   tilt_pulse_min_us: 600
   tilt_pulse_max_us: 2400
   pan_min: 30
-  pan_center: 90
+  pan_center: 85
   pan_max: 150
   tilt_min: 70
   tilt_center: 85
   tilt_max: 150
-  park_pan: 90
+  park_pan: 85
   park_tilt: 85
   movement_speed: 45.0
   fast_acquisition_speed: 120.0

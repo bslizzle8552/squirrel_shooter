@@ -115,7 +115,7 @@ def test_smooth_move_uses_coordinated_writes_and_tracks_final_endpoint(config: P
 
     pan_commands = [angle for channel, angle in driver.commands if channel == config.pan_channel]
     tilt_commands = [angle for channel, angle in driver.commands if channel == config.tilt_channel]
-    assert len(pan_commands) == len(tilt_commands) == 6
+    assert len(pan_commands) == len(tilt_commands) == 7
     assert pan_commands[-1] == 150
     assert tilt_commands[-1] == 145
     assert result == PanTiltPosition(150, 145)
