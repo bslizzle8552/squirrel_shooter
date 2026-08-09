@@ -16,6 +16,11 @@
     state: document.getElementById('control-state'),
     fire: document.getElementById('fire-button'),
     fireStatus: document.getElementById('fire-status'),
+    camera: document.getElementById('calibration-camera'),
+    image: document.getElementById('calibration-image'),
+    marker: document.getElementById('calibration-marker'),
+    markerLabel: document.getElementById('calibration-marker-label'),
+    pixelStatus: document.getElementById('pixel-selection-status'),
     servoNote: document.getElementById('servo-note'),
     positionNote: document.getElementById('position-note'),
     valveNote: document.getElementById('valve-note'),
@@ -56,29 +61,73 @@
     return value === null || value === undefined ? 'Not recorded (null)' : value;
   }
 
+  function frameLayout(next) {
+    var frameWidth = Number(next.camera_frame_width);
+    var frameHeight = Number(next.camera_frame_height);
+    var rect = els.image.getBoundingClientRect();
+    if (!(frameWidth > 0 && frameHeight > 0 && rect.width > 0 && rect.height > 0)) { return null; }
+    var scale = Math.min(rect.width / frameWidth, rect.height / frameHeight);
+    var renderedWidth = frameWidth * scale;
+    var renderedHeight = frameHeight * scale;
+    return {
+      frameWidth: frameWidth,
+      frameHeight: frameHeight,
+      rect: rect,
+      renderedWidth: renderedWidth,
+      renderedHeight: renderedHeight,
+      offsetX: (rect.width - renderedWidth) / 2,
+      offsetY: (rect.height - renderedHeight) / 2
+    };
+  }
+
+  function renderPixelMarker(next, selected) {
+    if (!selected || !selected.pixel_selected) {
+      els.marker.hidden = true;
+      els.pixelStatus.textContent = 'Point ' + selectedCalibrationPoint + ' pixel: not selected';
+      return;
+    }
+    els.pixelStatus.textContent = 'Point ' + selectedCalibrationPoint + ' pixel selected: X ' + selected.pixel_x + ', Y ' + selected.pixel_y;
+    var layout = frameLayout(next);
+    if (!layout) { els.marker.hidden = true; return; }
+    var cameraRect = els.camera.getBoundingClientRect();
+    var markerX = layout.rect.left - cameraRect.left + layout.offsetX + ((selected.pixel_x + 0.5) / layout.frameWidth) * layout.renderedWidth;
+    var markerY = layout.rect.top - cameraRect.top + layout.offsetY + ((selected.pixel_y + 0.5) / layout.frameHeight) * layout.renderedHeight;
+    els.marker.style.left = markerX + 'px';
+    els.marker.style.top = markerY + 'px';
+    els.markerLabel.textContent = 'Point ' + selectedCalibrationPoint;
+    els.marker.hidden = false;
+  }
+
   function renderCalibration(next) {
     selectedCalibrationPoint = next.active_calibration_point;
-    var savedCount = next.calibration_points.length;
+    var savedCount = next.completed_calibration_count;
     var selected = calibrationRecord(next, selectedCalibrationPoint);
     els.activePoint.textContent = selectedCalibrationPoint;
     els.savedCount.textContent = 'Calibration: ' + savedCount + ' / 9';
     els.calibrationComplete.hidden = savedCount !== 9;
     els.calibrationButtons.forEach(function (button) {
       var point = Number(button.dataset.calibrationPoint);
-      var saved = Boolean(calibrationRecord(next, point));
+      var record = calibrationRecord(next, point);
+      var saved = Boolean(record && record.complete);
+      var pixelSelected = Boolean(record && record.pixel_selected && !record.complete);
+      var aimSaved = Boolean(record && record.aim_saved && !record.complete);
       var active = point === selectedCalibrationPoint;
       button.classList.toggle('saved', saved);
+      button.classList.toggle('pixel-selected', pixelSelected);
+      button.classList.toggle('aim-saved', aimSaved);
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', String(active));
-      button.querySelector('.calibration-point-state').textContent = saved ? 'Saved' : 'Not saved';
+      button.querySelector('.calibration-point-state').textContent = saved ? 'Calibrated' : (pixelSelected ? 'Pixel set' : (aimSaved ? 'Aim saved' : 'Not started'));
     });
     els.point.value = selectedCalibrationPoint;
-    els.save.textContent = (selected ? 'Update point ' : 'Save point ') + selectedCalibrationPoint;
+    els.save.textContent = (selected && selected.complete ? 'Update point ' : 'Save point ') + selectedCalibrationPoint;
+    els.save.disabled = requestPending || !next.servo_available || !next.position_commanded || !selected || !selected.pixel_selected;
     els.detailPoint.textContent = selectedCalibrationPoint;
     els.detailPixelX.textContent = selected ? storedPixel(selected.pixel_x) : 'Not recorded (null)';
     els.detailPixelY.textContent = selected ? storedPixel(selected.pixel_y) : 'Not recorded (null)';
-    els.detailPan.textContent = selected ? selected.pan + '°' : 'Not saved';
-    els.detailTilt.textContent = selected ? selected.tilt + '°' : 'Not saved';
+    els.detailPan.textContent = selected && selected.aim_saved ? selected.pan + '°' : 'Not saved';
+    els.detailTilt.textContent = selected && selected.aim_saved ? selected.tilt + '°' : 'Not saved';
+    renderPixelMarker(next, selected);
   }
 
   function showCalibrationConfirmation(record, updated) {
@@ -102,7 +151,6 @@
     els.servoNote.hidden = next.servo_available;
     els.positionNote.hidden = next.position_commanded;
     els.valveNote.hidden = next.valve_available;
-    els.save.disabled = requestPending || !next.servo_available || !next.position_commanded;
     renderCalibration(next);
   }
 
@@ -153,6 +201,19 @@
       catch (error) { showToast(error.message); }
     });
   });
+  els.image.addEventListener('click', async function (event) {
+    if (requestPending || !window.matchMedia('(min-width: 821px)').matches) { return; }
+    var rect = els.image.getBoundingClientRect();
+    try {
+      var payload = await requestJson(cfg.urls.calibrationPixel, {
+        display_x: event.clientX - rect.left,
+        display_y: event.clientY - rect.top,
+        display_width: rect.width,
+        display_height: rect.height
+      });
+      showToast('Point ' + payload.calibration_point.point + ' pixel selected — X ' + payload.calibration_point.pixel_x + ', Y ' + payload.calibration_point.pixel_y + '.');
+    } catch (error) { showToast(error.message); }
+  });
   els.fire.addEventListener('click', async function () {
     if (requestPending || els.fire.disabled) { return; }
     try { await requestJson(cfg.urls.fire, {}); showToast('Valve pulse complete. Cooldown started.'); }
@@ -160,8 +221,9 @@
   });
   els.save.addEventListener('click', async function () {
     try {
-      var updating = Boolean(calibrationRecord(control, selectedCalibrationPoint));
-      var payload = await requestJson(cfg.urls.calibration, {pixel_x: null, pixel_y: null});
+      var selected = calibrationRecord(control, selectedCalibrationPoint);
+      var updating = Boolean(selected && selected.aim_saved);
+      var payload = await requestJson(cfg.urls.calibration, {});
       showCalibrationConfirmation(payload.calibration_point, updating);
       showToast('Point ' + payload.calibration_point.point + (updating ? ' updated' : ' saved') + ' — pan ' + payload.calibration_point.pan + '°, tilt ' + payload.calibration_point.tilt + '°.');
     } catch (error) { showToast(error.message); }
@@ -171,6 +233,9 @@
     if (/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)) { return; }
     var directions = {ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right'};
     if (directions[event.key]) { event.preventDefault(); move(directions[event.key]); }
+  });
+  window.addEventListener('resize', function () {
+    renderPixelMarker(control, calibrationRecord(control, selectedCalibrationPoint));
   });
 
   async function refresh() {

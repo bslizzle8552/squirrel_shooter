@@ -157,7 +157,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     )
     app = create_app(
         app_config=config,
-        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        camera_service=OfflineCameraService(CameraStatus(True, 1280, 720, 10.0, None)),  # type: ignore[arg-type]
         vision_service=StaticVisionService(),  # type: ignore[arg-type]
         manual_control_service=controls,
         temperature_reader=lambda: None,
@@ -183,10 +183,41 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"startup reference" in page.data
     assert b"Calibration: 0 / 9" in page.data
     assert b'id="active-calibration-point">1<' in page.data
+    assert b'id="calibration-image"' in page.data
+    assert b'id="calibration-marker"' in page.data
+    assert b'id="pixel-selection-status"' in page.data
     assert page.data.count(b"data-calibration-point=") == 9
-    assert b"Not saved" in page.data
+    assert b"Not started" in page.data
     assert b'id="calibration-confirmation"' in page.data
     assert client.post("/api/manual-control/move", json={"direction": "right", "step": 3}).status_code == 403
+    assert client.post(
+        "/api/manual-control/calibration/pixel",
+        json={"display_x": 400, "display_y": 225, "display_width": 800, "display_height": 450},
+    ).status_code == 403
+
+    pixel_selected = client.post(
+        "/api/manual-control/calibration/pixel",
+        json={"point": 9, "display_x": 400, "display_y": 225, "display_width": 800, "display_height": 450},
+        headers=headers,
+    )
+    assert pixel_selected.status_code == 200
+    assert pixel_selected.json["calibration_point"] == {
+        "point": 1,
+        "pixel_x": 640,
+        "pixel_y": 360,
+        "pan": None,
+        "tilt": None,
+    }
+    assert pixel_selected.json["control"]["completed_calibration_count"] == 0
+    assert pixel_selected.json["control"]["camera_frame_width"] == 1280
+    assert pixel_selected.json["control"]["camera_frame_height"] == 720
+    partial_page = client.get("/manual-control")
+    assert b"Calibration: 0 / 9" in partial_page.data
+    assert b'class="calibration-point-button active pixel-selected"' in partial_page.data
+    assert b'class="calibration-point-button active saved"' not in partial_page.data
+    assert b'id="calibration-detail-pixel-x">640<' in partial_page.data
+    assert b'id="calibration-detail-pixel-y">360<' in partial_page.data
+    assert b'id="calibration-detail-pan">Not saved<' in partial_page.data
 
     moved = client.post("/api/manual-control/move", json={"direction": "right", "step": 3}, headers=headers)
     assert moved.status_code == 200
@@ -205,14 +236,14 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert during_cooldown.json["control"]["pan"] == 79
     saved = client.post(
         "/api/manual-control/calibration",
-        json={"point": 1, "pixel_x": None, "pixel_y": None},
+        json={"point": 9, "pan": 30, "tilt": 70, "pixel_x": None, "pixel_y": None},
         headers=headers,
     )
     assert saved.status_code == 200
     assert saved.json["calibration_point"] == {
         "point": 1,
-        "pixel_x": None,
-        "pixel_y": None,
+        "pixel_x": 640,
+        "pixel_y": 360,
         "pan": 79.0,
         "tilt": 85.0,
     }
@@ -220,7 +251,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"Calibration: 1 / 9" in saved_page.data
     assert b'class="calibration-point-button active saved"' in saved_page.data
     assert b'id="calibration-detail-point">1<' in saved_page.data
-    assert b'id="calibration-detail-pixel-x">Not recorded (null)<' in saved_page.data
+    assert b'id="calibration-detail-pixel-x">640<' in saved_page.data
     assert 'id="calibration-detail-pan">79.0°<'.encode("utf-8") in saved_page.data
 
     for point in range(2, 10):
@@ -231,15 +262,26 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         )
         assert selected.status_code == 200
         assert selected.json["control"]["active_calibration_point"] == point
+        if point == 2:
+            missing_pixel = client.post("/api/manual-control/calibration", json={}, headers=headers)
+            assert missing_pixel.status_code == 400
+            assert b"Click the center" in missing_pixel.data
+        selected_pixel = client.post(
+            "/api/manual-control/calibration/pixel",
+            json={"display_x": point * 50, "display_y": 225, "display_width": 800, "display_height": 450},
+            headers=headers,
+        )
+        assert selected_pixel.status_code == 200
+        assert selected_pixel.json["calibration_point"]["point"] == point
         response = client.post(
             "/api/manual-control/calibration",
-            json={"pixel_x": None, "pixel_y": None},
+            json={},
             headers=headers,
         )
         assert response.status_code == 200
     complete_page = client.get("/manual-control")
     assert b"Calibration: 9 / 9" in complete_page.data
-    assert b"All nine physical records are saved" in complete_page.data
+    assert b"All nine blocks have camera pixels and saved aim" in complete_page.data
     assert b"interpolation is not yet configured" in complete_page.data
 
     moved_again = client.post(
@@ -254,12 +296,22 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         headers=headers,
     )
     assert selected_first.status_code == 200
+    reclicked = client.post(
+        "/api/manual-control/calibration/pixel",
+        json={"display_x": 500, "display_y": 225, "display_width": 800, "display_height": 450},
+        headers=headers,
+    )
+    assert reclicked.status_code == 200
+    assert reclicked.json["calibration_point"]["pixel_x"] == 800
+    assert reclicked.json["calibration_point"]["pixel_y"] == 360
     updated = client.post(
         "/api/manual-control/calibration",
         json={"pixel_x": None, "pixel_y": None},
         headers=headers,
     )
     assert updated.status_code == 200
+    assert updated.json["calibration_point"]["pixel_x"] == 800
+    assert updated.json["calibration_point"]["pixel_y"] == 360
     assert updated.json["calibration_point"]["tilt"] == 88.0
     assert len(updated.json["control"]["calibration_points"]) == 9
     assert [record["point"] for record in updated.json["control"]["calibration_points"]].count(1) == 1
@@ -274,10 +326,14 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"ArrowDown: 'down'" in manual_script.data
     assert b"ArrowLeft: 'left'" in manual_script.data
     assert b"ArrowRight: 'right'" in manual_script.data
+    assert b"display_width: rect.width" in manual_script.data
+    assert b"renderPixelMarker" in manual_script.data
+    assert b"calibrationPixel" in page.data
     assert b"pollIntervalMs" in page.data and b"1000" in page.data
     assert b'grid-template-areas: "camera aim" "camera fire" "calibration ."' in manual_style.data
     assert b'grid-template-areas: "aim" "fire" "camera"' in manual_style.data
     assert b".calibration-card { display: none; }" in manual_style.data
+    assert b".calibration-marker" in manual_style.data
 
 
 def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stale_point(tmp_path: Path) -> None:
@@ -293,7 +349,7 @@ def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stal
     )
     app = create_app(
         app_config=config,
-        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        camera_service=OfflineCameraService(CameraStatus(True, 1280, 720, 10.0, None)),  # type: ignore[arg-type]
         vision_service=StaticVisionService(),  # type: ignore[arg-type]
         manual_control_service=controls,
         temperature_reader=lambda: None,
@@ -318,6 +374,23 @@ def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stal
     assert phone.get("/api/manual-control").json["control"]["active_calibration_point"] == 4
     assert b'id="active-calibration-point">4<' in phone.get("/manual-control").data
 
+    pixel_selected = desktop.post(
+        "/api/manual-control/calibration/pixel",
+        json={"point": 1, "display_x": 400, "display_y": 300, "display_width": 800, "display_height": 600},
+        headers=headers,
+    )
+    assert pixel_selected.status_code == 200
+    assert pixel_selected.json["calibration_point"] == {
+        "point": 4,
+        "pixel_x": 640,
+        "pixel_y": 360,
+        "pan": None,
+        "tilt": None,
+    }
+    shared_pixel = phone.get("/api/manual-control").json["control"]["calibration_points"]
+    assert shared_pixel[0]["pixel_selected"] is True
+    assert shared_pixel[0]["complete"] is False
+
     moved = phone.post(
         "/api/manual-control/move",
         json={"direction": "right", "step": 3},
@@ -334,8 +407,8 @@ def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stal
     assert saved.status_code == 200
     assert saved.json["calibration_point"] == {
         "point": 4,
-        "pixel_x": None,
-        "pixel_y": None,
+        "pixel_x": 640,
+        "pixel_y": 360,
         "pan": 82.0,
         "tilt": 85.0,
     }

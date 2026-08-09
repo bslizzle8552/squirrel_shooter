@@ -199,12 +199,12 @@ so refreshing or double-tapping the page cannot bypass it.
 
 Supervised hardware commissioning is underway. The owner has physically verified
 the manual web controls, servos, dry-fire, and a wet-fire shot at 0.25 seconds.
-The checked-in configuration now carries the temporary demonstration pulse:
+The checked-in configuration has returned to the normal short calibration pulse:
 
 ```yaml
 manual_control:
   servo_enabled: true
-  fire_pulse_seconds: 3.0  # TEMPORARY: one supervised demonstration shot
+  fire_pulse_seconds: 0.25
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
 valve:
@@ -217,23 +217,23 @@ The MOSFET signal has been physically traced: Raspberry Pi physical pin 18 is
 BCM GPIO24, and physical pin 20 is GND. Software uses BCM numbering, so the
 configured value is `24`, never `18`. Startup and cleanup command the output
 OFF/LOW. The owner has physically verified dry-fire and wet-fire operation with
-the normal 0.25-second pulse. The checked-in 3.0-second pulse is temporary for
-one supervised demonstration shot and must return to 0.25 seconds immediately
-afterward. The server-enforced cooldown remains 10 seconds; the 3.0-second wet
-shot has not yet been physically tested.
+the normal 0.25-second pulse. The temporary 3.0-second demonstration setting has
+been removed. The server-enforced cooldown remains 10 seconds.
 
-The calibration page presents the nine physical targets as a 3×3 checklist. It
-shows saved points in green, highlights the active point, displays progress from
-0/9 through 9/9, confirms each save/update, and shows the selected point's stored
-pixel and commanded-angle values. Saving a completed point again replaces that
-record rather than adding a duplicate. A 9/9 display means data collection is
-complete; it does not mean interpolation is implemented.
+The calibration page presents the nine physical blocks as a 3×3 checklist. On
+desktop, select a point and click the center of its block in the live image. The
+server converts the browser click through the rendered image's scale and any
+letterboxing to the camera runtime's negotiated native frame coordinates. That
+pixel-only record remains incomplete until the operator manually aims from the
+phone and presses SAVE after a successful water hit. SAVE preserves the stored
+pixel and adds the current backend-commanded pan/tilt. Only records containing
+both pixel and aim values turn green and count toward 9/9.
 
 The calibration file stores points 1-9 with `pixel_x`, `pixel_y`, `pan`, and
-`tilt`; angles are saved with null pixels until image point selection is added.
-Interpolation, automatic targeting, and automatic firing remain intentionally
-unimplemented. Every future firing path must continue to use the shared target,
-move, settle, fire, cooldown pipeline.
+`tilt`. Re-clicking or re-saving replaces the same point instead of creating a
+duplicate. Interpolation, pixel-to-aim targeting, and automatic firing remain
+intentionally unimplemented. Every future firing path must continue to use the
+shared target, move, settle, fire, cooldown pipeline.
 
 `Misc/` is owner-only project storage. It is ignored by Git and governed by the
 root `AGENTS.md`: normal coding work must not inspect, modify, stage, or commit

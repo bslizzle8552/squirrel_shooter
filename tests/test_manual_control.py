@@ -12,6 +12,7 @@ from squirrel_shooter.manual_control import (
     FireCooldownError,
     ManualControlConfig,
     ManualControlService,
+    display_click_to_frame_pixel,
 )
 from squirrel_shooter.pan_tilt import PanTiltConfig, PanTiltPosition
 from squirrel_shooter.valve import ValveState
@@ -110,9 +111,18 @@ def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> No
 
 def test_calibration_rejects_uncommanded_startup_reference(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
+    service.set_active_calibration_pixel(640, 360, frame_width=1280, frame_height=720)
 
     with pytest.raises(RuntimeError, match="Move or center"):
-        service.save_calibration_point(1)
+        service.save_active_calibration_point()
+
+
+def test_display_click_maps_scaled_and_letterboxed_image_to_native_pixel() -> None:
+    assert display_click_to_frame_pixel(400, 225, 800, 450, 1280, 720) == (640, 360)
+    assert display_click_to_frame_pixel(400, 300, 800, 600, 1280, 720) == (640, 360)
+
+    with pytest.raises(ValueError, match="inside the rendered camera image"):
+        display_click_to_frame_pixel(400, 50, 800, 600, 1280, 720)
 
 
 def test_active_calibration_point_is_shared_service_state(tmp_path: Path) -> None:
@@ -129,12 +139,15 @@ def test_active_calibration_point_is_shared_service_state(tmp_path: Path) -> Non
 def test_save_active_point_uses_current_backend_commanded_position(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
     service.select_calibration_point(4)
+    service.set_active_calibration_pixel(834, 261, frame_width=1280, frame_height=720)
     service.move("right", 3)
     service.move("up", 5)
 
-    record = service.save_active_calibration_point(pixel_x=None, pixel_y=None)
+    record = service.save_active_calibration_point()
 
     assert record.point == 4
+    assert record.pixel_x == 834
+    assert record.pixel_y == 261
     assert record.pan == 82
     assert record.tilt == 90
     assert CalibrationStore(tmp_path / "calibration.json").load() == [record]
@@ -256,21 +269,42 @@ def test_status_exposes_moving_settling_and_firing_states(tmp_path: Path) -> Non
 
 def test_calibration_store_saves_and_replaces_one_of_nine_points(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
+    service.select_calibration_point(4)
+    pixel_only = service.set_active_calibration_pixel(640, 360, frame_width=1280, frame_height=720)
+
+    assert pixel_only.pan is None and pixel_only.tilt is None
+    assert CalibrationStore(tmp_path / "calibration.json").load() == [pixel_only]
+    assert service.status()["completed_calibration_count"] == 0
+    assert service.status()["calibration_points"] == [{
+        "point": 4,
+        "pixel_x": 640,
+        "pixel_y": 360,
+        "pan": None,
+        "tilt": None,
+        "pixel_selected": True,
+        "aim_saved": False,
+        "complete": False,
+    }]
+
     service.move("right", 3)
-    first = service.save_calibration_point(4)
+    first = service.save_active_calibration_point()
+    reclicked = service.set_active_calibration_pixel(700, 400, frame_width=1280, frame_height=720)
     service.move("up", 5)
-    replacement = service.save_calibration_point(4, pixel_x=640, pixel_y=360)
+    replacement = service.save_active_calibration_point()
 
     assert first.pan == 82
-    assert replacement.pixel_x == 640
+    assert reclicked.pan == 82 and reclicked.tilt == 85
+    assert replacement.pixel_x == 700
+    assert replacement.pixel_y == 400
     assert replacement.pan == 82 and replacement.tilt == 90
+    assert service.status()["completed_calibration_count"] == 1
     records = CalibrationStore(tmp_path / "calibration.json").load()
     assert records == [replacement]
     raw = json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8"))
     assert raw["points"][0] == {
         "point": 4,
-        "pixel_x": 640,
-        "pixel_y": 360,
+        "pixel_x": 700,
+        "pixel_y": 400,
         "pan": 82.0,
         "tilt": 90.0,
     }

@@ -18,8 +18,12 @@
         <div><p class="eyebrow">Shared live view</p><h2 id="camera-title">Camera</h2></div>
         <a href="{{ url_for('dashboard') }}">Open full console</a>
       </div>
-      <div class="manual-video"><img src="{{ url_for('video_feed') }}" alt="Live garden camera stream"></div>
-      <p class="camera-note">Image tapping is reserved for the later calibrated point-and-click mode.</p>
+      <div class="manual-video calibration-camera" id="calibration-camera">
+        <img id="calibration-image" src="{{ url_for('video_feed') }}" alt="Live garden camera stream; desktop users can click a calibration block" draggable="false">
+        <div class="calibration-marker" id="calibration-marker" aria-hidden="true" hidden><span id="calibration-marker-label"></span></div>
+      </div>
+      <p class="camera-note">Desktop: select a point, then click the center of its physical block in the live image.</p>
+      <p class="pixel-selection-status" id="pixel-selection-status" role="status" aria-live="polite">Point {{ active_point }} pixel: not selected</p>
     </section>
 
     <section class="manual-card controls-card" aria-labelledby="aim-title">
@@ -60,25 +64,27 @@
     </section>
 
     <section class="manual-card calibration-card" aria-labelledby="calibration-title">
-      {% set saved_points = control.calibration_points | map(attribute='point') | list %}
+      {% set complete_points = control.calibration_points | selectattr('complete') | map(attribute='point') | list %}
+      {% set pixel_points = control.calibration_points | selectattr('pixel_selected') | map(attribute='point') | list %}
+      {% set aim_points = control.calibration_points | selectattr('aim_saved') | map(attribute='point') | list %}
       {% set selected_record = namespace(value=none) %}
       {% for record in control.calibration_points %}{% if record.point == active_point %}{% set selected_record.value = record %}{% endif %}{% endfor %}
       <div class="card-heading">
         <div><p class="eyebrow">Desktop calibration console</p><h2 id="calibration-title">Save calibration point</h2></div>
-        <strong class="calibration-progress" id="saved-count">Calibration: {{ control.calibration_points|length }} / 9</strong>
+        <strong class="calibration-progress" id="saved-count">Calibration: {{ control.completed_calibration_count }} / 9</strong>
       </div>
-      <p class="calibration-complete" id="calibration-complete" {% if control.calibration_points|length != 9 %}hidden{% endif %}>All nine physical records are saved. Data collection is complete; interpolation is not yet configured.</p>
+      <p class="calibration-complete" id="calibration-complete" {% if control.completed_calibration_count != 9 %}hidden{% endif %}>All nine blocks have camera pixels and saved aim. Data collection is complete; interpolation is not yet configured.</p>
       <div class="calibration-grid" role="group" aria-label="Nine calibration targets">
         {% for point in range(1, 10) %}
-        <button type="button" class="calibration-point-button{{ ' active' if point == active_point }}{{ ' saved' if point in saved_points }}" data-calibration-point="{{ point }}" aria-pressed="{{ 'true' if point == active_point else 'false' }}">
+        <button type="button" class="calibration-point-button{{ ' active' if point == active_point }}{{ ' saved' if point in complete_points }}{{ ' pixel-selected' if point in pixel_points and point not in complete_points }}{{ ' aim-saved' if point in aim_points and point not in complete_points }}" data-calibration-point="{{ point }}" aria-pressed="{{ 'true' if point == active_point else 'false' }}">
           <span class="calibration-point-number">{{ point }}</span>
-          <span class="calibration-point-state">{{ 'Saved' if point in saved_points else 'Not saved' }}</span>
+          <span class="calibration-point-state">{{ 'Calibrated' if point in complete_points else 'Pixel set' if point in pixel_points else 'Aim saved' if point in aim_points else 'Not started' }}</span>
         </button>
         {% endfor %}
       </div>
       <div class="calibration-actions">
         <input type="hidden" id="calibration-point" value="{{ active_point }}">
-        <button type="button" id="save-calibration" {% if not control.position_commanded %}disabled{% endif %}>{{ 'Update point ' if active_point in saved_points else 'Save point ' }}{{ active_point }}</button>
+        <button type="button" id="save-calibration" {% if not control.position_commanded or not selected_record.value or not selected_record.value.pixel_selected %}disabled{% endif %}>{{ 'Update point ' if active_point in complete_points else 'Save point ' }}{{ active_point }}</button>
       </div>
       <div class="calibration-confirmation" id="calibration-confirmation" role="status" aria-live="polite" hidden>
         <strong id="calibration-confirmation-title"></strong>
@@ -91,11 +97,11 @@
           <div><dt>Point</dt><dd id="calibration-detail-point">{{ active_point }}</dd></div>
           <div><dt>Pixel X</dt><dd id="calibration-detail-pixel-x">{{ selected_record.value.pixel_x if selected_record.value and selected_record.value.pixel_x is not none else 'Not recorded (null)' }}</dd></div>
           <div><dt>Pixel Y</dt><dd id="calibration-detail-pixel-y">{{ selected_record.value.pixel_y if selected_record.value and selected_record.value.pixel_y is not none else 'Not recorded (null)' }}</dd></div>
-          <div><dt>Pan</dt><dd id="calibration-detail-pan">{% if selected_record.value %}{{ selected_record.value.pan }}°{% else %}Not saved{% endif %}</dd></div>
-          <div><dt>Tilt</dt><dd id="calibration-detail-tilt">{% if selected_record.value %}{{ selected_record.value.tilt }}°{% else %}Not saved{% endif %}</dd></div>
+          <div><dt>Pan</dt><dd id="calibration-detail-pan">{% if selected_record.value and selected_record.value.pan is not none %}{{ selected_record.value.pan }}°{% else %}Not saved{% endif %}</dd></div>
+          <div><dt>Tilt</dt><dd id="calibration-detail-tilt">{% if selected_record.value and selected_record.value.tilt is not none %}{{ selected_record.value.tilt }}°{% else %}Not saved{% endif %}</dd></div>
         </dl>
       </div>
-      <p>Tap a point to inspect or update it. Saving a green point replaces that record; it does not create a duplicate. Pixel coordinates remain null until camera-image point selection is added.</p>
+      <p>Select a point, click its block in the camera image, aim from the phone, then SAVE after the water hits. Only records with both pixel and aim values turn green. Updating replaces the same point; interpolation is not implemented.</p>
     </section>
   </div>
   <div class="manual-toast" id="manual-toast" role="status" aria-live="polite"></div>
@@ -110,7 +116,8 @@ window.SS_MANUAL_CONTROL = {
     move: {{ url_for('api_manual_control_move')|tojson }},
     fire: {{ url_for('api_manual_control_fire')|tojson }},
     calibration: {{ url_for('api_manual_control_calibration')|tojson }},
-    activeCalibration: {{ url_for('api_manual_control_active_calibration')|tojson }}
+    activeCalibration: {{ url_for('api_manual_control_active_calibration')|tojson }},
+    calibrationPixel: {{ url_for('api_manual_control_calibration_pixel')|tojson }}
   },
   pollIntervalMs: 1000
 };

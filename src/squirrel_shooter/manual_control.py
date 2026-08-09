@@ -82,13 +82,53 @@ class ManualControlConfig:
             raise ValueError("calibration_file must be a path")
 
 
+def display_click_to_frame_pixel(
+    display_x: float,
+    display_y: float,
+    display_width: float,
+    display_height: float,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int]:
+    """Map an object-fit ``contain`` image click to a native frame pixel."""
+
+    display_values = {
+        "display_x": display_x,
+        "display_y": display_y,
+        "display_width": display_width,
+        "display_height": display_height,
+    }
+    for name, value in display_values.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be a finite number")
+    if display_width <= 0 or display_height <= 0:
+        raise ValueError("Displayed image dimensions must be greater than zero")
+    for name, value in (("frame_width", frame_width), ("frame_height", frame_height)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+
+    scale = min(display_width / frame_width, display_height / frame_height)
+    rendered_width = frame_width * scale
+    rendered_height = frame_height * scale
+    offset_x = (display_width - rendered_width) / 2
+    offset_y = (display_height - rendered_height) / 2
+    image_x = display_x - offset_x
+    image_y = display_y - offset_y
+    if image_x < 0 or image_y < 0 or image_x > rendered_width or image_y > rendered_height:
+        raise ValueError("Click must be inside the rendered camera image")
+
+    pixel_x = min(frame_width - 1, int(image_x / scale))
+    pixel_y = min(frame_height - 1, int(image_y / scale))
+    return pixel_x, pixel_y
+
+
 @dataclass(frozen=True)
 class CalibrationPoint:
     point: int
     pixel_x: int | None
     pixel_y: int | None
-    pan: float
-    tilt: float
+    pan: float | None
+    tilt: float | None
 
     def __post_init__(self) -> None:
         if isinstance(self.point, bool) or not isinstance(self.point, int) or not 1 <= self.point <= 9:
@@ -96,9 +136,29 @@ class CalibrationPoint:
         for name, value in (("pixel_x", self.pixel_x), ("pixel_y", self.pixel_y)):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"{name} must be null or a non-negative integer")
+        if (self.pixel_x is None) != (self.pixel_y is None):
+            raise ValueError("pixel_x and pixel_y must either both be set or both be null")
         for name, value in (("pan", self.pan), ("tilt", self.tilt)):
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-                raise ValueError(f"{name} must be a finite angle")
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"{name} must be null or a finite angle")
+        if (self.pan is None) != (self.tilt is None):
+            raise ValueError("pan and tilt must either both be set or both be null")
+
+    @property
+    def pixel_selected(self) -> bool:
+        return self.pixel_x is not None and self.pixel_y is not None
+
+    @property
+    def aim_saved(self) -> bool:
+        return self.pan is not None and self.tilt is not None
+
+    @property
+    def complete(self) -> bool:
+        return self.pixel_selected and self.aim_saved
 
 
 class CalibrationStore:
@@ -208,7 +268,7 @@ class ManualControlService:
         remaining = self._cooldown_remaining(now)
         state = self._transient_state or (ControlState.COOLDOWN if remaining > 0 else ControlState.IDLE)
         try:
-            points = [asdict(point) for point in self._calibration.load()]
+            points = [self._calibration_point_payload(point) for point in self._calibration.load()]
             calibration_error = None
         except (OSError, ValueError, TypeError) as exc:
             points = []
@@ -231,6 +291,7 @@ class ManualControlService:
             "fire_pulse_seconds": self.config.fire_pulse_seconds,
             "active_calibration_point": self._active_calibration_point,
             "calibration_points": points,
+            "completed_calibration_count": sum(bool(point["complete"]) for point in points),
             "servo_error": self._servo_error,
             "valve_error": self._valve_error,
             "calibration_error": calibration_error,
@@ -300,21 +361,54 @@ class ManualControlService:
             self._active_calibration_point = point
             return point
 
-    def save_active_calibration_point(
+    def set_active_calibration_pixel(
         self,
+        pixel_x: int,
+        pixel_y: int,
         *,
-        pixel_x: int | None = None,
-        pixel_y: int | None = None,
+        frame_width: int,
+        frame_height: int,
     ) -> CalibrationPoint:
-        """Save the active point using the backend's current commanded position."""
+        """Store a native-frame pixel for the backend's active point."""
 
+        for name, value in (("frame_width", frame_width), ("frame_height", frame_height)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if isinstance(pixel_x, bool) or not isinstance(pixel_x, int) or not 0 <= pixel_x < frame_width:
+            raise ValueError("pixel_x must be inside the current camera frame")
+        if isinstance(pixel_y, bool) or not isinstance(pixel_y, int) or not 0 <= pixel_y < frame_height:
+            raise ValueError("pixel_y must be inside the current camera frame")
         with self._lock:
-            if not self._position_commanded:
-                raise ControlError("Move or center the servos before saving a calibration point")
+            existing = next(
+                (point for point in self._calibration.load() if point.point == self._active_calibration_point),
+                None,
+            )
             record = CalibrationPoint(
                 self._active_calibration_point,
                 pixel_x,
                 pixel_y,
+                existing.pan if existing is not None else None,
+                existing.tilt if existing is not None else None,
+            )
+            self._calibration.save(record)
+            return record
+
+    def save_active_calibration_point(self) -> CalibrationPoint:
+        """Save current commanded aim while preserving the active point's pixel."""
+
+        with self._lock:
+            if not self._position_commanded:
+                raise ControlError("Move or center the servos before saving a calibration point")
+            existing = next(
+                (point for point in self._calibration.load() if point.point == self._active_calibration_point),
+                None,
+            )
+            if existing is None or not existing.pixel_selected:
+                raise ControlError("Click the center of the active calibration block in the camera image before saving")
+            record = CalibrationPoint(
+                self._active_calibration_point,
+                existing.pixel_x,
+                existing.pixel_y,
                 self._pan,
                 self._tilt,
             )
@@ -366,6 +460,16 @@ class ManualControlService:
     @staticmethod
     def _display_angle(angle: float) -> int | float:
         return int(angle) if float(angle).is_integer() else round(angle, 2)
+
+    @staticmethod
+    def _calibration_point_payload(point: CalibrationPoint) -> dict[str, object]:
+        payload: dict[str, object] = asdict(point)
+        payload.update(
+            pixel_selected=point.pixel_selected,
+            aim_saved=point.aim_saved,
+            complete=point.complete,
+        )
+        return payload
 
 
 def build_manual_control_service(

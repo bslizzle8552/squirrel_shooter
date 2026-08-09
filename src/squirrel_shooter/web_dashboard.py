@@ -29,6 +29,7 @@ from .manual_control import (
     FireCooldownError,
     ManualControlService,
     build_manual_control_service,
+    display_click_to_frame_pixel,
 )
 from .motion_runtime import MotionProcessingService
 from .vision_service import VisionService, VisionStatus
@@ -333,39 +334,49 @@ def create_app(
         if not supplied or not hmac.compare_digest(supplied, manual_control_token):
             abort(403)
 
+    def manual_control_status() -> dict[str, object]:
+        status = manual_control.status()
+        camera_status = camera.status()
+        status.update(
+            camera_online=camera_status.online,
+            camera_frame_width=camera_status.width,
+            camera_frame_height=camera_status.height,
+        )
+        return status
+
     def manual_control_error(exc: Exception) -> tuple[Any, int]:
         if isinstance(exc, FireCooldownError):
-            return jsonify(error=str(exc), control=manual_control.status()), 409
+            return jsonify(error=str(exc), control=manual_control_status()), 409
         if isinstance(exc, ControlUnavailableError):
-            return jsonify(error=str(exc), control=manual_control.status()), 503
+            return jsonify(error=str(exc), control=manual_control_status()), 503
         if isinstance(exc, (ControlError, ValueError, TypeError)):
-            return jsonify(error=str(exc), control=manual_control.status()), 400
+            return jsonify(error=str(exc), control=manual_control_status()), 400
         raise exc
 
     @app.get("/manual-control")
     def manual_control_page() -> str:
         return render_template(
             "manual_control.html",
-            control=manual_control.status(),
+            control=manual_control_status(),
             control_token=manual_control_token,
             demo_mode=demo_mode,
         )
 
     @app.get("/api/manual-control")
     def api_manual_control() -> Any:
-        return jsonify(control=manual_control.status())
+        return jsonify(control=manual_control_status())
 
     @app.post("/api/manual-control/move")
     def api_manual_control_move() -> Any:
         require_manual_control_token()
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
-            return jsonify(error="A JSON request body is required", control=manual_control.status()), 400
+            return jsonify(error="A JSON request body is required", control=manual_control_status()), 400
         try:
             manual_control.move(str(payload.get("direction", "")), payload.get("step"))
         except Exception as exc:
             return manual_control_error(exc)
-        return jsonify(control=manual_control.status())
+        return jsonify(control=manual_control_status())
 
     @app.post("/api/manual-control/fire")
     def api_manual_control_fire() -> Any:
@@ -374,34 +385,59 @@ def create_app(
             manual_control.fire()
         except Exception as exc:
             return manual_control_error(exc)
-        return jsonify(control=manual_control.status())
+        return jsonify(control=manual_control_status())
 
     @app.post("/api/manual-control/calibration")
     def api_manual_control_calibration() -> Any:
         require_manual_control_token()
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
-            return jsonify(error="A JSON request body is required", control=manual_control.status()), 400
+            return jsonify(error="A JSON request body is required", control=manual_control_status()), 400
         try:
-            point = manual_control.save_active_calibration_point(
-                pixel_x=payload.get("pixel_x"),
-                pixel_y=payload.get("pixel_y"),
-            )
+            point = manual_control.save_active_calibration_point()
         except Exception as exc:
             return manual_control_error(exc)
-        return jsonify(calibration_point=asdict(point), control=manual_control.status())
+        return jsonify(calibration_point=asdict(point), control=manual_control_status())
 
     @app.post("/api/manual-control/calibration/active")
     def api_manual_control_active_calibration() -> Any:
         require_manual_control_token()
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
-            return jsonify(error="A JSON request body is required", control=manual_control.status()), 400
+            return jsonify(error="A JSON request body is required", control=manual_control_status()), 400
         try:
             manual_control.select_calibration_point(payload.get("point"))
         except Exception as exc:
             return manual_control_error(exc)
-        return jsonify(control=manual_control.status())
+        return jsonify(control=manual_control_status())
+
+    @app.post("/api/manual-control/calibration/pixel")
+    def api_manual_control_calibration_pixel() -> Any:
+        require_manual_control_token()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="A JSON request body is required", control=manual_control_status()), 400
+        camera_status = camera.status()
+        try:
+            if not camera_status.online:
+                raise ControlUnavailableError("Camera must be online before selecting a calibration pixel")
+            pixel_x, pixel_y = display_click_to_frame_pixel(
+                payload.get("display_x"),
+                payload.get("display_y"),
+                payload.get("display_width"),
+                payload.get("display_height"),
+                camera_status.width,
+                camera_status.height,
+            )
+            point = manual_control.set_active_calibration_pixel(
+                pixel_x,
+                pixel_y,
+                frame_width=camera_status.width,
+                frame_height=camera_status.height,
+            )
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(calibration_point=asdict(point), control=manual_control_status())
 
     @app.get("/captures")
     def captures() -> str:
