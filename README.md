@@ -99,7 +99,7 @@ pan_tilt:
   tilt_center: 85
   tilt_max: 150
   park_pan: 85
-  park_tilt: 85
+  park_tilt: 82
   movement_speed: 45.0
   fast_acquisition_speed: 120.0
   step_interval_seconds: 0.02

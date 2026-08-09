@@ -458,11 +458,11 @@ def test_manual_fire_closes_valve_then_parks_without_changing_calibration(tmp_pa
     assert events == ["close", "open", "pulse", "close", "move", "settle"]
     assert delays == [0.25, 0.15]
     assert valve.state is ValveState.CLOSED
-    assert pan_tilt.moves == [PanTiltPosition(85, 88)]
+    assert pan_tilt.moves == [PanTiltPosition(85, 82)]
     assert service.pan_tilt_config.pan_min <= pan_tilt.moves[0].pan <= service.pan_tilt_config.pan_max
     assert service.pan_tilt_config.tilt_min <= pan_tilt.moves[0].tilt <= service.pan_tilt_config.tilt_max
     assert service.status()["pan"] == 85
-    assert service.status()["tilt"] == 88
+    assert service.status()["tilt"] == 82
     assert service.status()["targeting"]["status"] == "PARKED"
     assert service.status()["cooldown_remaining_seconds"] == 10.0
     assert CalibrationStore(tmp_path / "calibration.json").load() == before
@@ -503,14 +503,14 @@ def test_fire_cooldown_is_server_side_and_movement_remains_available(tmp_path: P
     service.fire()
     assert valve.state is ValveState.CLOSED
     assert service.status()["pan"] == 85
-    assert service.status()["tilt"] == 88
+    assert service.status()["tilt"] == 82
     assert service.status()["targeting"]["status"] == "PARKED"
     assert service.status()["state"] == ControlState.COOLDOWN.value
     assert service.status()["cooldown_remaining_seconds"] == 10.0
     with pytest.raises(FireCooldownError):
         service.fire()
 
-    assert service.move("right", 3) == PanTiltPosition(82, 88)
+    assert service.move("right", 3) == PanTiltPosition(82, 82)
     assert service.status()["state"] == ControlState.COOLDOWN.value
     now[0] = 110.0
     assert service.status()["state"] == ControlState.IDLE.value
@@ -567,7 +567,7 @@ def test_recording_start_failure_cannot_break_valve_cooldown_or_coordinator(tmp_
     assert valve.state is ValveState.CLOSED
     assert service.status()["state"] == ControlState.COOLDOWN.value
     assert service.status()["cooldown_remaining_seconds"] == 10.0
-    assert pan_tilt.moves[-1] == PanTiltPosition(85, 88)
+    assert pan_tilt.moves[-1] == PanTiltPosition(85, 82)
     assert service.status()["targeting"]["status"] == "PARKED"
     with pytest.raises(FireCooldownError):
         service.fire()

@@ -54,7 +54,7 @@ class PanTiltConfig:
     tilt_center: float = 85.0
     tilt_max: float = 150.0
     park_pan: float = 85.0
-    park_tilt: float = 88.0
+    park_tilt: float = 82.0
     movement_speed: float = 45.0
     fast_acquisition_speed: float = 120.0
     step_interval_seconds: float = 0.02

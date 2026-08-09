@@ -13,7 +13,7 @@ Branch: `manual-control`. Do not merge into `main` without explicit authorizatio
 - The normal physically verified 0.25-second calibration/test pulse is restored.
 - The backend-enforced cooldown remains 10 seconds.
 - CENTER remains pan 85 degrees / tilt 85 degrees.
-- PARK is configured separately as pan 85 degrees / tilt 88 degrees. This is a 3-degree offset in the existing backend `up` direction (`up` increases commanded tilt). The physical upward result must be confirmed under supervision before relying on it with water; tune only `pan_tilt.park_tilt` if the installed linkage needs a different absolute command.
+- PARK is configured separately as pan 85 degrees / tilt 82 degrees so the nozzle rests at the owner-selected anti-drip angle. CENTER remains 85/85; tune only `pan_tilt.park_tilt` if the installed linkage needs a different rest command.
 
 Supervised hardware commissioning is underway. The owner has physically verified the manual web controls, CENTER and manual servo movement, dry-fire operation, and a wet-fire shot at 0.25 seconds. Power wiring, the BCM GPIO24 MOSFET signal, the normally closed solenoid, and the water supply are functioning. All nine physical garden calibration records now contain real camera pixels and water-impact-tested commanded pan/tilt values.
 
@@ -143,7 +143,7 @@ The nine blocks replace the earlier painted-X marker concept; the calibration ge
 
 ## First physical verification
 
-No new click-to-aim, 85/88 PARK, or manual-fire recording behavior is claimed as physically verified by automated tests.
+No new click-to-aim, 85/82 PARK, or manual-fire recording behavior is claimed as physically verified by automated tests.
 
 1. Pull/restart the existing `manual-control` deployment with the water supply disconnected or shut off. Open the desktop page and confirm `Calibration: 9 / 9`.
 2. Select `AIM TARGET`. Confirm the yellow boundary, four blue cells, and all markers 1-9 appear. In particular, marker 9 must sit at the stored center of the bottom-right red block.
@@ -152,7 +152,7 @@ No new click-to-aim, 85/88 PARK, or manual-fire recording behavior is claimed as
 5. Click a clearly interior location in each of the four blue cells. Confirm it reports the expected cell, moves and settles only, and produces no valve activity. Do not judge water accuracy yet.
 6. Click just outside the yellow perimeter. Confirm `OUT OF RANGE`, a visible reason, and no movement. A click below Point 9 may correctly be outside even when it is still visually on the lower part of the boundary block; the yellow line is authoritative and is intentionally not expanded.
 7. Only after those dry checks pass, restore water under supervision. Click one known anchor, wait for `AIM READY` and complete servo stillness, then press the separate FIRE button once. Confirm the shot lasts 0.25 seconds and repeated FIRE remains blocked by the 10-second cooldown.
-8. Perform a separate dry-fire PARK check and observe that the valve is OFF before movement to pan 85 / tilt 88. If PARK moves the installed nozzle the wrong way or too far, stop before more wet testing; CENTER stays 85/85 and servo limits remain unchanged.
+8. Perform a separate dry-fire PARK check and observe that the valve is OFF before movement to pan 85 / tilt 82. Confirm this owner-selected rest angle reduces dripping without binding or overtravel; CENTER stays 85/85 and servo limits remain unchanged.
 9. Wait at least 5 seconds after one accepted FIRE, then open the event archive. Confirm the `Manual fire` card opens a zoom replay centered on the clicked target and a separate full-field clip. Repeat once after a D-pad adjustment and confirm the metadata reports `configured_fixed_fallback`; tune only `manual_control.recording.crop_center_x/y` if that fallback does not cover the installed garden target area.
 
 Automatic firing on click, autonomous engagement, tracking, prediction, bursts, and guard-mode firing remain intentionally unimplemented.

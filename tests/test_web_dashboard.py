@@ -270,7 +270,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert fired.status_code == 200
     assert fired.json["control"]["state"] == "COOLDOWN"
     assert fired.json["control"]["pan"] == 85
-    assert fired.json["control"]["tilt"] == 88
+    assert fired.json["control"]["tilt"] == 82
     assert fired.json["control"]["targeting"]["status"] == "PARKED"
     assert len(recordings) == 1
     assert client.post("/api/manual-control/fire", json={}, headers=headers).status_code == 409
@@ -283,7 +283,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     )
     assert during_cooldown.status_code == 200
     assert during_cooldown.json["control"]["pan"] == 82
-    assert during_cooldown.json["control"]["tilt"] == 88
+    assert during_cooldown.json["control"]["tilt"] == 82
     adjusted_during_cooldown = client.post(
         "/api/manual-control/move",
         json={"direction": "right", "step": 3},
@@ -302,7 +302,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         "pixel_x": 640,
         "pixel_y": 360,
         "pan": 79.0,
-        "tilt": 88.0,
+        "tilt": 82.0,
     }
     saved_page = client.get("/manual-control")
     assert b"Calibration: 1 / 9" in saved_page.data
@@ -374,7 +374,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert len(aimed.json["control"]["targeting"]["geometry"]["anchors"]) == 9
     assert len(aimed.json["control"]["targeting"]["geometry"]["cells"]) == 4
     assert aimed.json["control"]["pan"] == 79
-    assert aimed.json["control"]["tilt"] == 88
+    assert aimed.json["control"]["tilt"] == 82
     assert aimed.json["control"]["cooldown_remaining_seconds"] == 0
     assert json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8")) == before_aim
 
@@ -406,7 +406,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert updated.status_code == 200
     assert updated.json["calibration_point"]["pixel_x"] == 800
     assert updated.json["calibration_point"]["pixel_y"] == 360
-    assert updated.json["calibration_point"]["tilt"] == 91.0
+    assert updated.json["calibration_point"]["tilt"] == 85.0
     assert len(updated.json["control"]["calibration_points"]) == 9
     assert [record["point"] for record in updated.json["control"]["calibration_points"]].count(1) == 1
 

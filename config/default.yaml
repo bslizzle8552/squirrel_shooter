@@ -75,10 +75,9 @@ pan_tilt:
   tilt_min: 70
   tilt_center: 85
   tilt_max: 150
-  # PARK is separate from CENTER. The existing backend `up` direction is +tilt,
-  # so 88 is the configurable 3-degree candidate for supervised physical-UP verification.
+  # PARK is separate from CENTER. Rest at tilt 82 to reduce nozzle dripping.
   park_pan: 85
-  park_tilt: 88
+  park_tilt: 82
   movement_speed: 45.0
   fast_acquisition_speed: 120.0
   step_interval_seconds: 0.02
