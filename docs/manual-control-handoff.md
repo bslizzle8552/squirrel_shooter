@@ -9,12 +9,13 @@ Branch: `manual-control`. Do not merge into `main` without explicit authorizatio
 - Raspberry Pi physical pin 20: GND.
 - Software configuration must use `gpio_pin: 24`, not physical pin number 18.
 - `active_high: true` remains required so the safe closed command is LOW.
-- `valve.enabled: true` is now checked in for supervised dry-fire testing.
-- The controlled test pulse remains 0.25 seconds, followed by the backend-enforced 10-second cooldown.
+- `valve.enabled: true` remains checked in for supervised manual operation.
+- The checked-in pulse is temporarily 3.0 seconds for one supervised demonstration shot, followed by the unchanged backend-enforced 10-second cooldown.
+- Return the pulse to the physically verified 0.25 seconds immediately after the demonstration.
 
-Supervised hardware commissioning has begun. The owner has physically verified that the manual web controls load and that CENTER and manual servo movement work at the installed unit. Power wiring, the MOSFET, and the normally closed solenoid are connected. Water remains disconnected for the first dry-fire.
+Supervised hardware commissioning is underway. The owner has physically verified the manual web controls, CENTER and manual servo movement, dry-fire operation, and a wet-fire shot at 0.25 seconds. Power wiring, the BCM GPIO24 MOSFET signal, the normally closed solenoid, and the water supply are functioning.
 
-The solenoid has not yet been fired. Do not treat solenoid energizing, release, or water operation as physically verified until the owner records those results.
+The temporary 3.0-second wet shot has not yet been physically tested. Do not treat that demonstration duration as verified until the owner records the result.
 
 ## Two-device calibration workflow
 
@@ -70,18 +71,18 @@ target -> move -> settle -> fire -> cooldown
 
 Do not implement interpolation or a parallel servo, valve, calibration, or firing path.
 
-## Remaining supervised hardware verification
+## Temporary supervised demonstration
 
-The next physical test is one single supervised FIRE command with water still disconnected:
+The next physical test is one single supervised demonstration FIRE command at the temporary 3.0-second duration:
 
-1. Keep an immediate 12 V power shutoff available and confirm the water supply remains disconnected.
+1. Keep an immediate 12 V power shutoff available, aim the nozzle safely, and clear the spray area.
 2. Start the updated application and confirm there is no solenoid actuation at startup; the active-high BCM GPIO24 output must remain LOW/OFF until FIRE.
 3. Open `/manual-control`, confirm the FIRE control reports `READY`, and press FIRE exactly once.
-4. Observe and listen for the solenoid to energize and release during the single 0.25-second pulse.
+4. Observe the single 3.0-second demonstration pulse and confirm the solenoid releases afterward.
 5. Confirm the page enters the 10-second cooldown and that refreshes or repeated FIRE requests do not bypass it. Servo aiming may remain available during cooldown.
-6. Record whether both the energize click and release click occurred. Do not connect water or tune the pulse in this test.
+6. Record the result, then return `manual_control.fire_pulse_seconds` to the previously verified 0.25 seconds before normal calibration or test operation.
 
-After that result is recorded, plan the next supervised step separately. Physical testing remains required before treating solenoid operation or water placement as verified.
+The temporary 3.0-second setting is not a new operating default and must not remain in place after the demonstration.
 
 ## Repository boundary
 

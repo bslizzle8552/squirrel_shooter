@@ -197,14 +197,14 @@ allowed during valve cooldown, but movement and firing can never overlap. FIRE
 produces one configured pulse and then enforces the full cooldown on the server,
 so refreshing or double-tapping the page cannot bypass it.
 
-Supervised hardware commissioning has begun. The owner has physically verified
-the manual web controls and servos, and the checked-in configuration now enables
-the valve for the first supervised dry-fire with water disconnected:
+Supervised hardware commissioning is underway. The owner has physically verified
+the manual web controls, servos, dry-fire, and a wet-fire shot at 0.25 seconds.
+The checked-in configuration now carries the temporary demonstration pulse:
 
 ```yaml
 manual_control:
   servo_enabled: true
-  fire_pulse_seconds: 0.25  # supervised tuning placeholder
+  fire_pulse_seconds: 3.0  # TEMPORARY: one supervised demonstration shot
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
 valve:
@@ -216,8 +216,11 @@ valve:
 The MOSFET signal has been physically traced: Raspberry Pi physical pin 18 is
 BCM GPIO24, and physical pin 20 is GND. Software uses BCM numbering, so the
 configured value is `24`, never `18`. Startup and cleanup command the output
-OFF/LOW. The current pulse remains 0.25 seconds and the server-enforced cooldown
-remains 10 seconds. Solenoid operation has not yet been physically verified.
+OFF/LOW. The owner has physically verified dry-fire and wet-fire operation with
+the normal 0.25-second pulse. The checked-in 3.0-second pulse is temporary for
+one supervised demonstration shot and must return to 0.25 seconds immediately
+afterward. The server-enforced cooldown remains 10 seconds; the 3.0-second wet
+shot has not yet been physically tested.
 
 The calibration page presents the nine physical targets as a 3×3 checklist. It
 shows saved points in green, highlights the active point, displays progress from
