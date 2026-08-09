@@ -58,18 +58,42 @@
     </section>
 
     <section class="manual-card calibration-card" aria-labelledby="calibration-title">
+      {% set saved_points = control.calibration_points | map(attribute='point') | list %}
+      {% set selected_record = namespace(value=none) %}
+      {% for record in control.calibration_points %}{% if record.point == 1 %}{% set selected_record.value = record %}{% endif %}{% endfor %}
       <div class="card-heading">
         <div><p class="eyebrow">Nine-point garden grid</p><h2 id="calibration-title">Save calibration point</h2></div>
-        <span id="saved-count">{{ control.calibration_points|length }}/9 saved</span>
+        <strong class="calibration-progress" id="saved-count">Calibration: {{ control.calibration_points|length }} / 9</strong>
+      </div>
+      <p class="calibration-complete" id="calibration-complete" {% if control.calibration_points|length != 9 %}hidden{% endif %}>All nine physical records are saved. Data collection is complete; interpolation is not yet configured.</p>
+      <div class="calibration-grid" role="group" aria-label="Nine calibration targets">
+        {% for point in range(1, 10) %}
+        <button type="button" class="calibration-point-button{{ ' active' if point == 1 }}{{ ' saved' if point in saved_points }}" data-calibration-point="{{ point }}" aria-pressed="{{ 'true' if point == 1 else 'false' }}">
+          <span class="calibration-point-number">{{ point }}</span>
+          <span class="calibration-point-state">{{ 'Saved' if point in saved_points else 'Not saved' }}</span>
+        </button>
+        {% endfor %}
       </div>
       <div class="calibration-actions">
-        <label for="calibration-point">Grid point</label>
-        <select id="calibration-point">
-          {% for point in range(1, 10) %}<option value="{{ point }}">Point {{ point }}</option>{% endfor %}
-        </select>
-        <button type="button" id="save-calibration" {% if not control.position_commanded %}disabled{% endif %}>Save current angles</button>
+        <input type="hidden" id="calibration-point" value="1">
+        <button type="button" id="save-calibration" {% if not control.position_commanded %}disabled{% endif %}>{{ 'Update point 1' if 1 in saved_points else 'Save point 1' }}</button>
       </div>
-      <p>Pixel coordinates remain empty until camera-image point selection is added. Saving the same point replaces it.</p>
+      <div class="calibration-confirmation" id="calibration-confirmation" role="status" aria-live="polite" hidden>
+        <strong id="calibration-confirmation-title"></strong>
+        <span>Pan <b id="calibration-confirmation-pan"></b>°</span>
+        <span>Tilt <b id="calibration-confirmation-tilt"></b>°</span>
+      </div>
+      <div class="calibration-details" aria-live="polite">
+        <h3>Stored values</h3>
+        <dl>
+          <div><dt>Point</dt><dd id="calibration-detail-point">1</dd></div>
+          <div><dt>Pixel X</dt><dd id="calibration-detail-pixel-x">{{ selected_record.value.pixel_x if selected_record.value and selected_record.value.pixel_x is not none else 'Not recorded (null)' }}</dd></div>
+          <div><dt>Pixel Y</dt><dd id="calibration-detail-pixel-y">{{ selected_record.value.pixel_y if selected_record.value and selected_record.value.pixel_y is not none else 'Not recorded (null)' }}</dd></div>
+          <div><dt>Pan</dt><dd id="calibration-detail-pan">{% if selected_record.value %}{{ selected_record.value.pan }}°{% else %}Not saved{% endif %}</dd></div>
+          <div><dt>Tilt</dt><dd id="calibration-detail-tilt">{% if selected_record.value %}{{ selected_record.value.tilt }}°{% else %}Not saved{% endif %}</dd></div>
+        </dl>
+      </div>
+      <p>Tap a point to inspect or update it. Saving a green point replaces that record; it does not create a duplicate. Pixel coordinates remain null until camera-image point selection is added.</p>
     </section>
   </div>
   <div class="manual-toast" id="manual-toast" role="status" aria-live="polite"></div>

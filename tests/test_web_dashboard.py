@@ -173,6 +173,10 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="fire-button"' in page.data
     assert b"Commanded positions only" in page.data
     assert b"startup reference" in page.data
+    assert b"Calibration: 0 / 9" in page.data
+    assert page.data.count(b"data-calibration-point=") == 9
+    assert b"Not saved" in page.data
+    assert b'id="calibration-confirmation"' in page.data
     assert client.post("/api/manual-control/move", json={"direction": "right", "step": 3}).status_code == 403
 
     moved = client.post("/api/manual-control/move", json={"direction": "right", "step": 3}, headers=headers)
@@ -203,6 +207,45 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         "pan": 91.0,
         "tilt": 85.0,
     }
+    saved_page = client.get("/manual-control")
+    assert b"Calibration: 1 / 9" in saved_page.data
+    assert b'class="calibration-point-button active saved"' in saved_page.data
+    assert b'id="calibration-detail-point">1<' in saved_page.data
+    assert b'id="calibration-detail-pixel-x">Not recorded (null)<' in saved_page.data
+    assert 'id="calibration-detail-pan">91.0°<'.encode("utf-8") in saved_page.data
+
+    for point in range(2, 10):
+        response = client.post(
+            "/api/manual-control/calibration",
+            json={"point": point, "pixel_x": None, "pixel_y": None},
+            headers=headers,
+        )
+        assert response.status_code == 200
+    complete_page = client.get("/manual-control")
+    assert b"Calibration: 9 / 9" in complete_page.data
+    assert b"All nine physical records are saved" in complete_page.data
+    assert b"interpolation is not yet configured" in complete_page.data
+
+    moved_again = client.post(
+        "/api/manual-control/move",
+        json={"direction": "up", "step": 3},
+        headers=headers,
+    )
+    assert moved_again.status_code == 200
+    updated = client.post(
+        "/api/manual-control/calibration",
+        json={"point": 1, "pixel_x": None, "pixel_y": None},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json["calibration_point"]["tilt"] == 88.0
+    assert len(updated.json["control"]["calibration_points"]) == 9
+    assert [record["point"] for record in updated.json["control"]["calibration_points"]].count(1) == 1
+
+    manual_script = client.get("/static/manual_control.js")
+    assert manual_script.status_code == 200
+    assert b"showCalibrationConfirmation" in manual_script.data
+    assert b" updated" in manual_script.data and b" saved" in manual_script.data
 
 
 def test_status_health_and_recent_events_endpoints(

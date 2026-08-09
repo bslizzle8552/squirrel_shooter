@@ -46,7 +46,7 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.manual_control.default_step_degrees == 3
     assert config.manual_control.fire_pulse_seconds == 0.25
     assert config.manual_control.fire_cooldown_seconds == 10.0
-    assert config.valve == ValveConfig(enabled=False, gpio_pin=None, active_high=True)
+    assert config.valve == ValveConfig(enabled=False, gpio_pin=24, active_high=True)
     assert config.motion.min_blob_area == 500
     assert config.motion.inclusion_zone.enabled is True
     assert config.motion.inclusion_zone.polygon == (
@@ -147,6 +147,7 @@ def test_older_config_without_manual_hardware_sections_uses_safe_defaults(tmp_pa
 def test_valve_cannot_be_enabled_without_a_gpio_pin(tmp_path: Path) -> None:
     raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
     raw["valve"]["enabled"] = True
+    raw["valve"]["gpio_pin"] = None
     config_path = tmp_path / "unsafe-valve.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 

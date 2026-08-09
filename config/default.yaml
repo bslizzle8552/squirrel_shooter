@@ -94,11 +94,11 @@ manual_control:
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
 
-# Fail-safe default: no GPIO is guessed and the normally-closed valve cannot
-# energize. Set a verified BCM pin and enabled: true only during supervised setup.
+# Physically traced MOSFET signal: Raspberry Pi physical pin 18 is BCM GPIO24;
+# physical pin 20 is GND. Keep disabled until supervised hardware testing.
 valve:
   enabled: false
-  gpio_pin: null  # TODO: enter the physically verified BCM GPIO number
+  gpio_pin: 24
   active_high: true
 
 motion:

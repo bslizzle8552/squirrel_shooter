@@ -4,6 +4,7 @@
   if (!cfg) { return; }
 
   var selectedStep = cfg.initial.default_step;
+  var selectedCalibrationPoint = 1;
   var requestPending = false;
   var control = cfg.initial;
   var toastTimer = null;
@@ -19,6 +20,17 @@
     point: document.getElementById('calibration-point'),
     save: document.getElementById('save-calibration'),
     savedCount: document.getElementById('saved-count'),
+    calibrationComplete: document.getElementById('calibration-complete'),
+    calibrationButtons: document.querySelectorAll('[data-calibration-point]'),
+    calibrationConfirmation: document.getElementById('calibration-confirmation'),
+    calibrationConfirmationTitle: document.getElementById('calibration-confirmation-title'),
+    calibrationConfirmationPan: document.getElementById('calibration-confirmation-pan'),
+    calibrationConfirmationTilt: document.getElementById('calibration-confirmation-tilt'),
+    detailPoint: document.getElementById('calibration-detail-point'),
+    detailPixelX: document.getElementById('calibration-detail-pixel-x'),
+    detailPixelY: document.getElementById('calibration-detail-pixel-y'),
+    detailPan: document.getElementById('calibration-detail-pan'),
+    detailTilt: document.getElementById('calibration-detail-tilt'),
     toast: document.getElementById('manual-toast')
   };
 
@@ -31,6 +43,44 @@
 
   function busyState(state) {
     return state === 'MOVING' || state === 'SETTLING' || state === 'FIRING';
+  }
+
+  function calibrationRecord(next, point) {
+    return next.calibration_points.find(function (record) { return record.point === point; }) || null;
+  }
+
+  function storedPixel(value) {
+    return value === null || value === undefined ? 'Not recorded (null)' : value;
+  }
+
+  function renderCalibration(next) {
+    var savedCount = next.calibration_points.length;
+    var selected = calibrationRecord(next, selectedCalibrationPoint);
+    els.savedCount.textContent = 'Calibration: ' + savedCount + ' / 9';
+    els.calibrationComplete.hidden = savedCount !== 9;
+    els.calibrationButtons.forEach(function (button) {
+      var point = Number(button.dataset.calibrationPoint);
+      var saved = Boolean(calibrationRecord(next, point));
+      var active = point === selectedCalibrationPoint;
+      button.classList.toggle('saved', saved);
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+      button.querySelector('.calibration-point-state').textContent = saved ? 'Saved' : 'Not saved';
+    });
+    els.point.value = selectedCalibrationPoint;
+    els.save.textContent = (selected ? 'Update point ' : 'Save point ') + selectedCalibrationPoint;
+    els.detailPoint.textContent = selectedCalibrationPoint;
+    els.detailPixelX.textContent = selected ? storedPixel(selected.pixel_x) : 'Not recorded (null)';
+    els.detailPixelY.textContent = selected ? storedPixel(selected.pixel_y) : 'Not recorded (null)';
+    els.detailPan.textContent = selected ? selected.pan + '°' : 'Not saved';
+    els.detailTilt.textContent = selected ? selected.tilt + '°' : 'Not saved';
+  }
+
+  function showCalibrationConfirmation(record, updated) {
+    els.calibrationConfirmationTitle.textContent = 'Point ' + record.point + (updated ? ' updated' : ' saved');
+    els.calibrationConfirmationPan.textContent = record.pan;
+    els.calibrationConfirmationTilt.textContent = record.tilt;
+    els.calibrationConfirmation.hidden = false;
   }
 
   function render(next) {
@@ -47,8 +97,8 @@
     els.servoNote.hidden = next.servo_available;
     els.positionNote.hidden = next.position_commanded;
     els.valveNote.hidden = next.valve_available;
-    els.savedCount.textContent = next.calibration_points.length + '/9 saved';
     els.save.disabled = requestPending || !next.servo_available || !next.position_commanded;
+    renderCalibration(next);
   }
 
   async function requestJson(url, body) {
@@ -89,6 +139,13 @@
   document.querySelectorAll('[data-direction]').forEach(function (button) {
     button.addEventListener('click', function () { move(button.dataset.direction); });
   });
+  els.calibrationButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      selectedCalibrationPoint = Number(button.dataset.calibrationPoint);
+      els.calibrationConfirmation.hidden = true;
+      renderCalibration(control);
+    });
+  });
   els.fire.addEventListener('click', async function () {
     if (requestPending || els.fire.disabled) { return; }
     try { await requestJson(cfg.urls.fire, {}); showToast('Valve pulse complete. Cooldown started.'); }
@@ -96,8 +153,10 @@
   });
   els.save.addEventListener('click', async function () {
     try {
-      var payload = await requestJson(cfg.urls.calibration, {point: Number(els.point.value), pixel_x: null, pixel_y: null});
-      showToast('Saved calibration point ' + payload.calibration_point.point + ' at pan ' + payload.calibration_point.pan + '°, tilt ' + payload.calibration_point.tilt + '°.');
+      var updating = Boolean(calibrationRecord(control, selectedCalibrationPoint));
+      var payload = await requestJson(cfg.urls.calibration, {point: selectedCalibrationPoint, pixel_x: null, pixel_y: null});
+      showCalibrationConfirmation(payload.calibration_point, updating);
+      showToast('Point ' + payload.calibration_point.point + (updating ? ' updated' : ' saved') + ' — pan ' + payload.calibration_point.pan + '°, tilt ' + payload.calibration_point.tilt + '°.');
     } catch (error) { showToast(error.message); }
   });
   document.addEventListener('keydown', function (event) {

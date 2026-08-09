@@ -207,16 +207,31 @@ manual_control:
   calibration_file: config/calibration_points.json
 valve:
   enabled: false
-  gpio_pin: null  # verified BCM GPIO number required
+  gpio_pin: 24
   active_high: true
 ```
 
-Do not enable the valve until the MOSFET signal wire's BCM GPIO number has been
-physically traced and verified. Startup and cleanup command the output OFF/LOW.
+The MOSFET signal has been physically traced: Raspberry Pi physical pin 18 is
+BCM GPIO24, and physical pin 20 is GND. Software uses BCM numbering, so the
+configured value is `24`, never `18`. Keep `valve.enabled: false` until supervised
+hardware testing. Startup and cleanup command the output OFF/LOW.
+
+The calibration page presents the nine physical targets as a 3×3 checklist. It
+shows saved points in green, highlights the active point, displays progress from
+0/9 through 9/9, confirms each save/update, and shows the selected point's stored
+pixel and commanded-angle values. Saving a completed point again replaces that
+record rather than adding a duplicate. A 9/9 display means data collection is
+complete; it does not mean interpolation is implemented.
+
 The calibration file stores points 1-9 with `pixel_x`, `pixel_y`, `pan`, and
-`tilt`; the first version saves angles with null pixels until image point
-selection is implemented. Interpolation, automatic targeting, and automatic
-firing are intentionally not implemented.
+`tilt`; angles are saved with null pixels until image point selection is added.
+Interpolation, automatic targeting, and automatic firing remain intentionally
+unimplemented. Every future firing path must continue to use the shared target,
+move, settle, fire, cooldown pipeline.
+
+`Misc/` is owner-only project storage. It is ignored by Git and governed by the
+root `AGENTS.md`: normal coding work must not inspect, modify, stage, or commit
+anything beneath it.
 
 ## Deploy the changes to the Raspberry Pi
 
@@ -235,7 +250,7 @@ python -m pytest
 The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
 weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
 installing them under the ignored `models/` directory. Expected test result for
-this revision: **137 passed** without opening the USB camera. Then stop any old
+this revision: **138 passed** without opening the USB camera. Then stop any old
 dashboard, preview, recorder, or watcher process that already owns the camera and
 start the complete system:
 
@@ -294,8 +309,7 @@ cd ~/squirrel_shooter
 The first `start.sh` run may ask for the Pi password once so it can enable startup
 after logout and reboot. After that, the service continues when SSH disconnects or
 the laptop turns off, starts after Pi reboots, restarts after application failures,
-and uses the same clean `SIGINT` shutdown path as `Ctrl+C`. The same two shortcuts
-are saved in `Misc/start squirrel shooter.txt`.
+and uses the same clean `SIGINT` shutdown path as `Ctrl+C`.
 
 ## Open the dashboard through Tailscale
 

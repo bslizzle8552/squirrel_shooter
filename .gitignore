@@ -45,6 +45,9 @@ camera-still-*.jpg
 core.*
 config/calibration_points.json
 
+# Owner-only project storage; never treat this directory as application source.
+/Misc/
+
 # Raspberry Pi removable-media trash
 .Trash-*/
 lost+found/

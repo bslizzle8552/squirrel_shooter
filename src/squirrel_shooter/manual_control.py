@@ -362,7 +362,11 @@ def build_manual_control_service(
             valve_error = f"{type(exc).__name__}: {exc}"
             LOGGER.error("Manual valve control unavailable: %s", valve_error, exc_info=True)
     else:
-        valve_error = "Configure a verified valve.gpio_pin, then set valve.enabled to true"
+        valve_error = (
+            f"BCM GPIO{valve_config.gpio_pin} is configured; set valve.enabled to true only during supervised testing"
+            if valve_config.gpio_pin is not None
+            else "Configure a verified valve.gpio_pin, then set valve.enabled to true"
+        )
     return ManualControlService(
         pan_tilt_config,
         control_config,
