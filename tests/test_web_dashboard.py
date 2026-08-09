@@ -176,6 +176,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"<span>Backward</span>" in page.data
     assert b"<span>Up</span>" not in page.data
     assert b"<span>Down</span>" not in page.data
+    assert b'data-step="1"' in page.data
+    assert page.data.count(b'class="step-button') == 3
     assert b'id="fire-button"' in page.data
     assert b'id="fire-button" disabled' not in page.data
     assert b'id="fire-status">READY<' in page.data
@@ -197,6 +199,21 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         "/api/manual-control/calibration/pixel",
         json={"display_x": 400, "display_y": 225, "display_width": 800, "display_height": 450},
     ).status_code == 403
+
+    fine_move = client.post(
+        "/api/manual-control/move",
+        json={"direction": "left", "step": 1},
+        headers=headers,
+    )
+    assert fine_move.status_code == 200
+    assert fine_move.json["control"]["pan"] == 86
+    fine_move_back = client.post(
+        "/api/manual-control/move",
+        json={"direction": "right", "step": 1},
+        headers=headers,
+    )
+    assert fine_move_back.status_code == 200
+    assert fine_move_back.json["control"]["pan"] == 85
 
     pixel_selected = client.post(
         "/api/manual-control/calibration/pixel",

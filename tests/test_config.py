@@ -42,7 +42,7 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.pan_tilt.tilt_center == 85
     assert config.pan_tilt.tilt_max == 150
     assert config.manual_control.servo_enabled is True
-    assert config.manual_control.allowed_step_degrees == (3, 5)
+    assert config.manual_control.allowed_step_degrees == (1, 3, 5)
     assert config.manual_control.default_step_degrees == 3
     assert config.manual_control.fire_pulse_seconds == 0.25
     assert config.manual_control.fire_cooldown_seconds == 10.0

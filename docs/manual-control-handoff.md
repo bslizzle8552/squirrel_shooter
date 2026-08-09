@@ -33,7 +33,7 @@ Desktop/laptop responsibilities:
 Phone responsibilities:
 
 - Show the current backend-commanded pan and tilt angles.
-- Provide the large 3-degree/5-degree step buttons, D-pad, CENTER, FIRE button, and cooldown status first.
+- Provide large 1-degree/3-degree/5-degree step buttons, D-pad, CENTER, FIRE button, and cooldown status first. Use 1 degree for fine adjustment when 3 degrees is too large.
 - Show the active calibration point as small informational text.
 - Leave point selection and saving to the desktop console.
 

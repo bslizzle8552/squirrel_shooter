@@ -92,13 +92,17 @@ def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> No
 
     assert service.status()["pan"] == service.status()["tilt"] == 85
     assert service.status()["position_commanded"] is False
-    assert service.move("up", 3) == PanTiltPosition(85, 88)
-    assert service.move("left", 5) == PanTiltPosition(90, 88)
-    assert service.move("right", 5) == PanTiltPosition(85, 88)
+    assert service.status()["allowed_steps"] == [1, 3, 5]
+    assert service.move("up", 1) == PanTiltPosition(85, 86)
+    assert service.move("left", 1) == PanTiltPosition(86, 86)
+    assert service.move("right", 1) == PanTiltPosition(85, 86)
+    assert service.move("up", 3) == PanTiltPosition(85, 89)
+    assert service.move("left", 5) == PanTiltPosition(90, 89)
+    assert service.move("right", 5) == PanTiltPosition(85, 89)
     for _ in range(30):
         service.move("left", 5)
 
-    assert pan_tilt.moves[-1] == PanTiltPosition(150, 88)
+    assert pan_tilt.moves[-1] == PanTiltPosition(150, 89)
     for _ in range(30):
         service.move("right", 5)
         service.move("down", 5)

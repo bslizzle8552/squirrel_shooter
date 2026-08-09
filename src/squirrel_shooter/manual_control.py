@@ -55,7 +55,7 @@ class FireCooldownError(ControlError):
 class ManualControlConfig:
     servo_enabled: bool = False
     default_step_degrees: int = 3
-    allowed_step_degrees: tuple[int, ...] = (3, 5)
+    allowed_step_degrees: tuple[int, ...] = (1, 3, 5)
     fire_pulse_seconds: float = 0.25
     fire_cooldown_seconds: float = 10.0
     calibration_file: Path = Path("config/calibration_points.json")
