@@ -2,6 +2,7 @@
 {% block title %}Manual control · Squirrel Squirter{% endblock %}
 {% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='manual_control.css') }}">{% endblock %}
 {% block content %}
+  {% set active_point = control.active_calibration_point %}
   <section class="manual-heading">
     <div>
       <p class="eyebrow">Manual aiming &amp; calibration</p>
@@ -26,6 +27,7 @@
         <div><span>Pan</span><strong><b id="pan-angle">{{ control.pan }}</b>°</strong></div>
         <div><span>Tilt</span><strong><b id="tilt-angle">{{ control.tilt }}</b>°</strong></div>
       </div>
+      <p class="active-point-summary">Active calibration point: <strong id="active-calibration-point">{{ active_point }}</strong></p>
       <p class="position-note" id="position-note" {% if control.position_commanded %}hidden{% endif %}>85° / 85° is the startup reference. Press CENTER or move once before treating it as commanded.</p>
 
       <div class="card-heading aim-heading">
@@ -60,23 +62,23 @@
     <section class="manual-card calibration-card" aria-labelledby="calibration-title">
       {% set saved_points = control.calibration_points | map(attribute='point') | list %}
       {% set selected_record = namespace(value=none) %}
-      {% for record in control.calibration_points %}{% if record.point == 1 %}{% set selected_record.value = record %}{% endif %}{% endfor %}
+      {% for record in control.calibration_points %}{% if record.point == active_point %}{% set selected_record.value = record %}{% endif %}{% endfor %}
       <div class="card-heading">
-        <div><p class="eyebrow">Nine-point garden grid</p><h2 id="calibration-title">Save calibration point</h2></div>
+        <div><p class="eyebrow">Desktop calibration console</p><h2 id="calibration-title">Save calibration point</h2></div>
         <strong class="calibration-progress" id="saved-count">Calibration: {{ control.calibration_points|length }} / 9</strong>
       </div>
       <p class="calibration-complete" id="calibration-complete" {% if control.calibration_points|length != 9 %}hidden{% endif %}>All nine physical records are saved. Data collection is complete; interpolation is not yet configured.</p>
       <div class="calibration-grid" role="group" aria-label="Nine calibration targets">
         {% for point in range(1, 10) %}
-        <button type="button" class="calibration-point-button{{ ' active' if point == 1 }}{{ ' saved' if point in saved_points }}" data-calibration-point="{{ point }}" aria-pressed="{{ 'true' if point == 1 else 'false' }}">
+        <button type="button" class="calibration-point-button{{ ' active' if point == active_point }}{{ ' saved' if point in saved_points }}" data-calibration-point="{{ point }}" aria-pressed="{{ 'true' if point == active_point else 'false' }}">
           <span class="calibration-point-number">{{ point }}</span>
           <span class="calibration-point-state">{{ 'Saved' if point in saved_points else 'Not saved' }}</span>
         </button>
         {% endfor %}
       </div>
       <div class="calibration-actions">
-        <input type="hidden" id="calibration-point" value="1">
-        <button type="button" id="save-calibration" {% if not control.position_commanded %}disabled{% endif %}>{{ 'Update point 1' if 1 in saved_points else 'Save point 1' }}</button>
+        <input type="hidden" id="calibration-point" value="{{ active_point }}">
+        <button type="button" id="save-calibration" {% if not control.position_commanded %}disabled{% endif %}>{{ 'Update point ' if active_point in saved_points else 'Save point ' }}{{ active_point }}</button>
       </div>
       <div class="calibration-confirmation" id="calibration-confirmation" role="status" aria-live="polite" hidden>
         <strong id="calibration-confirmation-title"></strong>
@@ -86,7 +88,7 @@
       <div class="calibration-details" aria-live="polite">
         <h3>Stored values</h3>
         <dl>
-          <div><dt>Point</dt><dd id="calibration-detail-point">1</dd></div>
+          <div><dt>Point</dt><dd id="calibration-detail-point">{{ active_point }}</dd></div>
           <div><dt>Pixel X</dt><dd id="calibration-detail-pixel-x">{{ selected_record.value.pixel_x if selected_record.value and selected_record.value.pixel_x is not none else 'Not recorded (null)' }}</dd></div>
           <div><dt>Pixel Y</dt><dd id="calibration-detail-pixel-y">{{ selected_record.value.pixel_y if selected_record.value and selected_record.value.pixel_y is not none else 'Not recorded (null)' }}</dd></div>
           <div><dt>Pan</dt><dd id="calibration-detail-pan">{% if selected_record.value %}{{ selected_record.value.pan }}°{% else %}Not saved{% endif %}</dd></div>
@@ -107,8 +109,10 @@ window.SS_MANUAL_CONTROL = {
     status: {{ url_for('api_manual_control')|tojson }},
     move: {{ url_for('api_manual_control_move')|tojson }},
     fire: {{ url_for('api_manual_control_fire')|tojson }},
-    calibration: {{ url_for('api_manual_control_calibration')|tojson }}
-  }
+    calibration: {{ url_for('api_manual_control_calibration')|tojson }},
+    activeCalibration: {{ url_for('api_manual_control_active_calibration')|tojson }}
+  },
+  pollIntervalMs: 1000
 };
 </script>
 <script src="{{ url_for('static', filename='manual_control.js') }}" defer></script>

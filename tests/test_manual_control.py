@@ -109,6 +109,31 @@ def test_calibration_rejects_uncommanded_startup_reference(tmp_path: Path) -> No
         service.save_calibration_point(1)
 
 
+def test_active_calibration_point_is_shared_service_state(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    assert service.status()["active_calibration_point"] == 1
+    assert service.select_calibration_point(4) == 4
+    assert service.status()["active_calibration_point"] == 4
+
+    with pytest.raises(ValueError, match="integer from 1 to 9"):
+        service.select_calibration_point(10)
+
+
+def test_save_active_point_uses_current_backend_commanded_position(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    service.select_calibration_point(4)
+    service.move("right", 3)
+    service.move("up", 5)
+
+    record = service.save_active_calibration_point(pixel_x=None, pixel_y=None)
+
+    assert record.point == 4
+    assert record.pan == 88
+    assert record.tilt == 90
+    assert CalibrationStore(tmp_path / "calibration.json").load() == [record]
+
+
 def test_fire_cooldown_is_server_side_and_movement_remains_available(tmp_path: Path) -> None:
     now = [100.0]
     service, _, valve = make_service(tmp_path, clock=lambda: now[0])

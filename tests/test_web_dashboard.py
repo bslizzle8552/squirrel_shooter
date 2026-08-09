@@ -174,6 +174,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"Commanded positions only" in page.data
     assert b"startup reference" in page.data
     assert b"Calibration: 0 / 9" in page.data
+    assert b'id="active-calibration-point">1<' in page.data
     assert page.data.count(b"data-calibration-point=") == 9
     assert b"Not saved" in page.data
     assert b'id="calibration-confirmation"' in page.data
@@ -215,9 +216,16 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert 'id="calibration-detail-pan">91.0°<'.encode("utf-8") in saved_page.data
 
     for point in range(2, 10):
+        selected = client.post(
+            "/api/manual-control/calibration/active",
+            json={"point": point},
+            headers=headers,
+        )
+        assert selected.status_code == 200
+        assert selected.json["control"]["active_calibration_point"] == point
         response = client.post(
             "/api/manual-control/calibration",
-            json={"point": point, "pixel_x": None, "pixel_y": None},
+            json={"pixel_x": None, "pixel_y": None},
             headers=headers,
         )
         assert response.status_code == 200
@@ -232,9 +240,15 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         headers=headers,
     )
     assert moved_again.status_code == 200
+    selected_first = client.post(
+        "/api/manual-control/calibration/active",
+        json={"point": 1},
+        headers=headers,
+    )
+    assert selected_first.status_code == 200
     updated = client.post(
         "/api/manual-control/calibration",
-        json={"point": 1, "pixel_x": None, "pixel_y": None},
+        json={"pixel_x": None, "pixel_y": None},
         headers=headers,
     )
     assert updated.status_code == 200
@@ -243,9 +257,88 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert [record["point"] for record in updated.json["control"]["calibration_points"]].count(1) == 1
 
     manual_script = client.get("/static/manual_control.js")
+    manual_style = client.get("/static/manual_control.css")
     assert manual_script.status_code == 200
+    assert manual_style.status_code == 200
     assert b"showCalibrationConfirmation" in manual_script.data
     assert b" updated" in manual_script.data and b" saved" in manual_script.data
+    assert b"pollIntervalMs" in page.data and b"1000" in page.data
+    assert b'grid-template-areas: "camera aim" "camera fire" "calibration ."' in manual_style.data
+    assert b'grid-template-areas: "aim" "fire" "camera"' in manual_style.data
+    assert b".calibration-card { display: none; }" in manual_style.data
+
+
+def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stale_point(tmp_path: Path) -> None:
+    config = load_config(write_test_config(tmp_path))
+    now = [100.0]
+    controls = ManualControlService(
+        config.pan_tilt,
+        config.manual_control,
+        pan_tilt=PanTiltController(config.pan_tilt, driver=ManualControlDriver(), sleep=lambda _seconds: None),
+        valve=GPIOValveController(ValveConfig(enabled=True, gpio_pin=17), output=ManualControlOutput()),
+        sleep=lambda _seconds: None,
+        clock=lambda: now[0],
+    )
+    app = create_app(
+        app_config=config,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(),  # type: ignore[arg-type]
+        manual_control_service=controls,
+        temperature_reader=lambda: None,
+    )
+    app.config.update(TESTING=True)
+    desktop = app.test_client()
+    phone = app.test_client()
+    headers = {"X-Control-Token": app.extensions["manual_control_token"]}
+
+    assert phone.post("/api/manual-control/calibration/active", json={"point": 4}).status_code == 403
+    assert desktop.post(
+        "/api/manual-control/calibration/active",
+        json={"point": 10},
+        headers=headers,
+    ).status_code == 400
+    selected = desktop.post(
+        "/api/manual-control/calibration/active",
+        json={"point": 4},
+        headers=headers,
+    )
+    assert selected.status_code == 200
+    assert phone.get("/api/manual-control").json["control"]["active_calibration_point"] == 4
+    assert b'id="active-calibration-point">4<' in phone.get("/manual-control").data
+
+    moved = phone.post(
+        "/api/manual-control/move",
+        json={"direction": "right", "step": 3},
+        headers=headers,
+    )
+    assert moved.status_code == 200
+    assert desktop.get("/api/manual-control").json["control"]["pan"] == 88
+
+    saved = desktop.post(
+        "/api/manual-control/calibration",
+        json={"point": 1, "pan": 30, "tilt": 70, "pixel_x": None, "pixel_y": None},
+        headers=headers,
+    )
+    assert saved.status_code == 200
+    assert saved.json["calibration_point"] == {
+        "point": 4,
+        "pixel_x": None,
+        "pixel_y": None,
+        "pan": 88.0,
+        "tilt": 85.0,
+    }
+
+    fired = phone.post("/api/manual-control/fire", json={}, headers=headers)
+    assert fired.status_code == 200
+    desktop_during_cooldown = desktop.get("/api/manual-control").json["control"]
+    assert desktop_during_cooldown["state"] == "COOLDOWN"
+    assert desktop_during_cooldown["cooldown_remaining_seconds"] == 10.0
+    assert desktop.post("/api/manual-control/fire", json={}, headers=headers).status_code == 409
+
+    now[0] = 104.0
+    refreshed_phone = phone.get("/api/manual-control").json["control"]
+    assert refreshed_phone["state"] == "COOLDOWN"
+    assert refreshed_phone["cooldown_remaining_seconds"] == 6.0
 
 
 def test_status_health_and_recent_events_endpoints(

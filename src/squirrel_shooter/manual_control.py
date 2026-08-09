@@ -190,6 +190,7 @@ class ManualControlService:
         self._pan = float(pan_tilt_config.pan_center)
         self._tilt = float(pan_tilt_config.tilt_center)
         self._position_commanded = False
+        self._active_calibration_point = 1
         self._last_fire_completed_at: float | None = None
         self._servo_error = servo_error
         self._valve_error = valve_error
@@ -228,6 +229,7 @@ class ManualControlService:
             "valve_state": self._valve.state.value,
             "cooldown_remaining_seconds": round(remaining, 3),
             "fire_pulse_seconds": self.config.fire_pulse_seconds,
+            "active_calibration_point": self._active_calibration_point,
             "calibration_points": points,
             "servo_error": self._servo_error,
             "valve_error": self._valve_error,
@@ -286,6 +288,36 @@ class ManualControlService:
             if not self._position_commanded:
                 raise ControlError("Move or center the servos before saving a calibration point")
             record = CalibrationPoint(point, pixel_x, pixel_y, self._pan, self._tilt)
+            self._calibration.save(record)
+            return record
+
+    def select_calibration_point(self, point: int) -> int:
+        """Select the one server-side calibration point shared by every client."""
+
+        if isinstance(point, bool) or not isinstance(point, int) or not 1 <= point <= 9:
+            raise ValueError("Calibration point must be an integer from 1 to 9")
+        with self._lock:
+            self._active_calibration_point = point
+            return point
+
+    def save_active_calibration_point(
+        self,
+        *,
+        pixel_x: int | None = None,
+        pixel_y: int | None = None,
+    ) -> CalibrationPoint:
+        """Save the active point using the backend's current commanded position."""
+
+        with self._lock:
+            if not self._position_commanded:
+                raise ControlError("Move or center the servos before saving a calibration point")
+            record = CalibrationPoint(
+                self._active_calibration_point,
+                pixel_x,
+                pixel_y,
+                self._pan,
+                self._tilt,
+            )
             self._calibration.save(record)
             return record
 

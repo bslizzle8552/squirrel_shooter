@@ -383,14 +383,25 @@ def create_app(
         if not isinstance(payload, dict):
             return jsonify(error="A JSON request body is required", control=manual_control.status()), 400
         try:
-            point = manual_control.save_calibration_point(
-                payload.get("point"),
+            point = manual_control.save_active_calibration_point(
                 pixel_x=payload.get("pixel_x"),
                 pixel_y=payload.get("pixel_y"),
             )
         except Exception as exc:
             return manual_control_error(exc)
         return jsonify(calibration_point=asdict(point), control=manual_control.status())
+
+    @app.post("/api/manual-control/calibration/active")
+    def api_manual_control_active_calibration() -> Any:
+        require_manual_control_token()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="A JSON request body is required", control=manual_control.status()), 400
+        try:
+            manual_control.select_calibration_point(payload.get("point"))
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(control=manual_control.status())
 
     @app.get("/captures")
     def captures() -> str:

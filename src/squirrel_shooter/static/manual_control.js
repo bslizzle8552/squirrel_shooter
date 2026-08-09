@@ -4,8 +4,10 @@
   if (!cfg) { return; }
 
   var selectedStep = cfg.initial.default_step;
-  var selectedCalibrationPoint = 1;
+  var selectedCalibrationPoint = cfg.initial.active_calibration_point;
   var requestPending = false;
+  var refreshPending = false;
+  var stateRevision = 0;
   var control = cfg.initial;
   var toastTimer = null;
   var els = {
@@ -17,6 +19,7 @@
     servoNote: document.getElementById('servo-note'),
     positionNote: document.getElementById('position-note'),
     valveNote: document.getElementById('valve-note'),
+    activePoint: document.getElementById('active-calibration-point'),
     point: document.getElementById('calibration-point'),
     save: document.getElementById('save-calibration'),
     savedCount: document.getElementById('saved-count'),
@@ -54,8 +57,10 @@
   }
 
   function renderCalibration(next) {
+    selectedCalibrationPoint = next.active_calibration_point;
     var savedCount = next.calibration_points.length;
     var selected = calibrationRecord(next, selectedCalibrationPoint);
+    els.activePoint.textContent = selectedCalibrationPoint;
     els.savedCount.textContent = 'Calibration: ' + savedCount + ' / 9';
     els.calibrationComplete.hidden = savedCount !== 9;
     els.calibrationButtons.forEach(function (button) {
@@ -103,6 +108,7 @@
 
   async function requestJson(url, body) {
     requestPending = true;
+    stateRevision += 1;
     render(control);
     try {
       var response = await fetch(url, {
@@ -140,10 +146,11 @@
     button.addEventListener('click', function () { move(button.dataset.direction); });
   });
   els.calibrationButtons.forEach(function (button) {
-    button.addEventListener('click', function () {
-      selectedCalibrationPoint = Number(button.dataset.calibrationPoint);
+    button.addEventListener('click', async function () {
+      if (requestPending) { return; }
       els.calibrationConfirmation.hidden = true;
-      renderCalibration(control);
+      try { await requestJson(cfg.urls.activeCalibration, {point: Number(button.dataset.calibrationPoint)}); }
+      catch (error) { showToast(error.message); }
     });
   });
   els.fire.addEventListener('click', async function () {
@@ -154,7 +161,7 @@
   els.save.addEventListener('click', async function () {
     try {
       var updating = Boolean(calibrationRecord(control, selectedCalibrationPoint));
-      var payload = await requestJson(cfg.urls.calibration, {point: selectedCalibrationPoint, pixel_x: null, pixel_y: null});
+      var payload = await requestJson(cfg.urls.calibration, {pixel_x: null, pixel_y: null});
       showCalibrationConfirmation(payload.calibration_point, updating);
       showToast('Point ' + payload.calibration_point.point + (updating ? ' updated' : ' saved') + ' — pan ' + payload.calibration_point.pan + '°, tilt ' + payload.calibration_point.tilt + '°.');
     } catch (error) { showToast(error.message); }
@@ -167,11 +174,18 @@
   });
 
   async function refresh() {
+    if (requestPending || refreshPending) { return; }
+    var revision = stateRevision;
+    refreshPending = true;
     try {
       var response = await fetch(cfg.urls.status, {cache: 'no-store'});
-      if (response.ok) { var payload = await response.json(); render(payload.control); }
+      if (response.ok) {
+        var payload = await response.json();
+        if (!requestPending && revision === stateRevision) { render(payload.control); }
+      }
     } catch (_error) { /* Keep the last known state during a brief network interruption. */ }
+    finally { refreshPending = false; }
   }
   render(control);
-  window.setInterval(refresh, 250);
+  window.setInterval(refresh, cfg.pollIntervalMs);
 }());
