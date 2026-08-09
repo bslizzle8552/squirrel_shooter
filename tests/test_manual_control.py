@@ -89,6 +89,7 @@ def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> No
     service, pan_tilt, _ = make_service(tmp_path)
 
     assert service.status()["pan"] == service.status()["tilt"] == 85
+    assert service.status()["position_commanded"] is False
     assert service.move("up", 3) == PanTiltPosition(85, 88)
     assert service.move("left", 5) == PanTiltPosition(80, 88)
     for _ in range(30):
@@ -98,6 +99,14 @@ def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> No
     assert pan_tilt.moves[-1] == PanTiltPosition(150, 70)
     assert service.move("center", 3) == PanTiltPosition(85, 85)
     assert service.status()["pan"] == service.status()["tilt"] == 85
+    assert service.status()["position_commanded"] is True
+
+
+def test_calibration_rejects_uncommanded_startup_reference(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Move or center"):
+        service.save_calibration_point(1)
 
 
 def test_fire_cooldown_is_server_side_and_movement_remains_available(tmp_path: Path) -> None:

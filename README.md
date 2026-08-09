@@ -187,7 +187,9 @@ The existing Flask dashboard serves `/manual-control`. The large D-pad and
 desktop arrow keys share the same server endpoint and the same limit enforcement.
 The selected step defaults to 3° and can be changed to 5°. CENTER commands both
 axes to 85°. Displayed angles are software-commanded positions, not servo
-feedback.
+feedback. Before the first movement, 85°/85° is visibly identified as an
+uncommanded startup reference; calibration cannot be saved until the operator
+first moves or centers the head.
 
 All physical control paths pass through one serialized coordinator. Its shared
 future pipeline is target, move, settle, fire, cooldown. Manual movement is still
@@ -233,7 +235,7 @@ python -m pytest
 The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
 weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
 installing them under the ignored `models/` directory. Expected test result for
-this revision: **136 passed** without opening the USB camera. Then stop any old
+this revision: **137 passed** without opening the USB camera. Then stop any old
 dashboard, preview, recorder, or watcher process that already owns the camera and
 start the complete system:
 

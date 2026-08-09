@@ -172,6 +172,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'aria-label="Pan left"' in page.data
     assert b'id="fire-button"' in page.data
     assert b"Commanded positions only" in page.data
+    assert b"startup reference" in page.data
     assert client.post("/api/manual-control/move", json={"direction": "right", "step": 3}).status_code == 403
 
     moved = client.post("/api/manual-control/move", json={"direction": "right", "step": 3}, headers=headers)

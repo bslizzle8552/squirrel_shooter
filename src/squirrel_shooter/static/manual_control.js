@@ -14,6 +14,7 @@
     fire: document.getElementById('fire-button'),
     fireStatus: document.getElementById('fire-status'),
     servoNote: document.getElementById('servo-note'),
+    positionNote: document.getElementById('position-note'),
     valveNote: document.getElementById('valve-note'),
     point: document.getElementById('calibration-point'),
     save: document.getElementById('save-calibration'),
@@ -44,8 +45,10 @@
     els.fire.disabled = !next.valve_available || busy || remaining > 0;
     els.fireStatus.textContent = !next.valve_available ? 'VALVE NOT CONFIGURED' : (remaining > 0 ? 'READY IN ' + remaining + 's' : (busy ? next.state : 'READY'));
     els.servoNote.hidden = next.servo_available;
+    els.positionNote.hidden = next.position_commanded;
     els.valveNote.hidden = next.valve_available;
     els.savedCount.textContent = next.calibration_points.length + '/9 saved';
+    els.save.disabled = requestPending || !next.servo_available || !next.position_commanded;
   }
 
   async function requestJson(url, body) {

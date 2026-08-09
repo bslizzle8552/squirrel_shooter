@@ -189,6 +189,7 @@ class ManualControlService:
         self._transient_state: ControlState | None = None
         self._pan = float(pan_tilt_config.pan_center)
         self._tilt = float(pan_tilt_config.tilt_center)
+        self._position_commanded = False
         self._last_fire_completed_at: float | None = None
         self._servo_error = servo_error
         self._valve_error = valve_error
@@ -215,6 +216,7 @@ class ManualControlService:
             "state": state.value,
             "pan": self._display_angle(self._pan),
             "tilt": self._display_angle(self._tilt),
+            "position_commanded": self._position_commanded,
             "pan_min": self.pan_tilt_config.pan_min,
             "pan_max": self.pan_tilt_config.pan_max,
             "tilt_min": self.pan_tilt_config.tilt_min,
@@ -281,6 +283,8 @@ class ManualControlService:
         pixel_y: int | None = None,
     ) -> CalibrationPoint:
         with self._lock:
+            if not self._position_commanded:
+                raise ControlError("Move or center the servos before saving a calibration point")
             record = CalibrationPoint(point, pixel_x, pixel_y, self._pan, self._tilt)
             self._calibration.save(record)
             return record
@@ -303,6 +307,7 @@ class ManualControlService:
                 settling_delay_seconds=0,
             )
             self._pan, self._tilt = result.pan, result.tilt
+            self._position_commanded = True
             self._transient_state = ControlState.SETTLING
             if self.pan_tilt_config.settling_delay_seconds:
                 self._sleep(self.pan_tilt_config.settling_delay_seconds)

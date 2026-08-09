@@ -26,6 +26,7 @@
         <div><span>Pan</span><strong><b id="pan-angle">{{ control.pan }}</b>°</strong></div>
         <div><span>Tilt</span><strong><b id="tilt-angle">{{ control.tilt }}</b>°</strong></div>
       </div>
+      <p class="position-note" id="position-note" {% if control.position_commanded %}hidden{% endif %}>85° / 85° is the startup reference. Press CENTER or move once before treating it as commanded.</p>
 
       <div class="card-heading aim-heading">
         <div><p class="eyebrow">Touch or arrow keys</p><h2 id="aim-title">Aim</h2></div>
@@ -66,7 +67,7 @@
         <select id="calibration-point">
           {% for point in range(1, 10) %}<option value="{{ point }}">Point {{ point }}</option>{% endfor %}
         </select>
-        <button type="button" id="save-calibration">Save current angles</button>
+        <button type="button" id="save-calibration" {% if not control.position_commanded %}disabled{% endif %}>Save current angles</button>
       </div>
       <p>Pixel coordinates remain empty until camera-image point selection is added. Saving the same point replaces it.</p>
     </section>
