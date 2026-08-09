@@ -9,9 +9,12 @@ Branch: `manual-control`. Do not merge into `main` without explicit authorizatio
 - Raspberry Pi physical pin 20: GND.
 - Software configuration must use `gpio_pin: 24`, not physical pin number 18.
 - `active_high: true` remains required so the safe closed command is LOW.
-- `valve.enabled: false` remains the checked-in default until supervised hardware testing.
+- `valve.enabled: true` is now checked in for supervised dry-fire testing.
+- The controlled test pulse remains 0.25 seconds, followed by the backend-enforced 10-second cooldown.
 
-No GPIO, MOSFET, solenoid, water flow, or servo direction was physically tested during this software pass because the Pi was powered off.
+Supervised hardware commissioning has begun. The owner has physically verified that the manual web controls load and that CENTER and manual servo movement work at the installed unit. Power wiring, the MOSFET, and the normally closed solenoid are connected. Water remains disconnected for the first dry-fire.
+
+The solenoid has not yet been fired. Do not treat solenoid energizing, release, or water operation as physically verified until the owner records those results.
 
 ## Two-device calibration workflow
 
@@ -69,19 +72,16 @@ Do not implement interpolation or a parallel servo, valve, calibration, or firin
 
 ## Remaining supervised hardware verification
 
-1. Keep the 12 V solenoid supply disconnected and confirm startup causes no servo movement.
-2. Press CENTER and verify physical 85-degree/85-degree alignment.
-3. Verify one small UP, DOWN, LEFT, and RIGHT command from the phone, stopping immediately if a direction is wrong or hardware binds.
-4. Verify the existing pan and tilt limits conservatively.
-5. Confirm physical pin 18, BCM GPIO24, is LOW at startup while `valve.enabled` is false.
-6. Enable the valve only for a supervised test with an immediate power shutoff available.
-7. With 12 V valve power still disconnected, verify one 0.25-second GPIO signal and the full 10-second backend cooldown on both phone and desktop.
-8. Confirm refreshes and repeated FIRE requests cannot bypass cooldown while servo aiming still works.
-9. Connect the safely directed water system and perform one supervised short pulse.
-10. Tune pulse duration and settling delay conservatively if needed.
-11. For each of the nine targets, select on desktop, aim/test from phone, and save on desktop only after the water hit is correct.
+The next physical test is one single supervised FIRE command with water still disconnected:
 
-Physical testing remains required before treating servo direction, endpoint clearance, GPIO behavior, MOSFET switching, solenoid operation, or water placement as verified.
+1. Keep an immediate 12 V power shutoff available and confirm the water supply remains disconnected.
+2. Start the updated application and confirm there is no solenoid actuation at startup; the active-high BCM GPIO24 output must remain LOW/OFF until FIRE.
+3. Open `/manual-control`, confirm the FIRE control reports `READY`, and press FIRE exactly once.
+4. Observe and listen for the solenoid to energize and release during the single 0.25-second pulse.
+5. Confirm the page enters the 10-second cooldown and that refreshes or repeated FIRE requests do not bypass it. Servo aiming may remain available during cooldown.
+6. Record whether both the energize click and release click occurred. Do not connect water or tune the pulse in this test.
+
+After that result is recorded, plan the next supervised step separately. Physical testing remains required before treating solenoid operation or water placement as verified.
 
 ## Repository boundary
 

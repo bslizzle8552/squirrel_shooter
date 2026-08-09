@@ -46,7 +46,7 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.manual_control.default_step_degrees == 3
     assert config.manual_control.fire_pulse_seconds == 0.25
     assert config.manual_control.fire_cooldown_seconds == 10.0
-    assert config.valve == ValveConfig(enabled=False, gpio_pin=24, active_high=True)
+    assert config.valve == ValveConfig(enabled=True, gpio_pin=24, active_high=True)
     assert config.motion.min_blob_area == 500
     assert config.motion.inclusion_zone.enabled is True
     assert config.motion.inclusion_zone.polygon == (

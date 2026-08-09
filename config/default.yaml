@@ -84,20 +84,20 @@ pan_tilt:
   release_pwm_after_movement: false
   park_on_cleanup: true
 
-# Phone/desktop manual aiming foundation. The 0.25 second valve pulse is a
-# conservative placeholder that MUST be tuned with supervised garden testing.
+# Phone/desktop manual aiming foundation. Keep the conservative 0.25 second
+# valve pulse unchanged until the supervised dry-fire result is recorded.
 manual_control:
   servo_enabled: true
   default_step_degrees: 3
   allowed_step_degrees: [3, 5]
-  fire_pulse_seconds: 0.25  # TODO: tune tomorrow with water connected safely
+  fire_pulse_seconds: 0.25
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
 
 # Physically traced MOSFET signal: Raspberry Pi physical pin 18 is BCM GPIO24;
-# physical pin 20 is GND. Keep disabled until supervised hardware testing.
+# physical pin 20 is GND. Enabled for supervised dry-fire with water disconnected.
 valve:
-  enabled: false
+  enabled: true
   gpio_pin: 24
   active_high: true
 

@@ -177,6 +177,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"<span>Up</span>" not in page.data
     assert b"<span>Down</span>" not in page.data
     assert b'id="fire-button"' in page.data
+    assert b'id="fire-button" disabled' not in page.data
+    assert b'id="fire-status">READY<' in page.data
     assert b"Commanded positions only" in page.data
     assert b"startup reference" in page.data
     assert b"Calibration: 0 / 9" in page.data

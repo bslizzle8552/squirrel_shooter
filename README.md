@@ -197,7 +197,9 @@ allowed during valve cooldown, but movement and firing can never overlap. FIRE
 produces one configured pulse and then enforces the full cooldown on the server,
 so refreshing or double-tapping the page cannot bypass it.
 
-The valve remains unavailable with the checked-in defaults:
+Supervised hardware commissioning has begun. The owner has physically verified
+the manual web controls and servos, and the checked-in configuration now enables
+the valve for the first supervised dry-fire with water disconnected:
 
 ```yaml
 manual_control:
@@ -206,15 +208,16 @@ manual_control:
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
 valve:
-  enabled: false
+  enabled: true
   gpio_pin: 24
   active_high: true
 ```
 
 The MOSFET signal has been physically traced: Raspberry Pi physical pin 18 is
 BCM GPIO24, and physical pin 20 is GND. Software uses BCM numbering, so the
-configured value is `24`, never `18`. Keep `valve.enabled: false` until supervised
-hardware testing. Startup and cleanup command the output OFF/LOW.
+configured value is `24`, never `18`. Startup and cleanup command the output
+OFF/LOW. The current pulse remains 0.25 seconds and the server-enforced cooldown
+remains 10 seconds. Solenoid operation has not yet been physically verified.
 
 The calibration page presents the nine physical targets as a 3×3 checklist. It
 shows saved points in green, highlights the active point, displays progress from

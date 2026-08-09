@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -159,9 +160,11 @@ def test_fire_cooldown_is_server_side_and_movement_remains_available(tmp_path: P
 
 def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:
     events: list[str] = []
+    delays: list[float] = []
     service: ManualControlService
 
     def sleep(seconds: float) -> None:
+        delays.append(seconds)
         events.append("settle" if seconds == 0.15 else "pulse")
 
     service, _, _ = make_service(tmp_path, sleep=sleep, events=events)
@@ -169,6 +172,60 @@ def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:
 
     assert result == PanTiltPosition(150, 70)
     assert events == ["move", "settle", "close", "open", "pulse", "close"]
+    assert delays == [0.15, 0.25]
+
+
+def test_fire_and_movement_are_serialized(tmp_path: Path) -> None:
+    events: list[str] = []
+    fire_started = threading.Event()
+    release_fire = threading.Event()
+    move_started = threading.Event()
+    move_finished = threading.Event()
+    failures: list[Exception] = []
+
+    def controlled_sleep(seconds: float) -> None:
+        if seconds == 0.25:
+            events.append("pulse")
+            fire_started.set()
+            assert release_fire.wait(timeout=1)
+        else:
+            assert seconds == 0.15
+            events.append("settle")
+
+    service, _, _ = make_service(tmp_path, sleep=controlled_sleep, events=events)
+
+    def fire() -> None:
+        try:
+            service.fire()
+        except Exception as exc:
+            failures.append(exc)
+
+    def move() -> None:
+        move_started.set()
+        try:
+            service.move("left", 3)
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            move_finished.set()
+
+    fire_thread = threading.Thread(target=fire)
+    move_thread = threading.Thread(target=move)
+    fire_thread.start()
+    assert fire_started.wait(timeout=1)
+    move_thread.start()
+    assert move_started.wait(timeout=1)
+    assert not move_finished.wait(timeout=0.05)
+    assert "move" not in events
+
+    release_fire.set()
+    fire_thread.join(timeout=1)
+    move_thread.join(timeout=1)
+
+    assert not fire_thread.is_alive()
+    assert not move_thread.is_alive()
+    assert failures == []
+    assert events == ["close", "open", "pulse", "close", "move", "settle"]
 
 
 def test_status_exposes_moving_settling_and_firing_states(tmp_path: Path) -> None:
