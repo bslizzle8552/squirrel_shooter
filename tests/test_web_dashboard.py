@@ -186,6 +186,9 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="calibration-image"' in page.data
     assert b'id="calibration-marker"' in page.data
     assert b'id="pixel-selection-status"' in page.data
+    assert b'id="save-calibration"' in page.data
+    assert b'id="save-aim-action">SAVE AIM<' in page.data
+    assert b"current backend aim for Point 1" in page.data
     assert page.data.count(b"data-calibration-point=") == 9
     assert b"Not started" in page.data
     assert b'id="calibration-confirmation"' in page.data
@@ -218,6 +221,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="calibration-detail-pixel-x">640<' in partial_page.data
     assert b'id="calibration-detail-pixel-y">360<' in partial_page.data
     assert b'id="calibration-detail-pan">Not saved<' in partial_page.data
+    assert b'id="save-aim-action">SAVE AIM<' in partial_page.data
 
     moved = client.post("/api/manual-control/move", json={"direction": "right", "step": 3}, headers=headers)
     assert moved.status_code == 200
@@ -253,6 +257,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="calibration-detail-point">1<' in saved_page.data
     assert b'id="calibration-detail-pixel-x">640<' in saved_page.data
     assert 'id="calibration-detail-pan">79.0°<'.encode("utf-8") in saved_page.data
+    assert b'id="save-aim-action">UPDATE AIM<' in saved_page.data
 
     for point in range(2, 10):
         selected = client.post(
@@ -321,7 +326,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert manual_script.status_code == 200
     assert manual_style.status_code == 200
     assert b"showCalibrationConfirmation" in manual_script.data
-    assert b" updated" in manual_script.data and b" saved" in manual_script.data
+    assert b"'UPDATE AIM' : 'SAVE AIM'" in manual_script.data
+    assert b"aim " in manual_script.data and b"updated" in manual_script.data and b"saved" in manual_script.data
     assert b"ArrowUp: 'up'" in manual_script.data
     assert b"ArrowDown: 'down'" in manual_script.data
     assert b"ArrowLeft: 'left'" in manual_script.data
@@ -334,6 +340,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'grid-template-areas: "aim" "fire" "camera"' in manual_style.data
     assert b".calibration-card { display: none; }" in manual_style.data
     assert b".calibration-marker" in manual_style.data
+    assert b".save-aim-button" in manual_style.data
 
 
 def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stale_point(tmp_path: Path) -> None:

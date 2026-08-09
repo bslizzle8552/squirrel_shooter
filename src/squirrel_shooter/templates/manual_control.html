@@ -70,7 +70,7 @@
       {% set selected_record = namespace(value=none) %}
       {% for record in control.calibration_points %}{% if record.point == active_point %}{% set selected_record.value = record %}{% endif %}{% endfor %}
       <div class="card-heading">
-        <div><p class="eyebrow">Desktop calibration console</p><h2 id="calibration-title">Save calibration point</h2></div>
+        <div><p class="eyebrow">Desktop calibration console</p><h2 id="calibration-title">Finalize calibration aim</h2></div>
         <strong class="calibration-progress" id="saved-count">Calibration: {{ control.completed_calibration_count }} / 9</strong>
       </div>
       <p class="calibration-complete" id="calibration-complete" {% if control.completed_calibration_count != 9 %}hidden{% endif %}>All nine blocks have camera pixels and saved aim. Data collection is complete; interpolation is not yet configured.</p>
@@ -84,7 +84,11 @@
       </div>
       <div class="calibration-actions">
         <input type="hidden" id="calibration-point" value="{{ active_point }}">
-        <button type="button" id="save-calibration" {% if not control.position_commanded or not selected_record.value or not selected_record.value.pixel_selected %}disabled{% endif %}>{{ 'Update point ' if active_point in complete_points else 'Save point ' }}{{ active_point }}</button>
+        <p class="save-aim-instruction">After the water hits the active block, store the current backend-commanded Pan/Tilt with its selected pixel.</p>
+        <button type="button" class="save-aim-button" id="save-calibration" aria-label="{{ 'Update' if selected_record.value and selected_record.value.aim_saved else 'Save' }} current backend aim for Point {{ active_point }}" {% if not control.position_commanded or not selected_record.value or not selected_record.value.pixel_selected %}disabled{% endif %}>
+          <span class="save-aim-action" id="save-aim-action">{{ 'UPDATE AIM' if selected_record.value and selected_record.value.aim_saved else 'SAVE AIM' }}</span>
+          <span class="save-aim-point" id="save-aim-point">Point {{ active_point }} · current Pan/Tilt</span>
+        </button>
       </div>
       <div class="calibration-confirmation" id="calibration-confirmation" role="status" aria-live="polite" hidden>
         <strong id="calibration-confirmation-title"></strong>

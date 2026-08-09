@@ -27,6 +27,8 @@
     activePoint: document.getElementById('active-calibration-point'),
     point: document.getElementById('calibration-point'),
     save: document.getElementById('save-calibration'),
+    saveAction: document.getElementById('save-aim-action'),
+    savePoint: document.getElementById('save-aim-point'),
     savedCount: document.getElementById('saved-count'),
     calibrationComplete: document.getElementById('calibration-complete'),
     calibrationButtons: document.querySelectorAll('[data-calibration-point]'),
@@ -120,7 +122,10 @@
       button.querySelector('.calibration-point-state').textContent = saved ? 'Calibrated' : (pixelSelected ? 'Pixel set' : (aimSaved ? 'Aim saved' : 'Not started'));
     });
     els.point.value = selectedCalibrationPoint;
-    els.save.textContent = (selected && selected.complete ? 'Update point ' : 'Save point ') + selectedCalibrationPoint;
+    var updatingAim = Boolean(selected && selected.aim_saved);
+    els.saveAction.textContent = updatingAim ? 'UPDATE AIM' : 'SAVE AIM';
+    els.savePoint.textContent = 'Point ' + selectedCalibrationPoint + ' · current Pan/Tilt';
+    els.save.setAttribute('aria-label', (updatingAim ? 'Update' : 'Save') + ' current backend aim for Point ' + selectedCalibrationPoint);
     els.save.disabled = requestPending || !next.servo_available || !next.position_commanded || !selected || !selected.pixel_selected;
     els.detailPoint.textContent = selectedCalibrationPoint;
     els.detailPixelX.textContent = selected ? storedPixel(selected.pixel_x) : 'Not recorded (null)';
@@ -131,7 +136,7 @@
   }
 
   function showCalibrationConfirmation(record, updated) {
-    els.calibrationConfirmationTitle.textContent = 'Point ' + record.point + (updated ? ' updated' : ' saved');
+    els.calibrationConfirmationTitle.textContent = 'Point ' + record.point + ' aim ' + (updated ? 'updated' : 'saved');
     els.calibrationConfirmationPan.textContent = record.pan;
     els.calibrationConfirmationTilt.textContent = record.tilt;
     els.calibrationConfirmation.hidden = false;
@@ -225,7 +230,7 @@
       var updating = Boolean(selected && selected.aim_saved);
       var payload = await requestJson(cfg.urls.calibration, {});
       showCalibrationConfirmation(payload.calibration_point, updating);
-      showToast('Point ' + payload.calibration_point.point + (updating ? ' updated' : ' saved') + ' — pan ' + payload.calibration_point.pan + '°, tilt ' + payload.calibration_point.tilt + '°.');
+      showToast('Point ' + payload.calibration_point.point + ' aim ' + (updating ? 'updated' : 'saved') + ' — pan ' + payload.calibration_point.pan + '°, tilt ' + payload.calibration_point.tilt + '°.');
     } catch (error) { showToast(error.message); }
   });
   document.addEventListener('keydown', function (event) {

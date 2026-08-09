@@ -59,7 +59,7 @@ The active point is server-side state, not browser-local state. Selecting a poin
 
 Selecting a point shows its stored point number, pixel X/Y, pan, and tilt. Clicking the image creates or updates the pixel half of that same point without saving aim or advancing the active point. Re-clicking replaces its pixel coordinates and never creates a duplicate.
 
-SAVE uses the backend's active point and current backend-commanded pan/tilt values. A stale point, pixel, or angle value from an older browser page is not trusted. SAVE preserves the active point's latest backend-stored pixel coordinates and adds or updates pan/tilt. Saving again updates the same record without creating a duplicate.
+The desktop calibration card has a prominent full-width `SAVE AIM` button. Once aim exists for that point, its label becomes `UPDATE AIM`. The control uses the backend's active point and current backend-commanded pan/tilt values; a stale point, pixel, or angle value from an older browser page is not trusted. It preserves the active point's latest backend-stored pixel coordinates and adds or updates pan/tilt. Updating writes the same record without creating a duplicate. Success feedback names the point and shows saved Pan/Tilt while the pixel coordinates remain visible.
 
 Calibration cannot be saved until a pixel has been selected and CENTER or another real servo command has occurred. The startup 85°/85° display remains an uncommanded reference.
 
@@ -85,8 +85,8 @@ The nine blocks replace the earlier painted-X marker concept; the calibration ge
 4. Go outside with the phone and manually aim using the D-pad.
 5. FIRE the normal 0.25-second pulse and observe the water landing point.
 6. Adjust aim while the backend-enforced 10-second cooldown runs; fire again only when ready.
-7. Once the water hits the block, press SAVE on desktop.
-8. SAVE preserves the pixel and records the current backend-commanded pan/tilt; the point becomes green and fully calibrated.
+7. Once the water hits the block, press `SAVE AIM` on desktop.
+8. `SAVE AIM` preserves the pixel and records the current backend-commanded pan/tilt; the point becomes green and fully calibrated. Repeating the process for that point uses `UPDATE AIM`.
 9. Select the next point and repeat through all nine blocks.
 
 Interpolation, homography, polynomial fitting, pixel-to-pan/tilt mapping, point-and-click firing, and autonomous firing remain intentionally unimplemented.
