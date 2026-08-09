@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator
 
 import cv2
@@ -147,6 +148,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     now = [100.0]
     pan_tilt = PanTiltController(config.pan_tilt, driver=ManualControlDriver(), sleep=lambda _seconds: None)
     valve = GPIOValveController(ValveConfig(enabled=True, gpio_pin=17), output=ManualControlOutput())
+    recordings: list[object] = []
+    recorder = SimpleNamespace(record=recordings.append, close=lambda: None)
     controls = ManualControlService(
         config.pan_tilt,
         config.manual_control,
@@ -154,6 +157,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         valve=valve,
         sleep=lambda _seconds: None,
         clock=lambda: now[0],
+        fire_recorder=recorder,  # type: ignore[arg-type]
     )
     app = create_app(
         app_config=config,
@@ -204,6 +208,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert page.data.count(b"data-calibration-point=") == 9
     assert b"Not started" in page.data
     assert b'id="calibration-confirmation"' in page.data
+    assert client.post("/api/manual-control/fire", json={}).status_code == 403
+    assert recordings == []
     assert client.post("/api/manual-control/move", json={"direction": "right", "step": 3}).status_code == 403
     assert client.post(
         "/api/manual-control/calibration/pixel",
@@ -266,7 +272,9 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert fired.json["control"]["pan"] == 85
     assert fired.json["control"]["tilt"] == 88
     assert fired.json["control"]["targeting"]["status"] == "PARKED"
+    assert len(recordings) == 1
     assert client.post("/api/manual-control/fire", json={}, headers=headers).status_code == 409
+    assert len(recordings) == 1
 
     during_cooldown = client.post(
         "/api/manual-control/move",
@@ -721,6 +729,45 @@ def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> No
     assert second.count('class="capture-card event-card"') == 1
     assert "Event saved-event-00" in second
     assert "Generated review report" in first and "picture archive" in first
+
+
+def test_event_archive_uses_zoom_clip_as_primary_manual_fire_replay(tmp_path: Path) -> None:
+    config_path = write_test_config(tmp_path)
+    directory = tmp_path / "captures" / "events" / "2026-08-09" / "manual-fire-test"
+    directory.mkdir(parents=True)
+    snapshot = directory / "snapshot.jpg"
+    zoom = directory / "manual_fire_zoom.avi"
+    full = directory / "manual_fire_full.avi"
+    for path in (snapshot, zoom, full):
+        path.write_bytes(b"evidence")
+    (directory / "event.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "event_id": "manual-fire-test",
+                "capture_method": "manual_fire",
+                "start_timestamp": "2026-08-09T19:32:00-04:00",
+                "provisional_category": "manual_fire",
+                "snapshot_path": str(snapshot),
+                "clip_path": str(zoom),
+                "full_frame_clip_path": str(full),
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(
+        config_path,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(),  # type: ignore[arg-type]
+        temperature_reader=lambda: 44.0,
+    )
+    app.config.update(TESTING=True)
+
+    body = app.test_client().get("/events").get_data(as_text=True)
+    assert "Manual fire" in body
+    assert "manual_fire_zoom.avi" in body
+    assert "manual_fire_full.avi" in body
+    assert "Full-field clip" in body
 
 
 def test_dashboard_logo_is_packaged_and_served(dashboard: tuple[Flask, Path, OfflineCameraService, StaticVisionService]) -> None:

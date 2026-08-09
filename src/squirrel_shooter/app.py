@@ -42,6 +42,13 @@ class ApplicationRuntime:
             shared_settings=config.shared_camera,
             jpeg_quality=config.dashboard.jpeg_quality,
             encode_jpeg=True,
+            frame_buffer_seconds=(
+                config.manual_control.recording.pre_roll_seconds
+                + config.manual_control.fire_pulse_seconds
+                + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
+                if config.manual_control.recording.enabled
+                else 0.0
+            ),
         )
         self.motion = motion or MotionProcessingService(self.camera, config)
         self._lock = threading.Lock()
@@ -153,7 +160,13 @@ def run(config: AppConfig) -> int:
     runtime.start()
     try:
         if config.dashboard.enabled:
-            manual_control = build_manual_control_service(config.pan_tilt, config.manual_control, config.valve)
+            manual_control = build_manual_control_service(
+                config.pan_tilt,
+                config.manual_control,
+                config.valve,
+                camera_service=runtime.camera,
+                output_directory=config.camera.output_directory,
+            )
             flask_app = create_app(
                 app_config=config,
                 camera_service=runtime.camera,

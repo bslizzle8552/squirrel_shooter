@@ -96,6 +96,27 @@ def test_shared_runtime_publishes_raw_and_annotated_frames(tmp_path: Path) -> No
     assert released.is_set()
 
 
+def test_shared_camera_keeps_compact_decodable_manual_fire_pre_roll(tmp_path: Path) -> None:
+    released = threading.Event()
+    raw = np.full((36, 64, 3), 80, dtype=np.uint8)
+    service = CameraService(
+        CameraConfig(0, 64, 36, 30, tmp_path),
+        capture_factory=lambda _: ContinuousCapture(raw, released),
+        platform_checker=lambda: True,
+        encode_jpeg=False,
+        frame_buffer_seconds=0.2,
+    )
+    service.start()
+    try:
+        wait_until(lambda: service.status().frames_received >= 3)
+        frames = list(service.buffered_frames(0.0))
+        assert frames
+        assert all(packet.frame.shape == raw.shape for packet in frames)
+        assert [packet.sequence for packet in frames] == sorted(packet.sequence for packet in frames)
+    finally:
+        service.stop()
+
+
 def test_live_stream_holds_last_seen_box_during_tracker_gap(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
     motion = MotionProcessingService(SimpleNamespace(), config)  # type: ignore[arg-type]

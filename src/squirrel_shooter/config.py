@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from .manual_control import ManualControlConfig
+from .manual_fire_recording import ManualFireRecordingConfig
 from .pan_tilt import PanTiltConfig
 from .valve import ValveConfig
 
@@ -426,6 +427,10 @@ def _manual_control_config(raw: dict[str, Any]) -> ManualControlConfig:
     steps = raw.get("allowed_step_degrees", list(defaults.allowed_step_degrees))
     if not isinstance(steps, list):
         raise ConfigError("manual_control.allowed_step_degrees must be a list")
+    recording_raw = raw.get("recording", {})
+    if not isinstance(recording_raw, dict):
+        raise ConfigError("manual_control.recording must be a mapping")
+    recording_defaults = defaults.recording
     try:
         return ManualControlConfig(
             servo_enabled=_bool(raw.get("servo_enabled", defaults.servo_enabled), "manual_control.servo_enabled"),
@@ -450,6 +455,51 @@ def _manual_control_config(raw: dict[str, Any]) -> ManualControlConfig:
             calibration_file=_path(
                 raw.get("calibration_file", str(defaults.calibration_file)),
                 "manual_control.calibration_file",
+            ),
+            recording=ManualFireRecordingConfig(
+                enabled=_bool(
+                    recording_raw.get("enabled", recording_defaults.enabled),
+                    "manual_control.recording.enabled",
+                ),
+                pre_roll_seconds=_number(
+                    recording_raw.get("pre_roll_seconds", recording_defaults.pre_roll_seconds),
+                    "manual_control.recording.pre_roll_seconds",
+                ),
+                post_roll_seconds=_number(
+                    recording_raw.get("post_roll_seconds", recording_defaults.post_roll_seconds),
+                    "manual_control.recording.post_roll_seconds",
+                    exclusive=True,
+                ),
+                zoom_factor=_number(
+                    recording_raw.get("zoom_factor", recording_defaults.zoom_factor),
+                    "manual_control.recording.zoom_factor",
+                    minimum=1.0,
+                    exclusive=True,
+                ),
+                crop_center_x=(
+                    None
+                    if recording_raw.get("crop_center_x", recording_defaults.crop_center_x) is None
+                    else _int(
+                        recording_raw.get("crop_center_x", recording_defaults.crop_center_x),
+                        "manual_control.recording.crop_center_x",
+                    )
+                ),
+                crop_center_y=(
+                    None
+                    if recording_raw.get("crop_center_y", recording_defaults.crop_center_y) is None
+                    else _int(
+                        recording_raw.get("crop_center_y", recording_defaults.crop_center_y),
+                        "manual_control.recording.crop_center_y",
+                    )
+                ),
+                save_full_frame_clip=_bool(
+                    recording_raw.get("save_full_frame_clip", recording_defaults.save_full_frame_clip),
+                    "manual_control.recording.save_full_frame_clip",
+                ),
+                clip_codec=_text(
+                    recording_raw.get("clip_codec", recording_defaults.clip_codec),
+                    "manual_control.recording.clip_codec",
+                ),
             ),
         )
     except ValueError as exc:

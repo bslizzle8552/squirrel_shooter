@@ -21,6 +21,7 @@ from squirrel_shooter.manual_control import (
     is_target_in_calibrated_area,
     validate_complete_calibration_grid,
 )
+from squirrel_shooter.manual_fire_recording import ManualFireEvent
 from squirrel_shooter.pan_tilt import PanTiltConfig, PanTiltPosition
 from squirrel_shooter.valve import ValveState
 
@@ -72,6 +73,28 @@ class FakeValve:
         self.cleaned = True
 
 
+class FailingOpenValve(FakeValve):
+    def open(self) -> None:
+        self.events.append("open-error")
+        self._state = ValveState.OPEN
+        raise OSError("GPIO open failed")
+
+
+class FakeFireRecorder:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.events: list[ManualFireEvent] = []
+        self.fail = fail
+        self.closed = False
+
+    def record(self, event: ManualFireEvent) -> None:
+        self.events.append(event)
+        if self.fail:
+            raise OSError("recording unavailable")
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def make_service(
     tmp_path: Path,
     *,
@@ -79,6 +102,7 @@ def make_service(
     sleep=lambda _seconds: None,
     events: list[str] | None = None,
     calibration_points: list[CalibrationPoint] | None = None,
+    fire_recorder: FakeFireRecorder | None = None,
 ) -> tuple[ManualControlService, FakePanTilt, FakeValve]:
     pan_config = PanTiltConfig(settling_delay_seconds=0.15)
     control_config = ManualControlConfig(calibration_file=tmp_path / "calibration.json")
@@ -95,6 +119,7 @@ def make_service(
         calibration_store=calibration_store,
         sleep=sleep,
         clock=clock,
+        fire_recorder=fire_recorder,
     )
     return service, pan_tilt, valve
 
@@ -490,6 +515,86 @@ def test_fire_cooldown_is_server_side_and_movement_remains_available(tmp_path: P
     now[0] = 110.0
     assert service.status()["state"] == ControlState.IDLE.value
     service.fire()
+
+
+def test_accepted_manual_fire_records_verified_target_and_rejections_do_not(tmp_path: Path) -> None:
+    now = [100.0]
+    recorder = FakeFireRecorder()
+    service, _, valve = make_service(
+        tmp_path,
+        clock=lambda: now[0],
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    service.aim_at_pixel(150, 150)
+
+    service.fire()
+
+    assert valve.state is ValveState.CLOSED
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert (event.crop_center_x, event.crop_center_y) == (150, 150)
+    assert event.crop_center_source == "calibrated_target_pixel"
+    assert event.fire_pulse_seconds == 0.25
+    with pytest.raises(FireCooldownError):
+        service.fire()
+    assert len(recorder.events) == 1
+    now[0] = 110.0
+    service.move("right", 1)
+    service.fire()
+    assert len(recorder.events) == 2
+    assert (recorder.events[1].crop_center_x, recorder.events[1].crop_center_y) == (640, 360)
+    assert recorder.events[1].crop_center_source == "configured_fixed_fallback"
+
+
+def test_disabled_valve_rejection_does_not_create_recording(tmp_path: Path) -> None:
+    recorder = FakeFireRecorder()
+    config = ManualControlConfig(calibration_file=tmp_path / "calibration.json")
+    service = ManualControlService(PanTiltConfig(), config, fire_recorder=recorder)
+
+    with pytest.raises(ControlError, match="Valve control is disabled"):
+        service.fire()
+
+    assert recorder.events == []
+
+
+def test_recording_start_failure_cannot_break_valve_cooldown_or_coordinator(tmp_path: Path) -> None:
+    recorder = FakeFireRecorder(fail=True)
+    service, pan_tilt, valve = make_service(tmp_path, fire_recorder=recorder)
+
+    service.fire()
+
+    assert valve.state is ValveState.CLOSED
+    assert service.status()["state"] == ControlState.COOLDOWN.value
+    assert service.status()["cooldown_remaining_seconds"] == 10.0
+    assert pan_tilt.moves[-1] == PanTiltPosition(85, 88)
+    assert service.status()["targeting"]["status"] == "PARKED"
+    with pytest.raises(FireCooldownError):
+        service.fire()
+    assert len(recorder.events) == 1
+
+
+def test_valve_hardware_error_does_not_create_successful_recording(tmp_path: Path) -> None:
+    recorder = FakeFireRecorder()
+    pan_config = PanTiltConfig(settling_delay_seconds=0.15)
+    control_config = ManualControlConfig(calibration_file=tmp_path / "calibration.json")
+    valve = FailingOpenValve()
+    service = ManualControlService(
+        pan_config,
+        control_config,
+        pan_tilt=FakePanTilt(pan_config),
+        valve=valve,
+        fire_recorder=recorder,
+        sleep=lambda _seconds: None,
+        clock=lambda: 100.0,
+    )
+
+    with pytest.raises(OSError, match="GPIO open failed"):
+        service.fire()
+
+    assert valve.state is ValveState.CLOSED
+    assert service.status()["state"] == ControlState.COOLDOWN.value
+    assert recorder.events == []
 
 
 def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -65,6 +66,14 @@ class FramePacket:
     received_monotonic: float = 0.0
 
 
+@dataclass(frozen=True)
+class _BufferedJpegFrame:
+    sequence: int
+    jpeg: bytes
+    received_at: str
+    received_monotonic: float
+
+
 class CameraService:
     """Open the camera once, reconnect safely, and publish raw/annotated frames."""
 
@@ -77,6 +86,7 @@ class CameraService:
         platform_checker: Callable[[], bool] = is_raspberry_pi,
         jpeg_quality: int = 80,
         encode_jpeg: bool = True,
+        frame_buffer_seconds: float = 0.0,
     ) -> None:
         self.settings = settings
         self.shared_settings = shared_settings or SharedCameraConfig(
@@ -90,6 +100,9 @@ class CameraService:
         self._platform_checker = platform_checker
         self._jpeg_quality = jpeg_quality
         self._encode_jpeg = encode_jpeg
+        if frame_buffer_seconds < 0:
+            raise ValueError("frame_buffer_seconds must be zero or greater")
+        self._frame_buffer_seconds = float(frame_buffer_seconds)
         self._condition = threading.Condition()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -104,6 +117,7 @@ class CameraService:
         self._latest_raw_jpeg: bytes | None = None
         self._latest_annotated_frame: np.ndarray | None = None
         self._latest_annotated_jpeg: bytes | None = None
+        self._frame_buffer: deque[_BufferedJpegFrame] = deque()
         self._sequence = 0
         self._annotated_sequence = 0
         self._last_annotated_source_sequence = -1
@@ -134,6 +148,7 @@ class CameraService:
             self._latest_raw_jpeg = None
             self._latest_annotated_frame = None
             self._latest_annotated_jpeg = None
+            self._frame_buffer.clear()
             self._last_frame_at = None
             self._last_frame_monotonic = None
             self._last_annotated_at = None
@@ -217,6 +232,23 @@ class CameraService:
                 self._last_frame_at,
                 self._last_frame_monotonic or monotonic(),
             )
+
+    def buffered_frames(self, since_monotonic: float, *, after_sequence: int = -1) -> Iterator[FramePacket]:
+        """Yield decoded copies from the compact rolling JPEG pre-roll buffer."""
+
+        with self._condition:
+            buffered = [
+                item
+                for item in self._frame_buffer
+                if item.received_monotonic >= since_monotonic and item.sequence > after_sequence
+            ]
+        for item in buffered:
+            encoded = np.frombuffer(item.jpeg, dtype=np.uint8)
+            frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+            if frame is None:
+                LOGGER.warning("Could not decode buffered camera frame sequence=%d", item.sequence)
+                continue
+            yield FramePacket(item.sequence, frame, item.received_at, item.received_monotonic)
 
     def publish_annotated(self, source_sequence: int, frame: np.ndarray) -> bool:
         """Publish motion annotations for the dashboard; never touch the camera."""
@@ -343,7 +375,7 @@ class CameraService:
                     height, width = frame.shape[:2]
                     fps = meter.update()
                     jpeg_bytes: bytes | None = None
-                    if self._encode_jpeg:
+                    if self._encode_jpeg or self._frame_buffer_seconds > 0:
                         encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
                         if encoded:
                             jpeg_bytes = jpeg.tobytes()
@@ -361,6 +393,18 @@ class CameraService:
                         self._last_frame_at = received_at
                         self._last_frame_monotonic = received_monotonic
                         self._frames_received += 1
+                        if self._frame_buffer_seconds > 0 and jpeg_bytes is not None:
+                            self._frame_buffer.append(
+                                _BufferedJpegFrame(
+                                    self._sequence,
+                                    jpeg_bytes,
+                                    received_at,
+                                    received_monotonic,
+                                )
+                            )
+                            cutoff = received_monotonic - self._frame_buffer_seconds
+                            while self._frame_buffer and self._frame_buffer[0].received_monotonic < cutoff:
+                                self._frame_buffer.popleft()
                         self._condition.notify_all()
             except Exception as exc:
                 if not self._stop_event.is_set():

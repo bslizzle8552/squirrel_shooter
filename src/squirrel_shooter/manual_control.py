@@ -8,11 +8,19 @@ import math
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .manual_fire_recording import (
+    ManualFireEvent,
+    ManualFireRecorder,
+    ManualFireRecordingConfig,
+    ManualFireRecordingSink,
+    new_manual_fire_event_id,
+)
 from .pan_tilt import PanTiltConfig, PanTiltController, PanTiltPosition, clamp_angle
 from .valve import (
     DisabledValveController,
@@ -60,6 +68,7 @@ class ManualControlConfig:
     fire_pulse_seconds: float = 0.25
     fire_cooldown_seconds: float = 10.0
     calibration_file: Path = Path("config/calibration_points.json")
+    recording: ManualFireRecordingConfig = field(default_factory=ManualFireRecordingConfig)
 
     def __post_init__(self) -> None:
         if not isinstance(self.servo_enabled, bool):
@@ -81,6 +90,8 @@ class ManualControlConfig:
                 raise ValueError(f"{name} must be a finite number greater than zero")
         if not isinstance(self.calibration_file, Path):
             raise ValueError("calibration_file must be a path")
+        if not isinstance(self.recording, ManualFireRecordingConfig):
+            raise ValueError("recording must be a ManualFireRecordingConfig")
 
 
 def display_click_to_frame_pixel(
@@ -514,6 +525,7 @@ class ManualControlService:
         calibration_store: CalibrationStore | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        fire_recorder: ManualFireRecordingSink | None = None,
         servo_error: str | None = None,
         valve_error: str | None = None,
     ) -> None:
@@ -524,6 +536,7 @@ class ManualControlService:
         self._calibration = calibration_store or CalibrationStore(control_config.calibration_file)
         self._sleep = sleep
         self._clock = clock
+        self._fire_recorder = fire_recorder
         self._lock = threading.Lock()
         self._transient_state: ControlState | None = None
         self._pan = float(pan_tilt_config.pan_center)
@@ -782,8 +795,12 @@ class ManualControlService:
         try:
             self._valve.cleanup()
         finally:
-            if self._pan_tilt is not None:
-                self._pan_tilt.cleanup()
+            try:
+                if self._pan_tilt is not None:
+                    self._pan_tilt.cleanup()
+            finally:
+                if self._fire_recorder is not None:
+                    self._fire_recorder.close()
 
     def _move_locked(self, target: PanTiltPosition, *, action: str = "manual") -> PanTiltPosition:
         if self._valve.state is ValveState.OPEN:
@@ -844,6 +861,10 @@ class ManualControlService:
         remaining = self._cooldown_remaining(self._clock())
         if remaining > 0:
             raise FireCooldownError(remaining)
+        fire_started = self._clock()
+        fire_timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        crop_center_x, crop_center_y, crop_center_source = self._recording_crop_center_locked()
+        shot_pan, shot_tilt = self._pan, self._tilt
         self._transient_state = ControlState.FIRING
         self._targeting_status = "FIRING"
         LOGGER.info("Valve pulse started: duration=%.2fs", self.config.fire_pulse_seconds)
@@ -853,6 +874,45 @@ class ManualControlService:
             self._last_fire_completed_at = self._clock()
             self._transient_state = None
             LOGGER.info("Valve pulse ended; valve state=%s; cooldown started", self._valve.state.value)
+        LOGGER.info("Manual fire pulse completed")
+        LOGGER.info(
+            "Manual FIRE accepted: pan=%.2f tilt=%.2f pulse=%.2fs",
+            shot_pan,
+            shot_tilt,
+            self.config.fire_pulse_seconds,
+        )
+        if self._fire_recorder is not None:
+            event = ManualFireEvent(
+                event_id=new_manual_fire_event_id(),
+                timestamp=fire_timestamp,
+                fire_started_monotonic=fire_started,
+                fire_completed_monotonic=self._last_fire_completed_at,
+                pan=shot_pan,
+                tilt=shot_tilt,
+                fire_pulse_seconds=self.config.fire_pulse_seconds,
+                crop_center_x=crop_center_x,
+                crop_center_y=crop_center_y,
+                crop_center_source=crop_center_source,
+            )
+            try:
+                self._fire_recorder.record(event)
+            except Exception as exc:
+                LOGGER.error("Manual fire recording failed to start: %s", exc, exc_info=True)
+
+    def _recording_crop_center_locked(self) -> tuple[int | None, int | None, str]:
+        aim = self._target_aim
+        if (
+            self._target_pixel is not None
+            and aim is not None
+            and self._targeting_status == "AIM READY"
+            and math.isclose(self._pan, aim.pan, abs_tol=1e-6)
+            and math.isclose(self._tilt, aim.tilt, abs_tol=1e-6)
+        ):
+            return self._target_pixel[0], self._target_pixel[1], "calibrated_target_pixel"
+        recording = self.config.recording
+        if recording.crop_center_x is not None and recording.crop_center_y is not None:
+            return recording.crop_center_x, recording.crop_center_y, "configured_fixed_fallback"
+        return None, None, "frame_center_fallback"
 
     def _cooldown_remaining(self, now: float) -> float:
         if self._last_fire_completed_at is None:
@@ -908,6 +968,9 @@ def build_manual_control_service(
     pan_tilt_config: PanTiltConfig,
     control_config: ManualControlConfig,
     valve_config: ValveConfig,
+    *,
+    camera_service: object | None = None,
+    output_directory: Path | None = None,
 ) -> ManualControlService:
     """Build hardware boundaries without letting optional hardware break the camera app."""
 
@@ -935,11 +998,18 @@ def build_manual_control_service(
             if valve_config.gpio_pin is not None
             else "Configure a verified valve.gpio_pin, then set valve.enabled to true"
         )
+    fire_recorder: ManualFireRecordingSink | None = None
+    if control_config.recording.enabled:
+        if camera_service is not None and output_directory is not None:
+            fire_recorder = ManualFireRecorder(camera_service, output_directory, control_config.recording)  # type: ignore[arg-type]
+        else:
+            LOGGER.warning("Manual fire recording is enabled but the shared camera/output directory was not provided")
     return ManualControlService(
         pan_tilt_config,
         control_config,
         pan_tilt=pan_tilt,
         valve=valve,
+        fire_recorder=fire_recorder,
         servo_error=servo_error,
         valve_error=valve_error,
     )

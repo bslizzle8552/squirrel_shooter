@@ -146,7 +146,7 @@ def _dashboard_events(events: list[dict[str, Any]], config: AppConfig) -> list[d
     for event in events:
         item = dict(event)
         event_directory: Path | None = None
-        for field in ("snapshot_path", "clip_path"):
+        for field in ("snapshot_path", "clip_path", "full_frame_clip_path"):
             try:
                 source_path = Path(str(event.get(field, ""))).resolve()
                 item[f"{field}_relative"] = source_path.relative_to(output_root).as_posix()
@@ -160,7 +160,8 @@ def _dashboard_events(events: list[dict[str, Any]], config: AppConfig) -> list[d
                 classification = loaded if isinstance(loaded, dict) else {}
             except (OSError, json.JSONDecodeError):
                 pass
-        item["display_label"] = classification.get("display_label", "Unclassified")
+        manual_fire = event.get("capture_method") == "manual_fire"
+        item["display_label"] = "Manual fire" if manual_fire else classification.get("display_label", "Unclassified")
         item["classification_status"] = classification.get("classification_status", "unclassified")
         item["classification_label_source"] = classification.get("label_source")
         item["motion_label"] = event.get("provisional_category", "unclassified_motion")
@@ -258,6 +259,8 @@ def create_app(
         app_config.pan_tilt,
         app_config.manual_control,
         app_config.valve,
+        camera_service=camera,
+        output_directory=app_config.camera.output_directory,
     )
     started_at = monotonic()
     app.extensions.update(

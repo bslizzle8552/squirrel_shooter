@@ -48,6 +48,13 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.manual_control.default_step_degrees == 3
     assert config.manual_control.fire_pulse_seconds == 0.25
     assert config.manual_control.fire_cooldown_seconds == 10.0
+    assert config.manual_control.recording.enabled is True
+    assert config.manual_control.recording.pre_roll_seconds == 2.0
+    assert config.manual_control.recording.post_roll_seconds == 5.0
+    assert config.manual_control.recording.zoom_factor == 2.0
+    assert (config.manual_control.recording.crop_center_x, config.manual_control.recording.crop_center_y) == (640, 360)
+    assert config.manual_control.recording.save_full_frame_clip is True
+    assert config.manual_control.recording.clip_codec == "MJPG"
     assert config.valve == ValveConfig(enabled=True, gpio_pin=24, active_high=True)
     assert config.motion.min_blob_area == 500
     assert config.motion.inclusion_zone.enabled is True
@@ -154,4 +161,22 @@ def test_valve_cannot_be_enabled_without_a_gpio_pin(tmp_path: Path) -> None:
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     with pytest.raises(ConfigError, match="gpio_pin"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"zoom_factor": 1.0},
+        {"crop_center_x": None, "crop_center_y": 360},
+        {"clip_codec": "too-long"},
+    ],
+)
+def test_rejects_invalid_manual_fire_recording_configuration(tmp_path: Path, updates: dict[str, object]) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["manual_control"]["recording"].update(updates)
+    config_path = tmp_path / "bad-recording.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="manual_control|recording|zoom_factor|crop_center|clip_codec"):
         load_config(config_path)

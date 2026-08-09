@@ -94,6 +94,17 @@ manual_control:
   fire_pulse_seconds: 0.25
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
+  recording:
+    enabled: true
+    pre_roll_seconds: 2.0
+    post_roll_seconds: 5.0
+    zoom_factor: 2.0
+    # Target-click shots use their verified camera pixel. D-pad/manual-angle
+    # shots use this fixed 1280x720 garden fallback until an inverse mapping exists.
+    crop_center_x: 640
+    crop_center_y: 360
+    save_full_frame_clip: true
+    clip_codec: MJPG
 
 # Physically traced MOSFET signal: Raspberry Pi physical pin 18 is BCM GPIO24;
 # physical pin 20 is GND. Enabled for supervised manual operation.
