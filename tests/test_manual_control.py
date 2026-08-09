@@ -7,12 +7,16 @@ from pathlib import Path
 import pytest
 
 from squirrel_shooter.manual_control import (
+    CalibrationPoint,
     CalibrationStore,
+    ControlError,
     ControlState,
     FireCooldownError,
+    InterpolatedAim,
     ManualControlConfig,
     ManualControlService,
     display_click_to_frame_pixel,
+    interpolate_calibration_target,
 )
 from squirrel_shooter.pan_tilt import PanTiltConfig, PanTiltPosition
 from squirrel_shooter.valve import ValveState
@@ -71,20 +75,41 @@ def make_service(
     clock=lambda: 100.0,
     sleep=lambda _seconds: None,
     events: list[str] | None = None,
+    calibration_points: list[CalibrationPoint] | None = None,
 ) -> tuple[ManualControlService, FakePanTilt, FakeValve]:
     pan_config = PanTiltConfig(settling_delay_seconds=0.15)
     control_config = ManualControlConfig(calibration_file=tmp_path / "calibration.json")
     pan_tilt = FakePanTilt(pan_config, events)
     valve = FakeValve(events)
+    calibration_store = CalibrationStore(control_config.calibration_file)
+    for point in calibration_points or []:
+        calibration_store.save(point)
     service = ManualControlService(
         pan_config,
         control_config,
         pan_tilt=pan_tilt,
         valve=valve,
+        calibration_store=calibration_store,
         sleep=sleep,
         clock=clock,
     )
     return service, pan_tilt, valve
+
+
+def complete_calibration_grid() -> list[CalibrationPoint]:
+    pans = (150.0, 90.0, 30.0)
+    tilts = (70.0, 110.0, 150.0)
+    return [
+        CalibrationPoint(
+            point=row * 3 + column + 1,
+            pixel_x=100 + column * 100,
+            pixel_y=100 + row * 100,
+            pan=pans[column],
+            tilt=tilts[row],
+        )
+        for row in range(3)
+        for column in range(3)
+    ]
 
 
 def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> None:
@@ -92,6 +117,7 @@ def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> No
 
     assert service.status()["pan"] == service.status()["tilt"] == 85
     assert service.status()["position_commanded"] is False
+    assert pan_tilt.moves == []
     assert service.status()["allowed_steps"] == [1, 3, 5]
     assert service.move("up", 1) == PanTiltPosition(85, 86)
     assert service.move("left", 1) == PanTiltPosition(86, 86)
@@ -129,6 +155,165 @@ def test_display_click_maps_scaled_and_letterboxed_image_to_native_pixel() -> No
         display_click_to_frame_pixel(400, 50, 800, 600, 1280, 720)
 
 
+def test_targeting_requires_all_nine_complete_calibration_points(tmp_path: Path) -> None:
+    incomplete = complete_calibration_grid()[:-1]
+    service, pan_tilt, valve = make_service(tmp_path, calibration_points=incomplete)
+
+    assert service.status()["targeting"]["enabled"] is False
+    assert "exactly 9 complete" in str(service.status()["targeting"]["error"])
+    with pytest.raises(ControlError, match="exactly 9 complete"):
+        service.aim_at_pixel(150, 150)
+
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+    assert "open" not in valve.events
+
+
+def test_piecewise_interpolation_reproduces_points_and_intermediate_values() -> None:
+    points = complete_calibration_grid()
+    config = PanTiltConfig()
+
+    for point in points:
+        aim = interpolate_calibration_target(points, int(point.pixel_x), int(point.pixel_y), config)
+        assert aim.pan == point.pan
+        assert aim.tilt == point.tilt
+
+    middle = interpolate_calibration_target(points, 150, 150, config)
+    assert middle == InterpolatedAim(
+        pixel_x=150,
+        pixel_y=150,
+        pan=120.0,
+        tilt=90.0,
+        cell=(1, 2, 5, 4),
+        triangle=(1, 2, 5),
+    )
+
+
+def test_interpolation_rejects_outside_clicks_and_clamps_output() -> None:
+    points = complete_calibration_grid()
+    with pytest.raises(ControlError, match="outside the calibrated area"):
+        interpolate_calibration_target(points, 50, 50, PanTiltConfig())
+
+    points[4] = CalibrationPoint(5, 200, 200, 200.0, 50.0)
+    clamped = interpolate_calibration_target(points, 200, 200, PanTiltConfig())
+    assert clamped.pan == 150
+    assert clamped.tilt == 70
+
+
+def test_aim_moves_and_settles_without_valve_or_cooldown_and_preserves_calibration(tmp_path: Path) -> None:
+    events: list[str] = []
+    points = complete_calibration_grid()
+    service, pan_tilt, valve = make_service(tmp_path, events=events, calibration_points=points)
+    before = CalibrationStore(tmp_path / "calibration.json").load()
+
+    aim = service.aim_at_pixel(150, 150)
+
+    assert aim.pan == 120 and aim.tilt == 90
+    assert pan_tilt.moves == [PanTiltPosition(120, 90)]
+    assert events == ["move"]
+    assert valve.state is ValveState.CLOSED
+    assert "open" not in valve.events
+    assert service.status()["cooldown_remaining_seconds"] == 0
+    assert service.status()["pan"] == 120
+    assert service.status()["tilt"] == 90
+    assert service.status()["targeting"]["status"] == "AIM READY"
+    assert CalibrationStore(tmp_path / "calibration.json").load() == before
+
+
+def test_aim_exposes_moving_settling_and_ready_status(tmp_path: Path) -> None:
+    observed: list[tuple[str, str]] = []
+    service, pan_tilt, _ = make_service(tmp_path, calibration_points=complete_calibration_grid())
+    original_move = pan_tilt.move_to_smooth
+
+    def inspecting_move(*args: float, **kwargs: float) -> PanTiltPosition:
+        observed.append((str(service.status()["state"]), str(service.status()["targeting"]["status"])))
+        return original_move(*args, **kwargs)
+
+    def inspecting_sleep(_seconds: float) -> None:
+        observed.append((str(service.status()["state"]), str(service.status()["targeting"]["status"])))
+
+    pan_tilt.move_to_smooth = inspecting_move  # type: ignore[method-assign]
+    service._sleep = inspecting_sleep
+
+    service.aim_at_pixel(150, 150)
+
+    assert observed == [("MOVING", "MOVING"), ("SETTLING", "SETTLING")]
+    assert service.status()["targeting"]["status"] == "AIM READY"
+
+
+def test_fire_is_rejected_while_aim_is_settling(tmp_path: Path) -> None:
+    settling_started = threading.Event()
+    release_settling = threading.Event()
+    failures: list[Exception] = []
+
+    def controlled_sleep(seconds: float) -> None:
+        assert seconds == 0.15
+        settling_started.set()
+        assert release_settling.wait(timeout=1)
+
+    service, _, valve = make_service(
+        tmp_path,
+        sleep=controlled_sleep,
+        calibration_points=complete_calibration_grid(),
+    )
+
+    def aim() -> None:
+        try:
+            service.aim_at_pixel(150, 150)
+        except Exception as exc:
+            failures.append(exc)
+
+    aim_thread = threading.Thread(target=aim)
+    aim_thread.start()
+    assert settling_started.wait(timeout=1)
+
+    with pytest.raises(ControlError, match="FIRE rejected while SETTLING"):
+        service.fire()
+    assert valve.state is ValveState.CLOSED
+    assert "open" not in valve.events
+
+    release_settling.set()
+    aim_thread.join(timeout=1)
+    assert not aim_thread.is_alive()
+    assert failures == []
+
+
+def test_manual_fire_closes_valve_then_parks_without_changing_calibration(tmp_path: Path) -> None:
+    events: list[str] = []
+    delays: list[float] = []
+    points = complete_calibration_grid()
+
+    def recording_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        events.append("pulse" if seconds == 0.25 else "settle")
+
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        sleep=recording_sleep,
+        events=events,
+        calibration_points=points,
+    )
+    service.aim_at_pixel(150, 150)
+    before = CalibrationStore(tmp_path / "calibration.json").load()
+    events.clear()
+    delays.clear()
+    pan_tilt.moves.clear()
+
+    service.fire()
+
+    assert events == ["close", "open", "pulse", "close", "move", "settle"]
+    assert delays == [0.25, 0.15]
+    assert valve.state is ValveState.CLOSED
+    assert pan_tilt.moves == [PanTiltPosition(85, 88)]
+    assert service.pan_tilt_config.pan_min <= pan_tilt.moves[0].pan <= service.pan_tilt_config.pan_max
+    assert service.pan_tilt_config.tilt_min <= pan_tilt.moves[0].tilt <= service.pan_tilt_config.tilt_max
+    assert service.status()["pan"] == 85
+    assert service.status()["tilt"] == 88
+    assert service.status()["targeting"]["status"] == "PARKED"
+    assert service.status()["cooldown_remaining_seconds"] == 10.0
+    assert CalibrationStore(tmp_path / "calibration.json").load() == before
+
+
 def test_active_calibration_point_is_shared_service_state(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
 
@@ -163,12 +348,15 @@ def test_fire_cooldown_is_server_side_and_movement_remains_available(tmp_path: P
 
     service.fire()
     assert valve.state is ValveState.CLOSED
+    assert service.status()["pan"] == 85
+    assert service.status()["tilt"] == 88
+    assert service.status()["targeting"]["status"] == "PARKED"
     assert service.status()["state"] == ControlState.COOLDOWN.value
     assert service.status()["cooldown_remaining_seconds"] == 10.0
     with pytest.raises(FireCooldownError):
         service.fire()
 
-    assert service.move("right", 3) == PanTiltPosition(82, 85)
+    assert service.move("right", 3) == PanTiltPosition(82, 88)
     assert service.status()["state"] == ControlState.COOLDOWN.value
     now[0] = 110.0
     assert service.status()["state"] == ControlState.IDLE.value
@@ -188,8 +376,8 @@ def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:
     result = service.move_and_fire(200, 60)
 
     assert result == PanTiltPosition(150, 70)
-    assert events == ["move", "settle", "close", "open", "pulse", "close"]
-    assert delays == [0.15, 0.25]
+    assert events == ["move", "settle", "close", "open", "pulse", "close", "move", "settle"]
+    assert delays == [0.15, 0.25, 0.15]
 
 
 def test_fire_and_movement_are_serialized(tmp_path: Path) -> None:
@@ -242,7 +430,7 @@ def test_fire_and_movement_are_serialized(tmp_path: Path) -> None:
     assert not fire_thread.is_alive()
     assert not move_thread.is_alive()
     assert failures == []
-    assert events == ["close", "open", "pulse", "close", "move", "settle"]
+    assert events == ["close", "open", "pulse", "close", "move", "settle", "move", "settle"]
 
 
 def test_status_exposes_moving_settling_and_firing_states(tmp_path: Path) -> None:
@@ -268,7 +456,7 @@ def test_status_exposes_moving_settling_and_firing_states(tmp_path: Path) -> Non
     service.move("right", 3)
     service.fire()
 
-    assert observed == ["MOVING", "SETTLING", "FIRING", "FIRING"]
+    assert observed == ["MOVING", "SETTLING", "FIRING", "FIRING", "PARKING", "PARKING"]
 
 
 def test_calibration_store_saves_and_replaces_one_of_nine_points(tmp_path: Path) -> None:

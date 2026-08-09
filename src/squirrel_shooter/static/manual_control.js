@@ -5,6 +5,7 @@
 
   var selectedStep = cfg.initial.default_step;
   var selectedCalibrationPoint = cfg.initial.active_calibration_point;
+  var cameraMode = cfg.initial.targeting.enabled ? 'aim' : 'calibration';
   var requestPending = false;
   var refreshPending = false;
   var stateRevision = 0;
@@ -20,6 +21,15 @@
     image: document.getElementById('calibration-image'),
     marker: document.getElementById('calibration-marker'),
     markerLabel: document.getElementById('calibration-marker-label'),
+    targetMarker: document.getElementById('target-marker'),
+    cameraModeButtons: document.querySelectorAll('[data-camera-mode]'),
+    cameraModeNote: document.getElementById('camera-mode-note'),
+    targetingStatus: document.getElementById('targeting-status'),
+    targetingError: document.getElementById('targeting-error'),
+    targetPixelX: document.getElementById('target-pixel-x'),
+    targetPixelY: document.getElementById('target-pixel-y'),
+    targetPan: document.getElementById('target-pan'),
+    targetTilt: document.getElementById('target-tilt'),
     pixelStatus: document.getElementById('pixel-selection-status'),
     servoNote: document.getElementById('servo-note'),
     positionNote: document.getElementById('position-note'),
@@ -52,7 +62,7 @@
   }
 
   function busyState(state) {
-    return state === 'MOVING' || state === 'SETTLING' || state === 'FIRING';
+    return state === 'MOVING' || state === 'SETTLING' || state === 'FIRING' || state === 'PARKING';
   }
 
   function calibrationRecord(next, point) {
@@ -83,7 +93,7 @@
   }
 
   function renderPixelMarker(next, selected) {
-    if (!selected || !selected.pixel_selected) {
+    if (cameraMode !== 'calibration' || !selected || !selected.pixel_selected) {
       els.marker.hidden = true;
       els.pixelStatus.textContent = 'Point ' + selectedCalibrationPoint + ' pixel: not selected';
       return;
@@ -100,13 +110,50 @@
     els.marker.hidden = false;
   }
 
+  function renderTargetMarker(next) {
+    var target = next.targeting;
+    if (cameraMode !== 'aim' || target.pixel_x === null || target.pixel_y === null) {
+      els.targetMarker.hidden = true;
+      return;
+    }
+    var layout = frameLayout(next);
+    if (!layout) { els.targetMarker.hidden = true; return; }
+    var cameraRect = els.camera.getBoundingClientRect();
+    var markerX = layout.rect.left - cameraRect.left + layout.offsetX + ((target.pixel_x + 0.5) / layout.frameWidth) * layout.renderedWidth;
+    var markerY = layout.rect.top - cameraRect.top + layout.offsetY + ((target.pixel_y + 0.5) / layout.frameHeight) * layout.renderedHeight;
+    els.targetMarker.style.left = markerX + 'px';
+    els.targetMarker.style.top = markerY + 'px';
+    els.targetMarker.hidden = false;
+  }
+
+  function renderCameraMode(next) {
+    els.cameraModeButtons.forEach(function (button) {
+      var selected = button.dataset.cameraMode === cameraMode;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-pressed', String(selected));
+      button.disabled = requestPending || (button.dataset.cameraMode === 'aim' && !next.targeting.enabled);
+    });
+    els.cameraModeNote.textContent = cameraMode === 'aim'
+      ? 'AIM TARGET: click inside the calibrated garden region to move and settle. Clicking never fires.'
+      : 'EDIT CALIBRATION: select a point, then click the center of its physical block.';
+    els.pixelStatus.hidden = cameraMode !== 'calibration';
+    els.targetingStatus.textContent = next.targeting.status;
+    els.targetPixelX.textContent = next.targeting.pixel_x === null ? '--' : next.targeting.pixel_x;
+    els.targetPixelY.textContent = next.targeting.pixel_y === null ? '--' : next.targeting.pixel_y;
+    els.targetPan.textContent = next.targeting.pan === null ? '--' : next.targeting.pan;
+    els.targetTilt.textContent = next.targeting.tilt === null ? '--' : next.targeting.tilt;
+    els.targetingError.textContent = next.targeting.error || '';
+    els.targetingError.hidden = !next.targeting.error;
+    renderTargetMarker(next);
+  }
+
   function renderCalibration(next) {
     selectedCalibrationPoint = next.active_calibration_point;
     var savedCount = next.completed_calibration_count;
     var selected = calibrationRecord(next, selectedCalibrationPoint);
     els.activePoint.textContent = selectedCalibrationPoint;
     els.savedCount.textContent = 'Calibration: ' + savedCount + ' / 9';
-    els.calibrationComplete.hidden = savedCount !== 9;
+    els.calibrationComplete.hidden = !next.targeting.enabled;
     els.calibrationButtons.forEach(function (button) {
       var point = Number(button.dataset.calibrationPoint);
       var record = calibrationRecord(next, point);
@@ -157,6 +204,7 @@
     els.positionNote.hidden = next.position_commanded;
     els.valveNote.hidden = next.valve_available;
     renderCalibration(next);
+    renderCameraMode(next);
   }
 
   async function requestJson(url, body) {
@@ -206,22 +254,35 @@
       catch (error) { showToast(error.message); }
     });
   });
+  els.cameraModeButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      if (requestPending || button.disabled) { return; }
+      cameraMode = button.dataset.cameraMode;
+      render(control);
+    });
+  });
   els.image.addEventListener('click', async function (event) {
     if (requestPending || !window.matchMedia('(min-width: 821px)').matches) { return; }
     var rect = els.image.getBoundingClientRect();
     try {
-      var payload = await requestJson(cfg.urls.calibrationPixel, {
+      var click = {
         display_x: event.clientX - rect.left,
         display_y: event.clientY - rect.top,
         display_width: rect.width,
         display_height: rect.height
-      });
+      };
+      if (cameraMode === 'aim') {
+        var aimPayload = await requestJson(cfg.urls.aim, click);
+        showToast('AIM READY: X ' + aimPayload.target.pixel_x + ', Y ' + aimPayload.target.pixel_y + '; pan ' + aimPayload.target.pan + ', tilt ' + aimPayload.target.tilt + '. FIRE remains manual.');
+      } else {
+        var payload = await requestJson(cfg.urls.calibrationPixel, click);
       showToast('Point ' + payload.calibration_point.point + ' pixel selected — X ' + payload.calibration_point.pixel_x + ', Y ' + payload.calibration_point.pixel_y + '.');
+      }
     } catch (error) { showToast(error.message); }
   });
   els.fire.addEventListener('click', async function () {
     if (requestPending || els.fire.disabled) { return; }
-    try { await requestJson(cfg.urls.fire, {}); showToast('Valve pulse complete. Cooldown started.'); }
+    try { await requestJson(cfg.urls.fire, {}); showToast('Valve pulse complete, valve OFF, PARK complete. Cooldown active.'); }
     catch (error) { showToast(error.message); }
   });
   els.save.addEventListener('click', async function () {
@@ -241,6 +302,7 @@
   });
   window.addEventListener('resize', function () {
     renderPixelMarker(control, calibrationRecord(control, selectedCalibrationPoint));
+    renderTargetMarker(control);
   });
 
   async function refresh() {

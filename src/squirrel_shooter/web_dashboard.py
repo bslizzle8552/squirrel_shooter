@@ -378,6 +378,29 @@ def create_app(
             return manual_control_error(exc)
         return jsonify(control=manual_control_status())
 
+    @app.post("/api/manual-control/aim")
+    def api_manual_control_aim() -> Any:
+        require_manual_control_token()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="A JSON request body is required", control=manual_control_status()), 400
+        camera_status = camera.status()
+        try:
+            if not camera_status.online:
+                raise ControlUnavailableError("Camera must be online before selecting an aim target")
+            pixel_x, pixel_y = display_click_to_frame_pixel(
+                payload.get("display_x"),
+                payload.get("display_y"),
+                payload.get("display_width"),
+                payload.get("display_height"),
+                camera_status.width,
+                camera_status.height,
+            )
+            aim = manual_control.aim_at_pixel(pixel_x, pixel_y)
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(target=asdict(aim), control=manual_control_status())
+
     @app.post("/api/manual-control/fire")
     def api_manual_control_fire() -> Any:
         require_manual_control_token()

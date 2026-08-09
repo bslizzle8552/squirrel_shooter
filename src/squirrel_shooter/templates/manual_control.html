@@ -18,12 +18,23 @@
         <div><p class="eyebrow">Shared live view</p><h2 id="camera-title">Camera</h2></div>
         <a href="{{ url_for('dashboard') }}">Open full console</a>
       </div>
-      <div class="manual-video calibration-camera" id="calibration-camera">
-        <img id="calibration-image" src="{{ url_for('video_feed') }}" alt="Live garden camera stream; desktop users can click a calibration block" draggable="false">
-        <div class="calibration-marker" id="calibration-marker" aria-hidden="true" hidden><span id="calibration-marker-label"></span></div>
+      <div class="camera-mode-picker" role="group" aria-label="Desktop camera click mode">
+        <button type="button" class="camera-mode-button{{ ' selected' if control.targeting.enabled }}" data-camera-mode="aim" aria-pressed="{{ 'true' if control.targeting.enabled else 'false' }}" {% if not control.targeting.enabled %}disabled{% endif %}>AIM TARGET</button>
+        <button type="button" class="camera-mode-button{{ '' if control.targeting.enabled else ' selected' }}" data-camera-mode="calibration" aria-pressed="{{ 'false' if control.targeting.enabled else 'true' }}">EDIT CALIBRATION</button>
       </div>
-      <p class="camera-note">Desktop: select a point, then click the center of its physical block in the live image.</p>
-      <p class="pixel-selection-status" id="pixel-selection-status" role="status" aria-live="polite">Point {{ active_point }} pixel: not selected</p>
+      <div class="manual-video calibration-camera" id="calibration-camera">
+        <img id="calibration-image" src="{{ url_for('video_feed') }}" alt="Live garden camera stream; desktop users can select AIM TARGET or EDIT CALIBRATION before clicking" draggable="false">
+        <div class="calibration-marker" id="calibration-marker" aria-hidden="true" hidden><span id="calibration-marker-label"></span></div>
+        <div class="target-marker" id="target-marker" aria-hidden="true" hidden><span>TARGET</span></div>
+      </div>
+      <p class="camera-note" id="camera-mode-note">{% if control.targeting.enabled %}AIM TARGET: click inside the calibrated garden region to move and settle. Clicking never fires.{% else %}EDIT CALIBRATION: complete all nine valid calibration records before targeting is enabled.{% endif %}</p>
+      <div class="targeting-readout" id="targeting-readout" aria-live="polite">
+        <strong id="targeting-status">{{ control.targeting.status }}</strong>
+        <span>Clicked pixel: X <b id="target-pixel-x">{{ control.targeting.pixel_x if control.targeting.pixel_x is not none else '--' }}</b>, Y <b id="target-pixel-y">{{ control.targeting.pixel_y if control.targeting.pixel_y is not none else '--' }}</b></span>
+        <span>Calculated aim: Pan <b id="target-pan">{{ control.targeting.pan if control.targeting.pan is not none else '--' }}</b>Â°, Tilt <b id="target-tilt">{{ control.targeting.tilt if control.targeting.tilt is not none else '--' }}</b>Â°</span>
+        <span class="targeting-error" id="targeting-error" {% if not control.targeting.error %}hidden{% endif %}>{{ control.targeting.error or '' }}</span>
+      </div>
+      <p class="pixel-selection-status" id="pixel-selection-status" role="status" aria-live="polite" {% if control.targeting.enabled %}hidden{% endif %}>Point {{ active_point }} pixel: not selected</p>
     </section>
 
     <section class="manual-card controls-card" aria-labelledby="aim-title">
@@ -73,7 +84,7 @@
         <div><p class="eyebrow">Desktop calibration console</p><h2 id="calibration-title">Finalize calibration aim</h2></div>
         <strong class="calibration-progress" id="saved-count">Calibration: {{ control.completed_calibration_count }} / 9</strong>
       </div>
-      <p class="calibration-complete" id="calibration-complete" {% if control.completed_calibration_count != 9 %}hidden{% endif %}>All nine blocks have camera pixels and saved aim. Data collection is complete; interpolation is not yet configured.</p>
+      <p class="calibration-complete" id="calibration-complete" {% if not control.targeting.enabled %}hidden{% endif %}>All nine blocks have camera pixels and saved aim. Desktop AIM TARGET mode is ready.</p>
       <div class="calibration-grid" role="group" aria-label="Nine calibration targets">
         {% for point in range(1, 10) %}
         <button type="button" class="calibration-point-button{{ ' active' if point == active_point }}{{ ' saved' if point in complete_points }}{{ ' pixel-selected' if point in pixel_points and point not in complete_points }}{{ ' aim-saved' if point in aim_points and point not in complete_points }}" data-calibration-point="{{ point }}" aria-pressed="{{ 'true' if point == active_point else 'false' }}">
@@ -105,7 +116,7 @@
           <div><dt>Tilt</dt><dd id="calibration-detail-tilt">{% if selected_record.value and selected_record.value.tilt is not none %}{{ selected_record.value.tilt }}°{% else %}Not saved{% endif %}</dd></div>
         </dl>
       </div>
-      <p>Select a point, click its block in the camera image, aim from the phone, then SAVE after the water hits. Only records with both pixel and aim values turn green. Updating replaces the same point; interpolation is not implemented.</p>
+      <p>Choose EDIT CALIBRATION before changing a point pixel. AIM TARGET clicks never overwrite calibration data and never fire. Updating replaces the same point.</p>
     </section>
   </div>
   <div class="manual-toast" id="manual-toast" role="status" aria-live="polite"></div>
@@ -118,6 +129,7 @@ window.SS_MANUAL_CONTROL = {
   urls: {
     status: {{ url_for('api_manual_control')|tojson }},
     move: {{ url_for('api_manual_control_move')|tojson }},
+    aim: {{ url_for('api_manual_control_aim')|tojson }},
     fire: {{ url_for('api_manual_control_fire')|tojson }},
     calibration: {{ url_for('api_manual_control_calibration')|tojson }},
     activeCalibration: {{ url_for('api_manual_control_active_calibration')|tojson }},

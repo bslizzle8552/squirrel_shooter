@@ -187,6 +187,12 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="active-calibration-point">1<' in page.data
     assert b'id="calibration-image"' in page.data
     assert b'id="calibration-marker"' in page.data
+    assert b'id="target-marker"' in page.data
+    assert b'data-camera-mode="aim"' in page.data
+    assert b'data-camera-mode="calibration"' in page.data
+    assert b">AIM TARGET</button>" in page.data
+    assert b">EDIT CALIBRATION</button>" in page.data
+    assert b'id="targeting-status">TARGETING UNAVAILABLE<' in page.data
     assert b'id="pixel-selection-status"' in page.data
     assert b'id="save-calibration"' in page.data
     assert b'id="save-aim-action">SAVE AIM<' in page.data
@@ -199,6 +205,13 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         "/api/manual-control/calibration/pixel",
         json={"display_x": 400, "display_y": 225, "display_width": 800, "display_height": 450},
     ).status_code == 403
+    incomplete_aim = client.post(
+        "/api/manual-control/aim",
+        json={"display_x": 400, "display_y": 225, "display_width": 800, "display_height": 450},
+        headers=headers,
+    )
+    assert incomplete_aim.status_code == 400
+    assert b"exactly 9 complete calibration points" in incomplete_aim.data
 
     fine_move = client.post(
         "/api/manual-control/move",
@@ -246,6 +259,9 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     fired = client.post("/api/manual-control/fire", json={}, headers=headers)
     assert fired.status_code == 200
     assert fired.json["control"]["state"] == "COOLDOWN"
+    assert fired.json["control"]["pan"] == 85
+    assert fired.json["control"]["tilt"] == 88
+    assert fired.json["control"]["targeting"]["status"] == "PARKED"
     assert client.post("/api/manual-control/fire", json={}, headers=headers).status_code == 409
 
     during_cooldown = client.post(
@@ -254,7 +270,15 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         headers=headers,
     )
     assert during_cooldown.status_code == 200
-    assert during_cooldown.json["control"]["pan"] == 79
+    assert during_cooldown.json["control"]["pan"] == 82
+    assert during_cooldown.json["control"]["tilt"] == 88
+    adjusted_during_cooldown = client.post(
+        "/api/manual-control/move",
+        json={"direction": "right", "step": 3},
+        headers=headers,
+    )
+    assert adjusted_during_cooldown.status_code == 200
+    assert adjusted_during_cooldown.json["control"]["pan"] == 79
     saved = client.post(
         "/api/manual-control/calibration",
         json={"point": 9, "pan": 30, "tilt": 70, "pixel_x": None, "pixel_y": None},
@@ -266,7 +290,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         "pixel_x": 640,
         "pixel_y": 360,
         "pan": 79.0,
-        "tilt": 85.0,
+        "tilt": 88.0,
     }
     saved_page = client.get("/manual-control")
     assert b"Calibration: 1 / 9" in saved_page.data
@@ -288,9 +312,15 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
             missing_pixel = client.post("/api/manual-control/calibration", json={}, headers=headers)
             assert missing_pixel.status_code == 400
             assert b"Click the center" in missing_pixel.data
+        row, column = divmod(point - 1, 3)
         selected_pixel = client.post(
             "/api/manual-control/calibration/pixel",
-            json={"display_x": point * 50, "display_y": 225, "display_width": 800, "display_height": 450},
+            json={
+                "display_x": 400 + column * 100,
+                "display_y": 225 + row * 56.25,
+                "display_width": 800,
+                "display_height": 450,
+            },
             headers=headers,
         )
         assert selected_pixel.status_code == 200
@@ -304,7 +334,30 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     complete_page = client.get("/manual-control")
     assert b"Calibration: 9 / 9" in complete_page.data
     assert b"All nine blocks have camera pixels and saved aim" in complete_page.data
-    assert b"interpolation is not yet configured" in complete_page.data
+    assert b"Desktop AIM TARGET mode is ready" in complete_page.data
+
+    now[0] = 110.0
+    before_aim = json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8"))
+    outside = client.post(
+        "/api/manual-control/aim",
+        json={"display_x": 100, "display_y": 100, "display_width": 800, "display_height": 450},
+        headers=headers,
+    )
+    assert outside.status_code == 400
+    assert outside.json["control"]["targeting"]["status"] == "OUTSIDE CALIBRATED AREA"
+    aimed = client.post(
+        "/api/manual-control/aim",
+        json={"display_x": 500, "display_y": 281.25, "display_width": 800, "display_height": 450},
+        headers=headers,
+    )
+    assert aimed.status_code == 200
+    assert aimed.json["target"]["pixel_x"] == 800
+    assert aimed.json["target"]["pixel_y"] == 450
+    assert aimed.json["control"]["targeting"]["status"] == "AIM READY"
+    assert aimed.json["control"]["pan"] == 79
+    assert aimed.json["control"]["tilt"] == 88
+    assert aimed.json["control"]["cooldown_remaining_seconds"] == 0
+    assert json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8")) == before_aim
 
     moved_again = client.post(
         "/api/manual-control/move",
@@ -334,7 +387,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert updated.status_code == 200
     assert updated.json["calibration_point"]["pixel_x"] == 800
     assert updated.json["calibration_point"]["pixel_y"] == 360
-    assert updated.json["calibration_point"]["tilt"] == 88.0
+    assert updated.json["calibration_point"]["tilt"] == 91.0
     assert len(updated.json["control"]["calibration_points"]) == 9
     assert [record["point"] for record in updated.json["control"]["calibration_points"]].count(1) == 1
 
@@ -351,12 +404,17 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"ArrowRight: 'right'" in manual_script.data
     assert b"display_width: rect.width" in manual_script.data
     assert b"renderPixelMarker" in manual_script.data
+    assert b"renderTargetMarker" in manual_script.data
+    assert b"cameraMode === 'aim'" in manual_script.data
+    assert b"cfg.urls.aim" in manual_script.data
+    assert b"cfg.urls.calibrationPixel" in manual_script.data
     assert b"calibrationPixel" in page.data
     assert b"pollIntervalMs" in page.data and b"1000" in page.data
     assert b'grid-template-areas: "camera aim" "camera fire" "calibration ."' in manual_style.data
     assert b'grid-template-areas: "aim" "fire" "camera"' in manual_style.data
     assert b".calibration-card { display: none; }" in manual_style.data
     assert b".calibration-marker" in manual_style.data
+    assert b".target-marker" in manual_style.data
     assert b".save-aim-button" in manual_style.data
 
 
