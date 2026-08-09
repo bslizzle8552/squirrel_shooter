@@ -247,7 +247,7 @@ class ManualControlService:
             if direction == "center":
                 target = PanTiltPosition(self.pan_tilt_config.pan_center, self.pan_tilt_config.tilt_center)
             else:
-                pan_delta = -step_degrees if direction == "left" else step_degrees if direction == "right" else 0
+                pan_delta = step_degrees if direction == "left" else -step_degrees if direction == "right" else 0
                 tilt_delta = step_degrees if direction == "up" else -step_degrees if direction == "down" else 0
                 target = PanTiltPosition(
                     clamp_angle(self._pan + pan_delta, self.pan_tilt_config.pan_min, self.pan_tilt_config.pan_max),

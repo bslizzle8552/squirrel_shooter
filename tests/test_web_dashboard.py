@@ -170,6 +170,12 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     page = client.get("/manual-control")
     assert page.status_code == 200
     assert b'aria-label="Pan left"' in page.data
+    assert b'aria-label="Tilt forward"' in page.data
+    assert b'aria-label="Tilt backward"' in page.data
+    assert b"<span>Forward</span>" in page.data
+    assert b"<span>Backward</span>" in page.data
+    assert b"<span>Up</span>" not in page.data
+    assert b"<span>Down</span>" not in page.data
     assert b'id="fire-button"' in page.data
     assert b"Commanded positions only" in page.data
     assert b"startup reference" in page.data
@@ -182,7 +188,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
 
     moved = client.post("/api/manual-control/move", json={"direction": "right", "step": 3}, headers=headers)
     assert moved.status_code == 200
-    assert moved.json["control"]["pan"] == 88
+    assert moved.json["control"]["pan"] == 82
     fired = client.post("/api/manual-control/fire", json={}, headers=headers)
     assert fired.status_code == 200
     assert fired.json["control"]["state"] == "COOLDOWN"
@@ -194,7 +200,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         headers=headers,
     )
     assert during_cooldown.status_code == 200
-    assert during_cooldown.json["control"]["pan"] == 91
+    assert during_cooldown.json["control"]["pan"] == 79
     saved = client.post(
         "/api/manual-control/calibration",
         json={"point": 1, "pixel_x": None, "pixel_y": None},
@@ -205,7 +211,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         "point": 1,
         "pixel_x": None,
         "pixel_y": None,
-        "pan": 91.0,
+        "pan": 79.0,
         "tilt": 85.0,
     }
     saved_page = client.get("/manual-control")
@@ -213,7 +219,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'class="calibration-point-button active saved"' in saved_page.data
     assert b'id="calibration-detail-point">1<' in saved_page.data
     assert b'id="calibration-detail-pixel-x">Not recorded (null)<' in saved_page.data
-    assert 'id="calibration-detail-pan">91.0°<'.encode("utf-8") in saved_page.data
+    assert 'id="calibration-detail-pan">79.0°<'.encode("utf-8") in saved_page.data
 
     for point in range(2, 10):
         selected = client.post(
@@ -262,6 +268,10 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert manual_style.status_code == 200
     assert b"showCalibrationConfirmation" in manual_script.data
     assert b" updated" in manual_script.data and b" saved" in manual_script.data
+    assert b"ArrowUp: 'up'" in manual_script.data
+    assert b"ArrowDown: 'down'" in manual_script.data
+    assert b"ArrowLeft: 'left'" in manual_script.data
+    assert b"ArrowRight: 'right'" in manual_script.data
     assert b"pollIntervalMs" in page.data and b"1000" in page.data
     assert b'grid-template-areas: "camera aim" "camera fire" "calibration ."' in manual_style.data
     assert b'grid-template-areas: "aim" "fire" "camera"' in manual_style.data
@@ -312,7 +322,7 @@ def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stal
         headers=headers,
     )
     assert moved.status_code == 200
-    assert desktop.get("/api/manual-control").json["control"]["pan"] == 88
+    assert desktop.get("/api/manual-control").json["control"]["pan"] == 82
 
     saved = desktop.post(
         "/api/manual-control/calibration",
@@ -324,7 +334,7 @@ def test_manual_control_state_is_shared_across_two_clients_and_save_ignores_stal
         "point": 4,
         "pixel_x": None,
         "pixel_y": None,
-        "pan": 88.0,
+        "pan": 82.0,
         "tilt": 85.0,
     }
 

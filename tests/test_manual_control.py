@@ -91,12 +91,17 @@ def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> No
     assert service.status()["pan"] == service.status()["tilt"] == 85
     assert service.status()["position_commanded"] is False
     assert service.move("up", 3) == PanTiltPosition(85, 88)
-    assert service.move("left", 5) == PanTiltPosition(80, 88)
+    assert service.move("left", 5) == PanTiltPosition(90, 88)
+    assert service.move("right", 5) == PanTiltPosition(85, 88)
+    for _ in range(30):
+        service.move("left", 5)
+
+    assert pan_tilt.moves[-1] == PanTiltPosition(150, 88)
     for _ in range(30):
         service.move("right", 5)
         service.move("down", 5)
 
-    assert pan_tilt.moves[-1] == PanTiltPosition(150, 70)
+    assert pan_tilt.moves[-1] == PanTiltPosition(30, 70)
     assert service.move("center", 3) == PanTiltPosition(85, 85)
     assert service.status()["pan"] == service.status()["tilt"] == 85
     assert service.status()["position_commanded"] is True
@@ -129,7 +134,7 @@ def test_save_active_point_uses_current_backend_commanded_position(tmp_path: Pat
     record = service.save_active_calibration_point(pixel_x=None, pixel_y=None)
 
     assert record.point == 4
-    assert record.pan == 88
+    assert record.pan == 82
     assert record.tilt == 90
     assert CalibrationStore(tmp_path / "calibration.json").load() == [record]
 
@@ -145,7 +150,7 @@ def test_fire_cooldown_is_server_side_and_movement_remains_available(tmp_path: P
     with pytest.raises(FireCooldownError):
         service.fire()
 
-    assert service.move("right", 3) == PanTiltPosition(88, 85)
+    assert service.move("right", 3) == PanTiltPosition(82, 85)
     assert service.status()["state"] == ControlState.COOLDOWN.value
     now[0] = 110.0
     assert service.status()["state"] == ControlState.IDLE.value
@@ -199,9 +204,9 @@ def test_calibration_store_saves_and_replaces_one_of_nine_points(tmp_path: Path)
     service.move("up", 5)
     replacement = service.save_calibration_point(4, pixel_x=640, pixel_y=360)
 
-    assert first.pan == 88
+    assert first.pan == 82
     assert replacement.pixel_x == 640
-    assert replacement.pan == 88 and replacement.tilt == 90
+    assert replacement.pan == 82 and replacement.tilt == 90
     records = CalibrationStore(tmp_path / "calibration.json").load()
     assert records == [replacement]
     raw = json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8"))
@@ -209,6 +214,6 @@ def test_calibration_store_saves_and_replaces_one_of_nine_points(tmp_path: Path)
         "point": 4,
         "pixel_x": 640,
         "pixel_y": 360,
-        "pan": 88.0,
+        "pan": 82.0,
         "tilt": 90.0,
     }
