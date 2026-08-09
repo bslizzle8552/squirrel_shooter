@@ -61,6 +61,7 @@
 
       <span class="bar-spacer"></span>
       <nav class="bar-nav" aria-label="Archive pages">
+        <a href="{{ url_for('manual_control_page') }}">Manual control</a>
         <a href="{{ url_for('events') }}">Events</a>
         <a href="{{ url_for('classifier_review') }}">Object review</a>
         <a href="{{ url_for('captures') }}">Pictures</a>
@@ -221,8 +222,9 @@
         <label><input type="checkbox" id="pref-outdoor"> Outdoor sunlight mode</label>
         <label><input type="checkbox" id="pref-pause-stream"> Pause live stream (saves Pi CPU)</label>
       </div>
-      <p class="dialog-note">Motion-triggered garden evidence from one shared camera. No physical outputs. Detection settings live in <code>config/default.yaml</code> on the Pi.</p>
+      <p class="dialog-note">Motion-triggered garden evidence and explicitly gated manual hardware controls share one camera. Settings live in <code>config/default.yaml</code> on the Pi.</p>
       <div class="dialog-links">
+        <a href="{{ url_for('manual_control_page') }}">Manual aiming and calibration</a>
         <a href="{{ url_for('events') }}">All event pictures and videos</a>
         <a href="{{ url_for('classifier_review') }}">Object review and unknowns</a>
         <a href="{{ url_for('captures') }}">Standalone pictures</a>

@@ -1,17 +1,17 @@
 # Squirrel Squirter
 
-Squirrel Squirter's normal application is currently a **vision-only** Raspberry Pi garden watcher:
+Squirrel Squirter's normal application is a Raspberry Pi garden watcher with a
+separately gated manual aiming and calibration page:
 
-**one shared USB camera -> motion groups -> one lightweight event classification -> private review dashboard**
+**one shared USB camera -> motion groups -> one lightweight event classification -> private dashboard and manual controls**
 
-The normal application does not recognize squirrels, aim, move anything, or
-control water. A small
+The normal application does not recognize squirrels, translate camera pixels to
+servo angles, or automatically aim and fire. A small
 MobileNet-SSD stress test can label common VOC objects such as `person` and `car`,
-but those labels are not squirrel recognition. A separate, supervised pan/tilt
-bench utility can control two servos through a PCA9685; it is not imported or
-started by the camera/detection runtime. No MOSFET, solenoid, or live valve driver
-is implemented. The existing disabled-valve placeholder remains closed and raises
-an error if asked to open.
+but those labels are not squirrel recognition. The manual page can command the
+bench-verified PCA9685 pan/tilt controller within its configured limits. A
+normally-closed solenoid GPIO driver also exists, but it stays disabled and LOW
+until an actual BCM pin is configured explicitly. No GPIO pin is guessed.
 
 The motion watcher's labels remain size/movement heuristics. The optional object
 classifier is a separate record and never outputs a definitive `squirrel`
@@ -57,6 +57,9 @@ stops the dashboard, and finally releases the sole camera handle.
   limits. Active and recovered-incomplete events and logs are protected.
 - Builds local HTML/Markdown reports and an editable review CSV without a database
   or web server.
+- Serves a phone-friendly manual page with 3°/5° aiming steps, keyboard arrows,
+  commanded-angle display, nine-point calibration records, and a separately
+  gated valve test pulse.
 
 The camera currently delivers approximately 9.9-10 FPS at 1280x720. The watcher
 measures the real rate and uses monotonic elapsed time for warmup, cooldown,
@@ -112,7 +115,7 @@ endpoint. On the first interpolated command in a process, the configured center 
 used as the software path reference because no feedback exists. Movement still
 occurs only after an explicit command.
 
-### Install the Pi servo dependencies
+### Install the Pi servo and valve dependencies
 
 The verified target is Raspberry Pi OS with Python 3.13. Use the project's existing
 `.venv`; do not install these packages into the system Python:
@@ -124,7 +127,7 @@ python -m pip install -e ".[test,servo]"
 ```
 
 The `servo` extra installs `adafruit-circuitpython-servokit`,
-`adafruit-circuitpython-pca9685`, and the Linux `adafruit-lgpio` backend. The
+`adafruit-circuitpython-pca9685`, `gpiozero`, and the Linux `adafruit-lgpio` backend. The
 controller imports ServoKit only when real hardware is constructed, so tests and
 camera-only operation remain hardware-independent. The `adafruit-lgpio` package is
 selected specifically for Python 3.13 or newer on Raspberry Pi ARM systems.
@@ -178,8 +181,40 @@ controller.move_to_fast(105, 95)
 controller.cleanup()
 ```
 
-This task does not translate camera coordinates, subscribe to detections, or
-control the valve. Those remain separate later integration steps.
+### Manual control and calibration
+
+The existing Flask dashboard serves `/manual-control`. The large D-pad and
+desktop arrow keys share the same server endpoint and the same limit enforcement.
+The selected step defaults to 3° and can be changed to 5°. CENTER commands both
+axes to 85°. Displayed angles are software-commanded positions, not servo
+feedback.
+
+All physical control paths pass through one serialized coordinator. Its shared
+future pipeline is target, move, settle, fire, cooldown. Manual movement is still
+allowed during valve cooldown, but movement and firing can never overlap. FIRE
+produces one configured pulse and then enforces the full cooldown on the server,
+so refreshing or double-tapping the page cannot bypass it.
+
+The valve remains unavailable with the checked-in defaults:
+
+```yaml
+manual_control:
+  servo_enabled: true
+  fire_pulse_seconds: 0.25  # supervised tuning placeholder
+  fire_cooldown_seconds: 10.0
+  calibration_file: config/calibration_points.json
+valve:
+  enabled: false
+  gpio_pin: null  # verified BCM GPIO number required
+  active_high: true
+```
+
+Do not enable the valve until the MOSFET signal wire's BCM GPIO number has been
+physically traced and verified. Startup and cleanup command the output OFF/LOW.
+The calibration file stores points 1-9 with `pixel_x`, `pixel_y`, `pan`, and
+`tilt`; the first version saves angles with null pixels until image point
+selection is implemented. Interpolation, automatic targeting, and automatic
+firing are intentionally not implemented.
 
 ## Deploy the changes to the Raspberry Pi
 
@@ -198,7 +233,7 @@ python -m pytest
 The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
 weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
 installing them under the ignored `models/` directory. Expected test result for
-this revision: **125 passed** without opening the USB camera. Then stop any old
+this revision: **136 passed** without opening the USB camera. Then stop any old
 dashboard, preview, recorder, or watcher process that already owns the camera and
 start the complete system:
 

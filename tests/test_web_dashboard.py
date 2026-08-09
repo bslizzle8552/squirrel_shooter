@@ -16,7 +16,10 @@ from flask import Flask
 from conftest import write_test_config
 from squirrel_shooter.camera_service import CameraService, CameraStatus
 from squirrel_shooter.config import CameraConfig, load_config
+from squirrel_shooter.manual_control import ManualControlService
 from squirrel_shooter.motion_runtime import MotionRuntimeStatus
+from squirrel_shooter.pan_tilt import PanTiltController
+from squirrel_shooter.valve import GPIOValveController, ValveConfig
 from squirrel_shooter.vision_service import VisionService, VisionStatus
 from squirrel_shooter.web_dashboard import build_parser, create_app, list_capture_images
 
@@ -69,6 +72,31 @@ class StaticVisionService:
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\nmock\r\n"
 
 
+class ManualControlDriver:
+    def configure_channel(self, channel: int, pulse_min_us: int, pulse_max_us: int) -> None:
+        del channel, pulse_min_us, pulse_max_us
+
+    def set_angle(self, channel: int, angle: float) -> None:
+        del channel, angle
+
+    def release(self, channel: int) -> None:
+        del channel
+
+    def cleanup(self) -> None:
+        return None
+
+
+class ManualControlOutput:
+    def on(self) -> None:
+        return None
+
+    def off(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 @pytest.fixture
 def dashboard(tmp_path: Path) -> tuple[Flask, Path, OfflineCameraService, StaticVisionService]:
     capture_directory = tmp_path / "captures"
@@ -101,7 +129,7 @@ def test_dashboard_loads_when_camera_is_unavailable(
     assert response.status_code == 200
     assert b"Camera offline" in response.data
     assert b"LEARNING background" in response.data
-    assert b"No physical outputs" in response.data
+    assert b"Manual control" in response.data
     assert b'id="stat-fps"' in response.data
     assert b'id="stat-temp"' in response.data
     assert b'id="stat-queue"' in response.data
@@ -111,6 +139,69 @@ def test_dashboard_loads_when_camera_is_unavailable(
     assert b"console.css" in response.data and b"console.js" in response.data
     assert camera.start_calls == 1
     assert vision.start_calls == 1
+
+
+def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path: Path) -> None:
+    config_path = write_test_config(tmp_path)
+    config = load_config(config_path)
+    now = [100.0]
+    pan_tilt = PanTiltController(config.pan_tilt, driver=ManualControlDriver(), sleep=lambda _seconds: None)
+    valve = GPIOValveController(ValveConfig(enabled=True, gpio_pin=17), output=ManualControlOutput())
+    controls = ManualControlService(
+        config.pan_tilt,
+        config.manual_control,
+        pan_tilt=pan_tilt,
+        valve=valve,
+        sleep=lambda _seconds: None,
+        clock=lambda: now[0],
+    )
+    app = create_app(
+        app_config=config,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(),  # type: ignore[arg-type]
+        manual_control_service=controls,
+        temperature_reader=lambda: None,
+    )
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    token = app.extensions["manual_control_token"]
+    headers = {"X-Control-Token": token}
+
+    page = client.get("/manual-control")
+    assert page.status_code == 200
+    assert b'aria-label="Pan left"' in page.data
+    assert b'id="fire-button"' in page.data
+    assert b"Commanded positions only" in page.data
+    assert client.post("/api/manual-control/move", json={"direction": "right", "step": 3}).status_code == 403
+
+    moved = client.post("/api/manual-control/move", json={"direction": "right", "step": 3}, headers=headers)
+    assert moved.status_code == 200
+    assert moved.json["control"]["pan"] == 88
+    fired = client.post("/api/manual-control/fire", json={}, headers=headers)
+    assert fired.status_code == 200
+    assert fired.json["control"]["state"] == "COOLDOWN"
+    assert client.post("/api/manual-control/fire", json={}, headers=headers).status_code == 409
+
+    during_cooldown = client.post(
+        "/api/manual-control/move",
+        json={"direction": "right", "step": 3},
+        headers=headers,
+    )
+    assert during_cooldown.status_code == 200
+    assert during_cooldown.json["control"]["pan"] == 91
+    saved = client.post(
+        "/api/manual-control/calibration",
+        json={"point": 1, "pixel_x": None, "pixel_y": None},
+        headers=headers,
+    )
+    assert saved.status_code == 200
+    assert saved.json["calibration_point"] == {
+        "point": 1,
+        "pixel_x": None,
+        "pixel_y": None,
+        "pan": 91.0,
+        "tilt": 85.0,
+    }
 
 
 def test_status_health_and_recent_events_endpoints(

@@ -1,4 +1,4 @@
-"""Read-only Flask dashboard for camera, motion, events, and diagnostics."""
+"""Flask dashboard for camera evidence and explicitly gated manual control."""
 
 from __future__ import annotations
 
@@ -23,6 +23,13 @@ from .camera_service import CameraService, CameraStatus
 from .classifier import CLASSIFICATION_VIEWS, VOC_LABELS, ClassifierEvidenceStore
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .event_report import load_events
+from .manual_control import (
+    ControlError,
+    ControlUnavailableError,
+    FireCooldownError,
+    ManualControlService,
+    build_manual_control_service,
+)
 from .motion_runtime import MotionProcessingService
 from .vision_service import VisionService, VisionStatus
 
@@ -222,11 +229,12 @@ def create_app(
     camera_service: CameraService | None = None,
     vision_service: VisionService | None = None,
     motion_service: MotionProcessingService | None = None,
+    manual_control_service: ManualControlService | None = None,
     temperature_reader: Callable[[], float | None] = read_cpu_temperature,
     start_camera: bool = True,
     start_vision: bool = True,
 ) -> Flask:
-    """Build a read-only dashboard around already-created shared services."""
+    """Build the dashboard around already-created shared services."""
 
     app_config = app_config or load_config(config_path)
     app = Flask(__name__)
@@ -244,6 +252,12 @@ def create_app(
     )
     classifier_store.prepare()
     classifier_review_token = secrets.token_urlsafe(32)
+    manual_control_token = secrets.token_urlsafe(32)
+    manual_control = manual_control_service or build_manual_control_service(
+        app_config.pan_tilt,
+        app_config.manual_control,
+        app_config.valve,
+    )
     started_at = monotonic()
     app.extensions.update(
         camera_service=camera,
@@ -253,6 +267,8 @@ def create_app(
         temperature_reader=temperature_reader,
         classifier_store=classifier_store,
         classifier_review_token=classifier_review_token,
+        manual_control_service=manual_control,
+        manual_control_token=manual_control_token,
     )
 
     if start_camera:
@@ -311,6 +327,70 @@ def create_app(
             mimetype="multipart/x-mixed-replace; boundary=frame",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+
+    def require_manual_control_token() -> None:
+        supplied = request.headers.get("X-Control-Token", "")
+        if not supplied or not hmac.compare_digest(supplied, manual_control_token):
+            abort(403)
+
+    def manual_control_error(exc: Exception) -> tuple[Any, int]:
+        if isinstance(exc, FireCooldownError):
+            return jsonify(error=str(exc), control=manual_control.status()), 409
+        if isinstance(exc, ControlUnavailableError):
+            return jsonify(error=str(exc), control=manual_control.status()), 503
+        if isinstance(exc, (ControlError, ValueError, TypeError)):
+            return jsonify(error=str(exc), control=manual_control.status()), 400
+        raise exc
+
+    @app.get("/manual-control")
+    def manual_control_page() -> str:
+        return render_template(
+            "manual_control.html",
+            control=manual_control.status(),
+            control_token=manual_control_token,
+            demo_mode=demo_mode,
+        )
+
+    @app.get("/api/manual-control")
+    def api_manual_control() -> Any:
+        return jsonify(control=manual_control.status())
+
+    @app.post("/api/manual-control/move")
+    def api_manual_control_move() -> Any:
+        require_manual_control_token()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="A JSON request body is required", control=manual_control.status()), 400
+        try:
+            manual_control.move(str(payload.get("direction", "")), payload.get("step"))
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(control=manual_control.status())
+
+    @app.post("/api/manual-control/fire")
+    def api_manual_control_fire() -> Any:
+        require_manual_control_token()
+        try:
+            manual_control.fire()
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(control=manual_control.status())
+
+    @app.post("/api/manual-control/calibration")
+    def api_manual_control_calibration() -> Any:
+        require_manual_control_token()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="A JSON request body is required", control=manual_control.status()), 400
+        try:
+            point = manual_control.save_calibration_point(
+                payload.get("point"),
+                pixel_x=payload.get("pixel_x"),
+                pixel_y=payload.get("pixel_y"),
+            )
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(calibration_point=asdict(point), control=manual_control.status())
 
     @app.get("/captures")
     def captures() -> str:

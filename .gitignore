@@ -43,6 +43,7 @@ camera-still-*.jpg
 *.h264
 *.log
 core.*
+config/calibration_points.json
 
 # Raspberry Pi removable-media trash
 .Trash-*/

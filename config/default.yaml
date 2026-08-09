@@ -59,8 +59,8 @@ classifier:
   audit_log_filename: classifier.jsonl
   worker_queue_capacity: 1
 
-# Bench-verified pan/tilt calibration. The normal camera application does not
-# construct this controller or move either servo. Use servo_bench explicitly.
+# Bench-verified pan/tilt calibration. Starting the controller configures the
+# PCA9685 channels but never commands movement until a manual request arrives.
 pan_tilt:
   i2c_address: 0x40
   pan_channel: 0
@@ -83,6 +83,23 @@ pan_tilt:
   settling_delay_seconds: 0.15
   release_pwm_after_movement: false
   park_on_cleanup: true
+
+# Phone/desktop manual aiming foundation. The 0.25 second valve pulse is a
+# conservative placeholder that MUST be tuned with supervised garden testing.
+manual_control:
+  servo_enabled: true
+  default_step_degrees: 3
+  allowed_step_degrees: [3, 5]
+  fire_pulse_seconds: 0.25  # TODO: tune tomorrow with water connected safely
+  fire_cooldown_seconds: 10.0
+  calibration_file: config/calibration_points.json
+
+# Fail-safe default: no GPIO is guessed and the normally-closed valve cannot
+# energize. Set a verified BCM pin and enabled: true only during supervised setup.
+valve:
+  enabled: false
+  gpio_pin: null  # TODO: enter the physically verified BCM GPIO number
+  active_high: true
 
 motion:
   enabled: true

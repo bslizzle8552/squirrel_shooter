@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "squirrel-shooter"
 version = "0.3.0"
-description = "Vision-only Raspberry Pi garden motion watcher and review workflow"
+description = "Raspberry Pi garden camera, review, and safety-gated manual control workflow"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,6 +21,7 @@ servo = [
     "adafruit-circuitpython-servokit",
     "adafruit-circuitpython-pca9685",
     "adafruit-lgpio>=0.2.2.0; sys_platform == 'linux' and python_version >= '3.13' and (platform_machine == 'aarch64' or platform_machine == 'armv7l')",
+    "gpiozero>=2,<3",
 ]
 
 [tool.setuptools.packages.find]

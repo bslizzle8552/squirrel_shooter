@@ -17,6 +17,7 @@ from .camera_preview import display_available
 from .camera_service import CameraService
 from .config import AppConfig, ConfigError, DEFAULT_CONFIG_PATH, load_config
 from .diagnostics import configure_logging
+from .manual_control import ManualControlService, build_manual_control_service
 from .motion_runtime import MotionProcessingService
 from .web_dashboard import create_app
 
@@ -133,19 +134,31 @@ def _apply_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
     return replace(config, dashboard=dashboard, runtime=runtime)
 
 
+def _cleanup_manual_control(control: ManualControlService | None) -> None:
+    if control is None:
+        return
+    try:
+        control.cleanup()
+    except Exception:
+        LOGGER.exception("Manual control cleanup failed; continuing application shutdown")
+
+
 def run(config: AppConfig) -> int:
     """Run until Ctrl+C or local q, then shut every subsystem down in order."""
 
     configure_logging(config.logging, config.storage.max_log_files)
     runtime = ApplicationRuntime(config)
     server: DashboardServer | None = None
+    manual_control: ManualControlService | None = None
     runtime.start()
     try:
         if config.dashboard.enabled:
+            manual_control = build_manual_control_service(config.pan_tilt, config.manual_control, config.valve)
             flask_app = create_app(
                 app_config=config,
                 camera_service=runtime.camera,
                 motion_service=runtime.motion,
+                manual_control_service=manual_control,
                 start_camera=False,
                 start_vision=False,
             )
@@ -155,6 +168,7 @@ def run(config: AppConfig) -> int:
         else:
             print("Dashboard disabled; motion processing is still active.")
     except Exception:
+        _cleanup_manual_control(manual_control)
         runtime.stop()
         raise
     show_preview = not config.runtime.headless and display_available()
@@ -194,6 +208,7 @@ def run(config: AppConfig) -> int:
             cv2.destroyAllWindows()
         if server is not None:
             server.stop(timeout=config.runtime.shutdown_timeout_seconds)
+        _cleanup_manual_control(manual_control)
         runtime.stop()
         LOGGER.info(
             "Combined application shutdown complete",

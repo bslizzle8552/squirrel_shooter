@@ -6,6 +6,7 @@
     <meta name="theme-color" content="#15171b">
     <title>{% block title %}Squirrel Squirter{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+    {% block styles %}{% endblock %}
   </head>
   <body>
     {% if demo_mode %}<div class="demo-ribbon" role="note">DEMO DATA</div>{% endif %}
@@ -20,6 +21,7 @@
         </a>
         <nav aria-label="Main navigation">
           <a class="{{ 'active' if request.endpoint == 'dashboard' }}" href="{{ url_for('dashboard') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'dashboard' }}>Live camera</a>
+          <a class="{{ 'active' if request.endpoint == 'manual_control_page' }}" href="{{ url_for('manual_control_page') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'manual_control_page' }}>Manual control</a>
           <a class="{{ 'active' if request.endpoint == 'events' }}" href="{{ url_for('events') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'events' }}>Events</a>
           <a class="{{ 'active' if request.endpoint == 'classifier_review' }}" href="{{ url_for('classifier_review') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'classifier_review' }}>Object review</a>
           <a class="{{ 'active' if request.endpoint == 'captures' }}" href="{{ url_for('captures') }}" {{ 'aria-current="page"'|safe if request.endpoint == 'captures' }}>Pictures</a>

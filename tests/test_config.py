@@ -7,6 +7,8 @@ import yaml
 
 from squirrel_shooter.config import ConfigError, load_config
 from squirrel_shooter.pan_tilt import PanTiltConfig
+from squirrel_shooter.manual_control import ManualControlConfig
+from squirrel_shooter.valve import ValveConfig
 from conftest import PROJECT_ROOT
 
 
@@ -39,6 +41,12 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.pan_tilt.tilt_min == 70
     assert config.pan_tilt.tilt_center == 85
     assert config.pan_tilt.tilt_max == 150
+    assert config.manual_control.servo_enabled is True
+    assert config.manual_control.allowed_step_degrees == (3, 5)
+    assert config.manual_control.default_step_degrees == 3
+    assert config.manual_control.fire_pulse_seconds == 0.25
+    assert config.manual_control.fire_cooldown_seconds == 10.0
+    assert config.valve == ValveConfig(enabled=False, gpio_pin=None, active_high=True)
     assert config.motion.min_blob_area == 500
     assert config.motion.inclusion_zone.enabled is True
     assert config.motion.inclusion_zone.polygon == (
@@ -121,3 +129,26 @@ def test_older_config_without_pan_tilt_section_uses_safe_defaults(tmp_path: Path
     config = load_config(config_path)
 
     assert config.pan_tilt == PanTiltConfig()
+
+
+def test_older_config_without_manual_hardware_sections_uses_safe_defaults(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    del raw["manual_control"]
+    del raw["valve"]
+    config_path = tmp_path / "legacy.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.manual_control == ManualControlConfig()
+    assert config.valve == ValveConfig()
+
+
+def test_valve_cannot_be_enabled_without_a_gpio_pin(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["valve"]["enabled"] = True
+    config_path = tmp_path / "unsafe-valve.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="gpio_pin"):
+        load_config(config_path)

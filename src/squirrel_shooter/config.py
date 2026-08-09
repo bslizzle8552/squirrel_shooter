@@ -8,7 +8,9 @@ from typing import Any
 
 import yaml
 
+from .manual_control import ManualControlConfig
 from .pan_tilt import PanTiltConfig
+from .valve import ValveConfig
 
 
 DEFAULT_CONFIG_PATH = Path("config/default.yaml")
@@ -261,6 +263,8 @@ class AppConfig:
     night_mode: NightModeConfig
     classifier: ClassifierConfig
     pan_tilt: PanTiltConfig
+    manual_control: ManualControlConfig
+    valve: ValveConfig
     motion: MotionConfig
     storage: StorageConfig
     retention: RetentionConfig
@@ -417,6 +421,56 @@ def _pan_tilt_config(raw: dict[str, Any]) -> PanTiltConfig:
         raise ConfigError(f"Invalid pan_tilt configuration: {exc}") from exc
 
 
+def _manual_control_config(raw: dict[str, Any]) -> ManualControlConfig:
+    defaults = ManualControlConfig()
+    steps = raw.get("allowed_step_degrees", list(defaults.allowed_step_degrees))
+    if not isinstance(steps, list):
+        raise ConfigError("manual_control.allowed_step_degrees must be a list")
+    try:
+        return ManualControlConfig(
+            servo_enabled=_bool(raw.get("servo_enabled", defaults.servo_enabled), "manual_control.servo_enabled"),
+            default_step_degrees=_int(
+                raw.get("default_step_degrees", defaults.default_step_degrees),
+                "manual_control.default_step_degrees",
+                minimum=1,
+            ),
+            allowed_step_degrees=tuple(
+                _int(value, "manual_control.allowed_step_degrees item", minimum=1) for value in steps
+            ),
+            fire_pulse_seconds=_number(
+                raw.get("fire_pulse_seconds", defaults.fire_pulse_seconds),
+                "manual_control.fire_pulse_seconds",
+                exclusive=True,
+            ),
+            fire_cooldown_seconds=_number(
+                raw.get("fire_cooldown_seconds", defaults.fire_cooldown_seconds),
+                "manual_control.fire_cooldown_seconds",
+                exclusive=True,
+            ),
+            calibration_file=_path(
+                raw.get("calibration_file", str(defaults.calibration_file)),
+                "manual_control.calibration_file",
+            ),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"Invalid manual_control configuration: {exc}") from exc
+
+
+def _valve_config(raw: dict[str, Any]) -> ValveConfig:
+    defaults = ValveConfig()
+    gpio_pin = raw.get("gpio_pin", defaults.gpio_pin)
+    if gpio_pin is not None:
+        gpio_pin = _int(gpio_pin, "valve.gpio_pin")
+    try:
+        return ValveConfig(
+            enabled=_bool(raw.get("enabled", defaults.enabled), "valve.enabled"),
+            gpio_pin=gpio_pin,
+            active_high=_bool(raw.get("active_high", defaults.active_high), "valve.active_high"),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"Invalid valve configuration: {exc}") from exc
+
+
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     """Load a complete configuration and reject unsafe or ambiguous values."""
 
@@ -441,6 +495,12 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     pan_tilt_raw = raw.get("pan_tilt", {})
     if not isinstance(pan_tilt_raw, dict):
         raise ConfigError("pan_tilt must be a mapping when provided")
+    manual_control_raw = raw.get("manual_control", {})
+    if not isinstance(manual_control_raw, dict):
+        raise ConfigError("manual_control must be a mapping when provided")
+    valve_raw = raw.get("valve", {})
+    if not isinstance(valve_raw, dict):
+        raise ConfigError("valve must be a mapping when provided")
     roi = _mapping(motion, "roi")
     debug = _mapping(motion, "debug_outputs")
     warmup = _mapping(motion, "startup_warmup")
@@ -638,6 +698,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         raise ConfigError("classifier.audit_log_filename must be a filename, not a path")
 
     pan_tilt_config = _pan_tilt_config(pan_tilt_raw)
+    manual_control_config = _manual_control_config(manual_control_raw)
+    valve_config = _valve_config(valve_raw)
 
     return AppConfig(
         camera=CameraConfig(
@@ -707,6 +769,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _int(classifier.get("worker_queue_capacity"), "classifier.worker_queue_capacity", minimum=1),
         ),
         pan_tilt=pan_tilt_config,
+        manual_control=manual_control_config,
+        valve=valve_config,
         motion=motion_config,
         storage=StorageConfig(*(_int(storage.get(name), f"storage.{name}", minimum=1) for name in ("max_event_captures", "max_debug_images", "max_log_files"))),
         retention=RetentionConfig(

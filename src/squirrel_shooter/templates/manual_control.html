@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Manual control · Squirrel Squirter{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='manual_control.css') }}">{% endblock %}
+{% block content %}
+  <section class="manual-heading">
+    <div>
+      <p class="eyebrow">Manual aiming &amp; calibration</p>
+      <h1>Garden controls</h1>
+      <p>Commanded positions only—these servos do not report their actual angle.</p>
+    </div>
+    <div class="control-state" id="control-state" role="status" aria-live="polite">{{ control.state }}</div>
+  </section>
+
+  <div class="manual-layout">
+    <section class="manual-card camera-card" aria-labelledby="camera-title">
+      <div class="card-heading">
+        <div><p class="eyebrow">Shared live view</p><h2 id="camera-title">Camera</h2></div>
+        <a href="{{ url_for('dashboard') }}">Open full console</a>
+      </div>
+      <div class="manual-video"><img src="{{ url_for('video_feed') }}" alt="Live garden camera stream"></div>
+      <p class="camera-note">Image tapping is reserved for the later calibrated point-and-click mode.</p>
+    </section>
+
+    <section class="manual-card controls-card" aria-labelledby="aim-title">
+      <div class="angle-readout" aria-label="Current commanded servo angles">
+        <div><span>Pan</span><strong><b id="pan-angle">{{ control.pan }}</b>°</strong></div>
+        <div><span>Tilt</span><strong><b id="tilt-angle">{{ control.tilt }}</b>°</strong></div>
+      </div>
+
+      <div class="card-heading aim-heading">
+        <div><p class="eyebrow">Touch or arrow keys</p><h2 id="aim-title">Aim</h2></div>
+        <div class="step-picker" role="group" aria-label="Movement step">
+          {% for step in control.allowed_steps %}
+          <button type="button" class="step-button {{ 'selected' if step == control.default_step }}" data-step="{{ step }}" aria-pressed="{{ 'true' if step == control.default_step else 'false' }}">{{ step }}°</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="dpad" role="group" aria-label="Pan and tilt controls">
+        <button type="button" class="dpad-button up" data-direction="up" aria-label="Tilt up">↑<span>Up</span></button>
+        <button type="button" class="dpad-button left" data-direction="left" aria-label="Pan left">←<span>Left</span></button>
+        <button type="button" class="dpad-button center" data-direction="center" aria-label="Center pan and tilt at 85 degrees">●<span>Center</span></button>
+        <button type="button" class="dpad-button right" data-direction="right" aria-label="Pan right">→<span>Right</span></button>
+        <button type="button" class="dpad-button down" data-direction="down" aria-label="Tilt down">↓<span>Down</span></button>
+      </div>
+      <p class="hardware-note" id="servo-note" {% if control.servo_available %}hidden{% endif %}>Servo unavailable: {{ control.servo_error or 'hardware is not enabled' }}</p>
+    </section>
+
+    <section class="manual-card fire-card" aria-labelledby="fire-title">
+      <div class="card-heading">
+        <div><p class="eyebrow">Single controlled pulse</p><h2 id="fire-title">Water test</h2></div>
+        <strong class="fire-status" id="fire-status">{{ 'READY' if control.valve_available else 'VALVE NOT CONFIGURED' }}</strong>
+      </div>
+      <button type="button" class="fire-button" id="fire-button" {% if not control.valve_available %}disabled{% endif %}>FIRE</button>
+      <p>One {{ control.fire_pulse_seconds }}s pulse, followed by a hard 10-second server cooldown. Servo movement remains available during cooldown.</p>
+      <p class="hardware-note" id="valve-note" {% if control.valve_available %}hidden{% endif %}>{{ control.valve_error or 'A verified GPIO pin is required before firing can be enabled.' }}</p>
+    </section>
+
+    <section class="manual-card calibration-card" aria-labelledby="calibration-title">
+      <div class="card-heading">
+        <div><p class="eyebrow">Nine-point garden grid</p><h2 id="calibration-title">Save calibration point</h2></div>
+        <span id="saved-count">{{ control.calibration_points|length }}/9 saved</span>
+      </div>
+      <div class="calibration-actions">
+        <label for="calibration-point">Grid point</label>
+        <select id="calibration-point">
+          {% for point in range(1, 10) %}<option value="{{ point }}">Point {{ point }}</option>{% endfor %}
+        </select>
+        <button type="button" id="save-calibration">Save current angles</button>
+      </div>
+      <p>Pixel coordinates remain empty until camera-image point selection is added. Saving the same point replaces it.</p>
+    </section>
+  </div>
+  <div class="manual-toast" id="manual-toast" role="status" aria-live="polite"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+window.SS_MANUAL_CONTROL = {
+  token: {{ control_token|tojson }},
+  initial: {{ control|tojson }},
+  urls: {
+    status: {{ url_for('api_manual_control')|tojson }},
+    move: {{ url_for('api_manual_control_move')|tojson }},
+    fire: {{ url_for('api_manual_control_fire')|tojson }},
+    calibration: {{ url_for('api_manual_control_calibration')|tojson }}
+  }
+};
+</script>
+<script src="{{ url_for('static', filename='manual_control.js') }}" defer></script>
+{% endblock %}
