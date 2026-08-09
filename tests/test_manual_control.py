@@ -15,8 +15,11 @@ from squirrel_shooter.manual_control import (
     InterpolatedAim,
     ManualControlConfig,
     ManualControlService,
+    calibration_geometry_payload,
     display_click_to_frame_pixel,
     interpolate_calibration_target,
+    is_target_in_calibrated_area,
+    validate_complete_calibration_grid,
 )
 from squirrel_shooter.pan_tilt import PanTiltConfig, PanTiltPosition
 from squirrel_shooter.valve import ValveState
@@ -112,6 +115,22 @@ def complete_calibration_grid() -> list[CalibrationPoint]:
     ]
 
 
+def real_field_calibration_grid() -> list[CalibrationPoint]:
+    """Physically completed 1280x720 records read from the deployed calibration store."""
+
+    return [
+        CalibrationPoint(1, 446, 172, 84.0, 79.0),
+        CalibrationPoint(2, 668, 180, 74.0, 78.0),
+        CalibrationPoint(3, 893, 192, 61.0, 75.0),
+        CalibrationPoint(4, 448, 227, 84.0, 93.0),
+        CalibrationPoint(5, 640, 246, 70.0, 88.0),
+        CalibrationPoint(6, 1003, 242, 58.0, 88.0),
+        CalibrationPoint(7, 139, 436, 101.0, 109.0),
+        CalibrationPoint(8, 693, 434, 73.0, 109.0),
+        CalibrationPoint(9, 1121, 412, 48.0, 104.0),
+    ]
+
+
 def test_dpad_tracks_commanded_position_centers_and_clamps(tmp_path: Path) -> None:
     service, pan_tilt, _ = make_service(tmp_path)
 
@@ -155,6 +174,28 @@ def test_display_click_maps_scaled_and_letterboxed_image_to_native_pixel() -> No
         display_click_to_frame_pixel(400, 50, 800, 600, 1280, 720)
 
 
+@pytest.mark.parametrize(
+    ("width", "height"),
+    [
+        (1280.0, 720.0),
+        (640.0, 360.0),
+        (726.4167, 408.6042),
+        (800.0, 600.0),
+    ],
+)
+def test_real_bottom_right_pixel_maps_identically_at_rendered_sizes(
+    width: float,
+    height: float,
+) -> None:
+    scale = min(width / 1280, height / 720)
+    offset_x = (width - 1280 * scale) / 2
+    offset_y = (height - 720 * scale) / 2
+    display_x = offset_x + 1121.5 * scale
+    display_y = offset_y + 412.5 * scale
+
+    assert display_click_to_frame_pixel(display_x, display_y, width, height, 1280, 720) == (1121, 412)
+
+
 def test_targeting_requires_all_nine_complete_calibration_points(tmp_path: Path) -> None:
     incomplete = complete_calibration_grid()[:-1]
     service, pan_tilt, valve = make_service(tmp_path, calibration_points=incomplete)
@@ -169,7 +210,7 @@ def test_targeting_requires_all_nine_complete_calibration_points(tmp_path: Path)
     assert "open" not in valve.events
 
 
-def test_piecewise_interpolation_reproduces_points_and_intermediate_values() -> None:
+def test_inverse_bilinear_interpolation_reproduces_points_and_intermediate_values() -> None:
     points = complete_calibration_grid()
     config = PanTiltConfig()
 
@@ -184,9 +225,97 @@ def test_piecewise_interpolation_reproduces_points_and_intermediate_values() -> 
         pixel_y=150,
         pan=120.0,
         tilt=90.0,
-        cell=(1, 2, 5, 4),
-        triangle=(1, 2, 5),
+        cell=(1, 2, 4, 5),
     )
+
+
+def test_real_loaded_grid_keeps_every_anchor_in_range_and_reproduces_saved_aim(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path / "real-calibration.json")
+    expected = real_field_calibration_grid()
+    for point in expected:
+        store.save(point)
+
+    loaded = store.load()
+    assert loaded == expected
+    assert len(loaded) == 9
+    assert all(point.complete for point in loaded)
+    for point in loaded:
+        assert is_target_in_calibrated_area(loaded, int(point.pixel_x), int(point.pixel_y))
+        aim = interpolate_calibration_target(loaded, int(point.pixel_x), int(point.pixel_y), PanTiltConfig())
+        assert aim.pan == pytest.approx(point.pan, abs=1e-7)
+        assert aim.tilt == pytest.approx(point.tilt, abs=1e-7)
+
+    bottom_right = interpolate_calibration_target(loaded, 1121, 412, PanTiltConfig())
+    assert bottom_right.pan == pytest.approx(48.0)
+    assert bottom_right.tilt == pytest.approx(104.0)
+    assert bottom_right.cell == (5, 6, 8, 9)
+
+
+def test_real_grid_geometry_exposes_all_anchors_boundary_and_four_simple_cells() -> None:
+    points = real_field_calibration_grid()
+    indexed = validate_complete_calibration_grid(points)
+    geometry = calibration_geometry_payload(points)
+
+    assert set(indexed) == set(range(1, 10))
+    assert [anchor["point"] for anchor in geometry["anchors"]] == list(range(1, 10))
+    assert [point["point"] for point in geometry["boundary"]] == [1, 2, 3, 6, 9, 8, 7, 4]
+    assert [cell["points"] for cell in geometry["cells"]] == [
+        [1, 2, 4, 5],
+        [2, 3, 5, 6],
+        [4, 5, 7, 8],
+        [5, 6, 8, 9],
+    ]
+
+
+@pytest.mark.parametrize(
+    "pixel",
+    [
+        (557, 176),  # 1-2
+        (780, 186),  # 2-3
+        (448, 200),  # nearest native pixel inside the 1-4 boundary edge
+        (654, 213),  # 2-5
+        (948, 217),  # 3-6
+        (544, 236),  # 4-5
+        (294, 332),  # 4-7
+        (822, 244),  # 5-6
+        (666, 340),  # 5-8
+        (1062, 327),  # 6-9
+        (416, 435),  # 7-8
+        (907, 423),  # 8-9
+    ],
+)
+def test_real_grid_edges_are_targetable(pixel: tuple[int, int]) -> None:
+    aim = interpolate_calibration_target(real_field_calibration_grid(), *pixel, PanTiltConfig())
+    assert 30 <= aim.pan <= 150
+    assert 70 <= aim.tilt <= 150
+
+
+@pytest.mark.parametrize(
+    ("pixel", "cell"),
+    [
+        ((550, 206), (1, 2, 4, 5)),
+        ((801, 215), (2, 3, 5, 6)),
+        ((480, 336), (4, 5, 7, 8)),
+        ((864, 334), (5, 6, 8, 9)),
+    ],
+)
+def test_real_grid_interior_of_each_cell_is_bounded_and_selects_that_cell(
+    pixel: tuple[int, int],
+    cell: tuple[int, int, int, int],
+) -> None:
+    aim = interpolate_calibration_target(real_field_calibration_grid(), *pixel, PanTiltConfig())
+    assert aim.cell == cell
+    assert 30 <= aim.pan <= 150
+    assert 70 <= aim.tilt <= 150
+
+
+def test_self_intersecting_real_grid_cell_is_rejected() -> None:
+    points = real_field_calibration_grid()
+    point_5 = points[4]
+    points[4] = CalibrationPoint(5, 450, 180, point_5.pan, point_5.tilt)
+
+    with pytest.raises(ControlError, match="self-intersecting|non-convex"):
+        validate_complete_calibration_grid(points)
 
 
 def test_interpolation_rejects_outside_clicks_and_clamps_output() -> None:

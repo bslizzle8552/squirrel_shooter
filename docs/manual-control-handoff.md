@@ -65,6 +65,30 @@ The desktop calibration card has a prominent full-width `SAVE AIM` button. Once 
 
 Calibration cannot be saved until a pixel has been selected and CENTER or another real servo command has occurred. The startup 85°/85° display remains an uncommanded reference.
 
+## Field targeting geometry diagnosis
+
+The field report was that a click on the unmoved bottom-right red calibration block was rejected as out of range and that accepted intermediate targets aimed feet left and long. A read-only inspection of the deployed backend returned these nine complete 1280x720 native-frame records; this pass does not alter them:
+
+| Point | Pixel X | Pixel Y | Pan | Tilt |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 446 | 172 | 84 | 79 |
+| 2 | 668 | 180 | 74 | 78 |
+| 3 | 893 | 192 | 61 | 75 |
+| 4 | 448 | 227 | 84 | 93 |
+| 5 | 640 | 246 | 70 | 88 |
+| 6 | 1003 | 242 | 58 | 88 |
+| 7 | 139 | 436 | 101 | 109 |
+| 8 | 693 | 434 | 73 | 109 |
+| 9 | 1121 | 412 | 48 | 104 |
+
+The records match the intended perspective-distorted 3 by 3 layout. The verified outer perimeter order is `1-2-3-6-9-8-7-4`; it is simple, contains all nine anchors, and is not widened beyond the saved geometry. Backend reproduction showed that exact Point 9 `(1121, 412)` was already accepted and returned approximately pan 48 / tilt 104, while `(1121, 424)` was outside. The latter is only 12 native pixels lower and can still land on the visible lower portion of the same physical block because perimeter anchors are stored at block centers. Without an overlay, that distinction appeared to be rejection of the anchor itself.
+
+The prior mapping also split every four-anchor cell across a fixed diagonal and used only three anchors for any one result. That arbitrary diagonal creates a discontinuous choice of local fit and does not use all four physically measured corner aims, which is a credible software cause of poor intermediate field aim. It has been replaced with inverse bilinear image-space mapping and four-corner bilinear pan/tilt interpolation inside the selected quadrilateral. This preserves every anchor within floating-point tolerance, behaves continuously across each cell, and does not extrapolate beyond the calibrated cell union.
+
+The desktop live view now draws the exact targeting geometry: a yellow outer boundary, four blue cell outlines, and numbered markers for all nine saved anchors. AIM feedback reports native X/Y, `IN RANGE` or `OUT OF RANGE`, selected cell, `inverse bilinear`, calculated pan/tilt, and the rejection reason. The overlay and targeting use the same backend native-pixel records; they do not modify calibration.
+
+The deployed camera reported a 1280x720 native frame. The live desktop image measured approximately 726.42x408.60 CSS pixels with `object-fit: contain`, and its parent had the same bounds. Both calibration and AIM clicks use the same `display_click_to_frame_pixel()` conversion, including scaling and any letterbox offsets. Automated checks cover native size, half size, the observed live size, and a letterboxed 800x600 display; each maps the center of Point 9 back to `(1121, 412)`.
+
 ## Desktop click-to-aim
 
 The camera card now has two explicit desktop modes:
@@ -72,11 +96,11 @@ The camera card now has two explicit desktop modes:
 - `AIM TARGET` is available only with a valid complete nine-point grid. A click is mapped to a native camera pixel, interpolated, clamped to existing servo limits, and passed through `ManualControlService` for serialized movement and settling. It does not write the calibration store, open the valve, or start cooldown.
 - `EDIT CALIBRATION` retains the prior behavior: a click updates only the selected calibration point's pixel. This explicit mode is the only camera-click path that can modify calibration data.
 
-Interpolation is local and piecewise linear. The 3 by 3 grid forms four quadrilateral cells: `1-2-5-4`, `2-3-6-5`, `4-5-8-7`, and `5-6-9-8`. Each cell is split along its top-left to bottom-right diagonal, producing eight triangles. Barycentric weights inside the containing triangle interpolate both pan and tilt. This reproduces every saved calibration point exactly and handles perspective-distorted camera geometry without fitting a complex model.
+Interpolation is local and four-corner bilinear. The 3 by 3 grid forms four quadrilateral cells identified as `1-2-4-5`, `2-3-5-6`, `4-5-7-8`, and `5-6-8-9`, with their geometric corners consistently ordered top-left, top-right, bottom-right, bottom-left. The backend first tests cell membership in native camera pixels, inverse-maps the selected quadrilateral to local horizontal/vertical coordinates, and uses those coordinates to bilinearly interpolate pan and tilt from all four saved aims.
 
-Only clicks inside the union of those eight triangles are accepted. A click outside that calibrated region returns `OUTSIDE CALIBRATED AREA`; there is no extrapolation or fallback guess. Final interpolated commands are still clamped to pan 30-150 degrees and tilt 70-150 degrees.
+Only clicks inside the union of those four validated quadrilaterals are accepted. The outer display boundary follows `1-2-3-6-9-8-7-4`, and validation rejects self-intersecting, degenerate, or non-convex geometry and any anchor outside the boundary/cell union. A click outside returns `OUTSIDE CALIBRATED AREA`; there is no extrapolation or fallback guess. Final interpolated commands are still clamped to pan 30-150 degrees and tilt 70-150 degrees.
 
-The backend stores the last requested target pixel, calculated pan/tilt, cell, and targeting status. The desktop shows the target marker, clicked X/Y, calculated pan/tilt, and `MOVING`, `SETTLING`, `AIM READY`, `FIRING`, `PARKING`, or `PARKED` status as applicable. Both desktop and phone continue polling the same backend commanded position.
+The backend stores the last requested target pixel, calculated pan/tilt, cell, in-range result, and targeting status. The desktop shows the diagnostic geometry, target marker, clicked X/Y, selected cell/method, calculated pan/tilt, reason for rejection, and `MOVING`, `SETTLING`, `AIM READY`, `FIRING`, `PARKING`, or `PARKED` status as applicable. Both desktop and phone continue polling the same backend commanded position.
 
 ## Firing safety
 
@@ -111,9 +135,14 @@ The nine blocks replace the earlier painted-X marker concept; the calibration ge
 
 No new click-to-aim or 85/88 PARK behavior is claimed as physically verified by automated tests.
 
-1. First click-to-aim test: disconnect or shut off the water supply, open the desktop page, confirm `Calibration: 9 / 9`, select `AIM TARGET`, and click directly on one known calibration block. Confirm the target marker and X/Y, verify the reported aim matches that point's saved pan/tilt, observe movement followed by `AIM READY`, and confirm the valve/MOSFET never energizes. Then try one click clearly outside the calibrated block region and confirm it is rejected without movement.
-2. First manual fire after interpolated aim: with the area supervised and water restored, click a known point, wait for `AIM READY` and complete servo stillness, then press the existing FIRE button once. Confirm the shot occurs from that aim, lasts 0.25 seconds, and a repeated FIRE remains blocked by the 10-second cooldown.
-3. First PARK verification: perform a dry-fire first and observe that the valve is OFF before the servo moves to pan 85 / tilt 88. Confirm the nozzle ends approximately 2-3 degrees physically upward from CENTER. If 88 moves the installed nozzle the wrong way or too far, stop before wet testing and tune the configurable `pan_tilt.park_tilt`; CENTER stays 85/85 and the servo limits must not change.
+1. Pull/restart the existing `manual-control` deployment with the water supply disconnected or shut off. Open the desktop page and confirm `Calibration: 9 / 9`.
+2. Select `AIM TARGET`. Confirm the yellow boundary, four blue cells, and all markers 1-9 appear. In particular, marker 9 must sit at the stored center of the bottom-right red block.
+3. Click exactly on marker 9. Confirm native X/Y is `1121 / 412`, status is `IN RANGE`, cell is `5-6-8-9`, calculated aim is approximately pan 48 / tilt 104, movement ends at `AIM READY`, and the valve/MOSFET never energizes.
+4. Repeat the dry check on Point 1 `(446,172 -> 84/79)`, Point 5 `(640,246 -> 70/88)`, and the other six numbered markers. Stop if any exact marker is rejected or fails to reproduce its saved aim.
+5. Click a clearly interior location in each of the four blue cells. Confirm it reports the expected cell, moves and settles only, and produces no valve activity. Do not judge water accuracy yet.
+6. Click just outside the yellow perimeter. Confirm `OUT OF RANGE`, a visible reason, and no movement. A click below Point 9 may correctly be outside even when it is still visually on the lower part of the boundary block; the yellow line is authoritative and is intentionally not expanded.
+7. Only after those dry checks pass, restore water under supervision. Click one known anchor, wait for `AIM READY` and complete servo stillness, then press the separate FIRE button once. Confirm the shot lasts 0.25 seconds and repeated FIRE remains blocked by the 10-second cooldown.
+8. Perform a separate dry-fire PARK check and observe that the valve is OFF before movement to pan 85 / tilt 88. If PARK moves the installed nozzle the wrong way or too far, stop before more wet testing; CENTER stays 85/85 and servo limits remain unchanged.
 
 Automatic firing on click, autonomous engagement, tracking, prediction, bursts, and guard-mode firing remain intentionally unimplemented.
 

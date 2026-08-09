@@ -185,7 +185,7 @@ controller.cleanup()
 
 The existing Flask dashboard serves `/manual-control`. The large D-pad and
 desktop arrow keys share the same server endpoint and the same limit enforcement.
-The selected step defaults to 3° and can be changed to 5°. CENTER commands both
+The selected step defaults to 3° and can be changed to 1° or 5°. CENTER commands both
 axes to 85°. Displayed angles are software-commanded positions, not servo
 feedback. Before the first movement, 85°/85° is visibly identified as an
 uncommanded startup reference; calibration cannot be saved until the operator
@@ -231,9 +231,12 @@ both pixel and aim values turn green and count toward 9/9.
 
 The calibration file stores points 1-9 with `pixel_x`, `pixel_y`, `pan`, and
 `tilt`. Re-clicking or re-saving replaces the same point instead of creating a
-duplicate. Interpolation, pixel-to-aim targeting, and automatic firing remain
-intentionally unimplemented. Every future firing path must continue to use the
-shared target, move, settle, fire, cooldown pipeline.
+duplicate. Desktop AIM TARGET displays all nine anchors, the four calibrated
+cells, and the exact outer boundary. It inverse-maps a click inside its local
+four-anchor quadrilateral and bilinearly interpolates pan/tilt without changing
+calibration or firing. Automatic firing remains intentionally unimplemented.
+Every firing path must continue to use the shared target, move, settle, fire,
+cooldown pipeline.
 
 `Misc/` is owner-only project storage. It is ignored by Git and governed by the
 root `AGENTS.md`: normal coding work must not inspect, modify, stage, or commit

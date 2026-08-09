@@ -171,15 +171,16 @@ class InterpolatedAim:
     pan: float
     tilt: float
     cell: tuple[int, int, int, int]
-    triangle: tuple[int, int, int]
+    triangle: None = None
 
 
 CALIBRATION_CELLS = (
-    ((1, 2, 5, 4), ((1, 2, 5), (1, 5, 4))),
-    ((2, 3, 6, 5), ((2, 3, 6), (2, 6, 5))),
-    ((4, 5, 8, 7), ((4, 5, 8), (4, 8, 7))),
-    ((5, 6, 9, 8), ((5, 6, 9), (5, 9, 8))),
+    ((1, 2, 4, 5), (1, 2, 5, 4)),
+    ((2, 3, 5, 6), (2, 3, 6, 5)),
+    ((4, 5, 7, 8), (4, 5, 8, 7)),
+    ((5, 6, 8, 9), (5, 6, 9, 8)),
 )
+CALIBRATION_BOUNDARY = (1, 2, 3, 6, 9, 8, 7, 4)
 
 
 def validate_complete_calibration_grid(points: list[CalibrationPoint]) -> dict[int, CalibrationPoint]:
@@ -198,12 +199,59 @@ def validate_complete_calibration_grid(points: list[CalibrationPoint]) -> dict[i
     pixels = {(point.pixel_x, point.pixel_y) for point in points}
     if len(pixels) != 9:
         raise ControlError("Targeting calibration contains duplicate camera pixels")
-    for _cell, triangles in CALIBRATION_CELLS:
-        for triangle in triangles:
-            if abs(_triangle_denominator(*(indexed[number] for number in triangle))) < 1e-9:
-                joined = "-".join(str(number) for number in triangle)
-                raise ControlError(f"Targeting calibration triangle {joined} is degenerate")
+    boundary = tuple(indexed[number] for number in CALIBRATION_BOUNDARY)
+    if not _is_simple_polygon(boundary):
+        raise ControlError("Targeting calibration outer boundary is self-intersecting or degenerate")
+    for point in points:
+        if not _point_in_polygon_or_boundary(float(point.pixel_x), float(point.pixel_y), boundary):
+            raise ControlError(f"Targeting calibration point {point.point} falls outside the outer boundary")
+    for cell, corner_order in CALIBRATION_CELLS:
+        corners = tuple(indexed[number] for number in corner_order)
+        if not _is_simple_convex_quadrilateral(corners):
+            joined = "-".join(str(number) for number in cell)
+            raise ControlError(f"Targeting calibration cell {joined} is self-intersecting or non-convex")
+    for point in points:
+        if not any(
+            _point_in_polygon_or_boundary(float(point.pixel_x), float(point.pixel_y), tuple(indexed[n] for n in order))
+            for _cell, order in CALIBRATION_CELLS
+        ):
+            raise ControlError(f"Targeting calibration point {point.point} falls outside the calibrated cells")
     return indexed
+
+
+def is_target_in_calibrated_area(points: list[CalibrationPoint], pixel_x: int, pixel_y: int) -> bool:
+    """Return whether a native-frame pixel is inside any validated calibration cell."""
+
+    for name, value in (("pixel_x", pixel_x), ("pixel_y", pixel_y)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    indexed = validate_complete_calibration_grid(points)
+    return any(
+        _point_in_polygon_or_boundary(pixel_x, pixel_y, tuple(indexed[number] for number in corner_order))
+        for _cell, corner_order in CALIBRATION_CELLS
+    )
+
+
+def calibration_geometry_payload(points: list[CalibrationPoint]) -> dict[str, object]:
+    """Expose the exact native-pixel geometry used by targeting for diagnostics."""
+
+    indexed = validate_complete_calibration_grid(points)
+
+    def pixel(number: int) -> dict[str, int]:
+        point = indexed[number]
+        return {"point": number, "pixel_x": int(point.pixel_x), "pixel_y": int(point.pixel_y)}
+
+    return {
+        "boundary": [pixel(number) for number in CALIBRATION_BOUNDARY],
+        "cells": [
+            {
+                "points": list(cell),
+                "corners": [pixel(number) for number in corner_order],
+            }
+            for cell, corner_order in CALIBRATION_CELLS
+        ],
+        "anchors": [pixel(number) for number in range(1, 10)],
+    }
 
 
 def interpolate_calibration_target(
@@ -212,53 +260,184 @@ def interpolate_calibration_target(
     pixel_y: int,
     pan_tilt_config: PanTiltConfig,
 ) -> InterpolatedAim:
-    """Interpolate within the eight triangles covering the calibrated 3x3 region."""
+    """Inverse-map a native pixel and bilinearly interpolate its four-anchor cell."""
 
     for name, value in (("pixel_x", pixel_x), ("pixel_y", pixel_y)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
     indexed = validate_complete_calibration_grid(points)
-    for cell, triangles in CALIBRATION_CELLS:
-        for triangle in triangles:
-            vertices = tuple(indexed[number] for number in triangle)
-            weights = _triangle_weights(pixel_x, pixel_y, *vertices)
-            if all(-1e-9 <= weight <= 1.0 + 1e-9 for weight in weights):
-                pan = sum(weight * float(vertex.pan) for weight, vertex in zip(weights, vertices, strict=True))
-                tilt = sum(weight * float(vertex.tilt) for weight, vertex in zip(weights, vertices, strict=True))
-                return InterpolatedAim(
-                    pixel_x=pixel_x,
-                    pixel_y=pixel_y,
-                    pan=clamp_angle(pan, pan_tilt_config.pan_min, pan_tilt_config.pan_max),
-                    tilt=clamp_angle(tilt, pan_tilt_config.tilt_min, pan_tilt_config.tilt_max),
-                    cell=cell,
-                    triangle=triangle,
-                )
+    for cell, corner_order in CALIBRATION_CELLS:
+        corners = tuple(indexed[number] for number in corner_order)
+        if not _point_in_polygon_or_boundary(pixel_x, pixel_y, corners):
+            continue
+        coordinates = _inverse_bilinear_coordinates(pixel_x, pixel_y, corners)
+        if coordinates is None:
+            joined = "-".join(str(number) for number in cell)
+            raise ControlError(f"Target pixel could not be mapped inside calibration cell {joined}")
+        horizontal, vertical = coordinates
+        pan = _bilinear_value(*(float(point.pan) for point in corners), horizontal, vertical)
+        tilt = _bilinear_value(*(float(point.tilt) for point in corners), horizontal, vertical)
+        return InterpolatedAim(
+            pixel_x=pixel_x,
+            pixel_y=pixel_y,
+            pan=clamp_angle(pan, pan_tilt_config.pan_min, pan_tilt_config.pan_max),
+            tilt=clamp_angle(tilt, pan_tilt_config.tilt_min, pan_tilt_config.tilt_max),
+            cell=cell,
+        )
     raise ControlError("Target pixel is outside the calibrated area")
 
 
-def _triangle_denominator(a: CalibrationPoint, b: CalibrationPoint, c: CalibrationPoint) -> float:
-    return (float(b.pixel_y) - float(c.pixel_y)) * (float(a.pixel_x) - float(c.pixel_x)) + (
-        float(c.pixel_x) - float(b.pixel_x)
-    ) * (float(a.pixel_y) - float(c.pixel_y))
+def _inverse_bilinear_coordinates(
+    pixel_x: float,
+    pixel_y: float,
+    corners: tuple[CalibrationPoint, ...],
+) -> tuple[float, float] | None:
+    horizontal = vertical = 0.5
+    for _iteration in range(20):
+        mapped_x = _bilinear_value(*(float(point.pixel_x) for point in corners), horizontal, vertical)
+        mapped_y = _bilinear_value(*(float(point.pixel_y) for point in corners), horizontal, vertical)
+        error_x = pixel_x - mapped_x
+        error_y = pixel_y - mapped_y
+        if max(abs(error_x), abs(error_y)) < 1e-7:
+            break
+        top_left, top_right, bottom_right, bottom_left = corners
+        dx_du = (1 - vertical) * (float(top_right.pixel_x) - float(top_left.pixel_x)) + vertical * (
+            float(bottom_right.pixel_x) - float(bottom_left.pixel_x)
+        )
+        dx_dv = (1 - horizontal) * (float(bottom_left.pixel_x) - float(top_left.pixel_x)) + horizontal * (
+            float(bottom_right.pixel_x) - float(top_right.pixel_x)
+        )
+        dy_du = (1 - vertical) * (float(top_right.pixel_y) - float(top_left.pixel_y)) + vertical * (
+            float(bottom_right.pixel_y) - float(bottom_left.pixel_y)
+        )
+        dy_dv = (1 - horizontal) * (float(bottom_left.pixel_y) - float(top_left.pixel_y)) + horizontal * (
+            float(bottom_right.pixel_y) - float(top_right.pixel_y)
+        )
+        determinant = dx_du * dy_dv - dx_dv * dy_du
+        if abs(determinant) < 1e-12:
+            return None
+        horizontal += (error_x * dy_dv - error_y * dx_dv) / determinant
+        vertical += (dx_du * error_y - dy_du * error_x) / determinant
+    mapped_x = _bilinear_value(*(float(point.pixel_x) for point in corners), horizontal, vertical)
+    mapped_y = _bilinear_value(*(float(point.pixel_y) for point in corners), horizontal, vertical)
+    if max(abs(pixel_x - mapped_x), abs(pixel_y - mapped_y)) > 1e-5:
+        return None
+    if not (-1e-9 <= horizontal <= 1.0 + 1e-9 and -1e-9 <= vertical <= 1.0 + 1e-9):
+        return None
+    return min(max(horizontal, 0.0), 1.0), min(max(vertical, 0.0), 1.0)
 
 
-def _triangle_weights(
-    pixel_x: int,
-    pixel_y: int,
-    a: CalibrationPoint,
-    b: CalibrationPoint,
-    c: CalibrationPoint,
-) -> tuple[float, float, float]:
-    denominator = _triangle_denominator(a, b, c)
-    first = (
-        (float(b.pixel_y) - float(c.pixel_y)) * (pixel_x - float(c.pixel_x))
-        + (float(c.pixel_x) - float(b.pixel_x)) * (pixel_y - float(c.pixel_y))
-    ) / denominator
-    second = (
-        (float(c.pixel_y) - float(a.pixel_y)) * (pixel_x - float(c.pixel_x))
-        + (float(a.pixel_x) - float(c.pixel_x)) * (pixel_y - float(c.pixel_y))
-    ) / denominator
-    return first, second, 1.0 - first - second
+def _bilinear_value(
+    top_left: float,
+    top_right: float,
+    bottom_right: float,
+    bottom_left: float,
+    horizontal: float,
+    vertical: float,
+) -> float:
+    return (
+        (1 - horizontal) * (1 - vertical) * top_left
+        + horizontal * (1 - vertical) * top_right
+        + horizontal * vertical * bottom_right
+        + (1 - horizontal) * vertical * bottom_left
+    )
+
+
+def _is_simple_convex_quadrilateral(points: tuple[CalibrationPoint, ...]) -> bool:
+    if len(points) != 4 or not _is_simple_polygon(points):
+        return False
+    signs: list[bool] = []
+    for index in range(4):
+        first = points[index]
+        second = points[(index + 1) % 4]
+        third = points[(index + 2) % 4]
+        cross = (float(second.pixel_x) - float(first.pixel_x)) * (
+            float(third.pixel_y) - float(second.pixel_y)
+        ) - (float(second.pixel_y) - float(first.pixel_y)) * (
+            float(third.pixel_x) - float(second.pixel_x)
+        )
+        if abs(cross) < 1e-9:
+            return False
+        signs.append(cross > 0)
+    return all(sign == signs[0] for sign in signs)
+
+
+def _is_simple_polygon(points: tuple[CalibrationPoint, ...]) -> bool:
+    if len(points) < 3 or abs(_polygon_area(points)) < 1e-9:
+        return False
+    edges = [(points[index], points[(index + 1) % len(points)]) for index in range(len(points))]
+    for first_index, first_edge in enumerate(edges):
+        for second_index in range(first_index + 1, len(edges)):
+            if second_index in {first_index, first_index + 1} or (
+                first_index == 0 and second_index == len(edges) - 1
+            ):
+                continue
+            if _segments_intersect(*first_edge, *edges[second_index]):
+                return False
+    return True
+
+
+def _polygon_area(points: tuple[CalibrationPoint, ...]) -> float:
+    return 0.5 * sum(
+        float(points[index].pixel_x) * float(points[(index + 1) % len(points)].pixel_y)
+        - float(points[(index + 1) % len(points)].pixel_x) * float(points[index].pixel_y)
+        for index in range(len(points))
+    )
+
+
+def _segments_intersect(
+    first_start: CalibrationPoint,
+    first_end: CalibrationPoint,
+    second_start: CalibrationPoint,
+    second_end: CalibrationPoint,
+) -> bool:
+    def orientation(a: CalibrationPoint, b: CalibrationPoint, c: CalibrationPoint) -> float:
+        return (float(b.pixel_x) - float(a.pixel_x)) * (float(c.pixel_y) - float(a.pixel_y)) - (
+            float(b.pixel_y) - float(a.pixel_y)
+        ) * (float(c.pixel_x) - float(a.pixel_x))
+
+    def on_segment(start: CalibrationPoint, end: CalibrationPoint, point: CalibrationPoint) -> bool:
+        return min(float(start.pixel_x), float(end.pixel_x)) <= float(point.pixel_x) <= max(
+            float(start.pixel_x), float(end.pixel_x)
+        ) and min(float(start.pixel_y), float(end.pixel_y)) <= float(point.pixel_y) <= max(
+            float(start.pixel_y), float(end.pixel_y)
+        )
+
+    first = orientation(first_start, first_end, second_start)
+    second = orientation(first_start, first_end, second_end)
+    third = orientation(second_start, second_end, first_start)
+    fourth = orientation(second_start, second_end, first_end)
+    if first * second < 0 and third * fourth < 0:
+        return True
+    return (
+        (abs(first) < 1e-9 and on_segment(first_start, first_end, second_start))
+        or (abs(second) < 1e-9 and on_segment(first_start, first_end, second_end))
+        or (abs(third) < 1e-9 and on_segment(second_start, second_end, first_start))
+        or (abs(fourth) < 1e-9 and on_segment(second_start, second_end, first_end))
+    )
+
+
+def _point_in_polygon_or_boundary(
+    pixel_x: float,
+    pixel_y: float,
+    points: tuple[CalibrationPoint, ...],
+) -> bool:
+    inside = False
+    for index, first in enumerate(points):
+        second = points[(index + 1) % len(points)]
+        first_x, first_y = float(first.pixel_x), float(first.pixel_y)
+        second_x, second_y = float(second.pixel_x), float(second.pixel_y)
+        cross = (pixel_x - first_x) * (second_y - first_y) - (pixel_y - first_y) * (second_x - first_x)
+        if abs(cross) < 1e-7 and min(first_x, second_x) - 1e-7 <= pixel_x <= max(first_x, second_x) + 1e-7 and (
+            min(first_y, second_y) - 1e-7 <= pixel_y <= max(first_y, second_y) + 1e-7
+        ):
+            return True
+        crosses = (first_y > pixel_y) != (second_y > pixel_y)
+        if crosses:
+            intersection_x = (second_x - first_x) * (pixel_y - first_y) / (second_y - first_y) + first_x
+            if pixel_x < intersection_x:
+                inside = not inside
+    return inside
 
 
 class CalibrationStore:
@@ -354,6 +533,7 @@ class ManualControlService:
         self._last_fire_completed_at: float | None = None
         self._target_pixel: tuple[int, int] | None = None
         self._target_aim: InterpolatedAim | None = None
+        self._target_in_range: bool | None = None
         self._targeting_status: str | None = None
         self._targeting_error: str | None = None
         self._servo_error = servo_error
@@ -410,6 +590,7 @@ class ManualControlService:
             "targeting": self._targeting_payload(
                 enabled=targeting_enabled,
                 readiness_error=targeting_readiness_error,
+                calibration_points=calibration_points,
             ),
             "servo_error": self._servo_error,
             "valve_error": self._valve_error,
@@ -449,6 +630,7 @@ class ManualControlService:
         with self._lock:
             self._target_pixel = (pixel_x, pixel_y)
             self._target_aim = None
+            self._target_in_range = None
             self._targeting_error = None
             self._targeting_status = "VALIDATING TARGET"
             try:
@@ -459,6 +641,7 @@ class ManualControlService:
                     self.pan_tilt_config,
                 )
             except (ControlError, OSError, ValueError, TypeError) as exc:
+                self._target_in_range = False if "outside the calibrated area" in str(exc).lower() else None
                 self._targeting_error = str(exc)
                 self._targeting_status = (
                     "OUTSIDE CALIBRATED AREA"
@@ -468,14 +651,14 @@ class ManualControlService:
                 LOGGER.warning("Target pixel rejected: x=%d y=%d error=%s", pixel_x, pixel_y, exc)
                 raise
             self._target_aim = aim
+            self._target_in_range = True
             LOGGER.info(
-                "Target pixel: %d,%d; interpolated pan=%.2f tilt=%.2f; calibration cell=%s triangle=%s",
+                "Target pixel: %d,%d; inverse-bilinear pan=%.2f tilt=%.2f; calibration cell=%s",
                 aim.pixel_x,
                 aim.pixel_y,
                 aim.pan,
                 aim.tilt,
                 "-".join(str(point) for point in aim.cell),
-                "-".join(str(point) for point in aim.triangle),
             )
             try:
                 self._move_locked(PanTiltPosition(aim.pan, aim.tilt), action="aim")
@@ -690,19 +873,34 @@ class ManualControlService:
         )
         return payload
 
-    def _targeting_payload(self, *, enabled: bool, readiness_error: str | None) -> dict[str, object]:
+    def _targeting_payload(
+        self,
+        *,
+        enabled: bool,
+        readiness_error: str | None,
+        calibration_points: list[CalibrationPoint],
+    ) -> dict[str, object]:
         aim = self._target_aim
         pixel_x, pixel_y = self._target_pixel if self._target_pixel is not None else (None, None)
+        geometry = None
+        if enabled:
+            try:
+                geometry = calibration_geometry_payload(calibration_points)
+            except ControlError:
+                geometry = None
         return {
             "enabled": enabled,
             "status": self._targeting_status or ("READY FOR TARGET" if enabled else "TARGETING UNAVAILABLE"),
             "error": self._targeting_error or readiness_error,
             "pixel_x": pixel_x,
             "pixel_y": pixel_y,
+            "in_range": self._target_in_range,
             "pan": None if aim is None else self._display_angle(aim.pan),
             "tilt": None if aim is None else self._display_angle(aim.tilt),
             "cell": None if aim is None else list(aim.cell),
-            "triangle": None if aim is None else list(aim.triangle),
+            "triangle": None,
+            "method": "inverse bilinear" if aim is not None else None,
+            "geometry": geometry,
         }
 
 

@@ -188,11 +188,15 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="calibration-image"' in page.data
     assert b'id="calibration-marker"' in page.data
     assert b'id="target-marker"' in page.data
+    assert b'id="calibration-geometry-overlay"' in page.data
+    assert b'nine numbered anchors' in page.data
     assert b'data-camera-mode="aim"' in page.data
     assert b'data-camera-mode="calibration"' in page.data
     assert b">AIM TARGET</button>" in page.data
     assert b">EDIT CALIBRATION</button>" in page.data
     assert b'id="targeting-status">TARGETING UNAVAILABLE<' in page.data
+    assert b'id="target-range">--<' in page.data
+    assert b'id="target-cell">--<' in page.data
     assert b'id="pixel-selection-status"' in page.data
     assert b'id="save-calibration"' in page.data
     assert b'id="save-aim-action">SAVE AIM<' in page.data
@@ -345,6 +349,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     )
     assert outside.status_code == 400
     assert outside.json["control"]["targeting"]["status"] == "OUTSIDE CALIBRATED AREA"
+    assert outside.json["control"]["targeting"]["in_range"] is False
+    assert outside.json["control"]["targeting"]["cell"] is None
     aimed = client.post(
         "/api/manual-control/aim",
         json={"display_x": 500, "display_y": 281.25, "display_width": 800, "display_height": 450},
@@ -354,6 +360,11 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert aimed.json["target"]["pixel_x"] == 800
     assert aimed.json["target"]["pixel_y"] == 450
     assert aimed.json["control"]["targeting"]["status"] == "AIM READY"
+    assert aimed.json["control"]["targeting"]["in_range"] is True
+    assert aimed.json["control"]["targeting"]["cell"] == [1, 2, 4, 5]
+    assert aimed.json["control"]["targeting"]["method"] == "inverse bilinear"
+    assert len(aimed.json["control"]["targeting"]["geometry"]["anchors"]) == 9
+    assert len(aimed.json["control"]["targeting"]["geometry"]["cells"]) == 4
     assert aimed.json["control"]["pan"] == 79
     assert aimed.json["control"]["tilt"] == 88
     assert aimed.json["control"]["cooldown_remaining_seconds"] == 0

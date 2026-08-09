@@ -24,6 +24,7 @@
       </div>
       <div class="manual-video calibration-camera" id="calibration-camera">
         <img id="calibration-image" src="{{ url_for('video_feed') }}" alt="Live garden camera stream; desktop users can select AIM TARGET or EDIT CALIBRATION before clicking" draggable="false">
+        <svg class="calibration-geometry-overlay" id="calibration-geometry-overlay" aria-label="Calibrated targeting boundary, four interpolation cells, and nine numbered anchors" role="img" hidden></svg>
         <div class="calibration-marker" id="calibration-marker" aria-hidden="true" hidden><span id="calibration-marker-label"></span></div>
         <div class="target-marker" id="target-marker" aria-hidden="true" hidden><span>TARGET</span></div>
       </div>
@@ -32,6 +33,8 @@
         <strong id="targeting-status">{{ control.targeting.status }}</strong>
         <span>Clicked pixel: X <b id="target-pixel-x">{{ control.targeting.pixel_x if control.targeting.pixel_x is not none else '--' }}</b>, Y <b id="target-pixel-y">{{ control.targeting.pixel_y if control.targeting.pixel_y is not none else '--' }}</b></span>
         <span>Calculated aim: Pan <b id="target-pan">{{ control.targeting.pan if control.targeting.pan is not none else '--' }}</b>Â°, Tilt <b id="target-tilt">{{ control.targeting.tilt if control.targeting.tilt is not none else '--' }}</b>Â°</span>
+        <span>Range: <b id="target-range">{% if control.targeting.in_range is sameas true %}IN RANGE{% elif control.targeting.in_range is sameas false %}OUT OF RANGE{% else %}--{% endif %}</b></span>
+        <span>Cell: <b id="target-cell">{{ control.targeting.cell | join('-') if control.targeting.cell else '--' }}</b> · <b id="target-method">{{ control.targeting.method or '--' }}</b></span>
         <span class="targeting-error" id="targeting-error" {% if not control.targeting.error %}hidden{% endif %}>{{ control.targeting.error or '' }}</span>
       </div>
       <p class="pixel-selection-status" id="pixel-selection-status" role="status" aria-live="polite" {% if control.targeting.enabled %}hidden{% endif %}>Point {{ active_point }} pixel: not selected</p>

@@ -19,6 +19,7 @@
     fireStatus: document.getElementById('fire-status'),
     camera: document.getElementById('calibration-camera'),
     image: document.getElementById('calibration-image'),
+    geometryOverlay: document.getElementById('calibration-geometry-overlay'),
     marker: document.getElementById('calibration-marker'),
     markerLabel: document.getElementById('calibration-marker-label'),
     targetMarker: document.getElementById('target-marker'),
@@ -30,6 +31,9 @@
     targetPixelY: document.getElementById('target-pixel-y'),
     targetPan: document.getElementById('target-pan'),
     targetTilt: document.getElementById('target-tilt'),
+    targetRange: document.getElementById('target-range'),
+    targetCell: document.getElementById('target-cell'),
+    targetMethod: document.getElementById('target-method'),
     pixelStatus: document.getElementById('pixel-selection-status'),
     servoNote: document.getElementById('servo-note'),
     positionNote: document.getElementById('position-note'),
@@ -126,6 +130,58 @@
     els.targetMarker.hidden = false;
   }
 
+  function svgElement(name, attributes) {
+    var element = document.createElementNS('http://www.w3.org/2000/svg', name);
+    Object.keys(attributes).forEach(function (key) { element.setAttribute(key, attributes[key]); });
+    return element;
+  }
+
+  function geometryPoints(points) {
+    return points.map(function (point) { return point.pixel_x + ',' + point.pixel_y; }).join(' ');
+  }
+
+  function renderCalibrationGeometry(next) {
+    var geometry = next.targeting.geometry;
+    var layout = frameLayout(next);
+    if (!geometry || !layout || !window.matchMedia('(min-width: 821px)').matches) {
+      els.geometryOverlay.hidden = true;
+      return;
+    }
+    var cameraRect = els.camera.getBoundingClientRect();
+    els.geometryOverlay.setAttribute('viewBox', '0 0 ' + layout.frameWidth + ' ' + layout.frameHeight);
+    els.geometryOverlay.style.left = (layout.rect.left - cameraRect.left + layout.offsetX) + 'px';
+    els.geometryOverlay.style.top = (layout.rect.top - cameraRect.top + layout.offsetY) + 'px';
+    els.geometryOverlay.style.width = layout.renderedWidth + 'px';
+    els.geometryOverlay.style.height = layout.renderedHeight + 'px';
+    els.geometryOverlay.replaceChildren();
+    els.geometryOverlay.appendChild(svgElement('polygon', {
+      points: geometryPoints(geometry.boundary),
+      'class': 'geometry-boundary'
+    }));
+    geometry.cells.forEach(function (cell) {
+      els.geometryOverlay.appendChild(svgElement('polygon', {
+        points: geometryPoints(cell.corners),
+        'class': 'geometry-cell'
+      }));
+    });
+    geometry.anchors.forEach(function (anchor) {
+      els.geometryOverlay.appendChild(svgElement('circle', {
+        cx: anchor.pixel_x,
+        cy: anchor.pixel_y,
+        r: 13,
+        'class': 'geometry-anchor'
+      }));
+      var label = svgElement('text', {
+        x: anchor.pixel_x,
+        y: anchor.pixel_y,
+        'class': 'geometry-anchor-label'
+      });
+      label.textContent = anchor.point;
+      els.geometryOverlay.appendChild(label);
+    });
+    els.geometryOverlay.hidden = false;
+  }
+
   function renderCameraMode(next) {
     els.cameraModeButtons.forEach(function (button) {
       var selected = button.dataset.cameraMode === cameraMode;
@@ -142,9 +198,13 @@
     els.targetPixelY.textContent = next.targeting.pixel_y === null ? '--' : next.targeting.pixel_y;
     els.targetPan.textContent = next.targeting.pan === null ? '--' : next.targeting.pan;
     els.targetTilt.textContent = next.targeting.tilt === null ? '--' : next.targeting.tilt;
+    els.targetRange.textContent = next.targeting.in_range === true ? 'IN RANGE' : (next.targeting.in_range === false ? 'OUT OF RANGE' : '--');
+    els.targetCell.textContent = next.targeting.cell ? next.targeting.cell.join('-') : '--';
+    els.targetMethod.textContent = next.targeting.method || '--';
     els.targetingError.textContent = next.targeting.error || '';
     els.targetingError.hidden = !next.targeting.error;
     renderTargetMarker(next);
+    renderCalibrationGeometry(next);
   }
 
   function renderCalibration(next) {
@@ -303,6 +363,7 @@
   window.addEventListener('resize', function () {
     renderPixelMarker(control, calibrationRecord(control, selectedCalibrationPoint));
     renderTargetMarker(control);
+    renderCalibrationGeometry(control);
   });
 
   async function refresh() {
