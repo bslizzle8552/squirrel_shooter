@@ -17,6 +17,8 @@ from typing import Any, Callable, Iterable, Protocol
 import cv2
 import numpy as np
 
+from .thread_names import set_current_thread_name
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ class ManualFireRecordingConfig:
     enabled: bool = True
     pre_roll_seconds: float = 2.0
     post_roll_seconds: float = 5.0
+    target_fps: float = 12.0
     zoom_factor: float = 2.0
     crop_center_x: int | None = 640
     crop_center_y: int | None = 360
@@ -42,6 +45,7 @@ class ManualFireRecordingConfig:
         for name, value, allow_zero in (
             ("pre_roll_seconds", self.pre_roll_seconds, True),
             ("post_roll_seconds", self.post_roll_seconds, False),
+            ("target_fps", self.target_fps, False),
         ):
             if (
                 isinstance(value, bool)
@@ -120,6 +124,9 @@ class ManualFireRecordingSink(Protocol):
         ...
 
     def close(self) -> None:
+        ...
+
+    def status(self) -> dict[str, object]:
         ...
 
 
@@ -213,6 +220,12 @@ class ManualFireRecorder:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="manual-fire-recorder")
         self._closed = False
         self._lock = threading.Lock()
+        self._queued = 0
+        self._active = False
+        self._completed = 0
+        self._failed = 0
+        self._last_frames_written = 0
+        self._last_output_fps = 0.0
 
     def record(self, event: ManualFireEvent) -> None:
         """Queue one accepted event without doing video work in the caller."""
@@ -222,7 +235,23 @@ class ManualFireRecorder:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Manual fire recorder is closed")
+            self._queued += 1
             self._executor.submit(self._record_safely, event)
+
+    def status(self) -> dict[str, object]:
+        """Return lightweight event-recorder activity and output metrics."""
+
+        with self._lock:
+            return {
+                "enabled": self.config.enabled,
+                "active": self._active,
+                "queued": self._queued,
+                "completed": self._completed,
+                "failed": self._failed,
+                "target_fps": self.config.target_fps,
+                "last_frames_written": self._last_frames_written,
+                "last_output_fps": round(self._last_output_fps, 3),
+            }
 
     def close(self) -> None:
         with self._lock:
@@ -232,6 +261,10 @@ class ManualFireRecorder:
         self._executor.shutdown(wait=True, cancel_futures=False)
 
     def _record_safely(self, event: ManualFireEvent) -> None:
+        set_current_thread_name("manual-recorder")
+        with self._lock:
+            self._queued = max(0, self._queued - 1)
+            self._active = True
         directory = self._event_directory(event)
         LOGGER.info(
             "Manual fire event recording started: event_id=%s",
@@ -240,8 +273,14 @@ class ManualFireRecorder:
         )
         try:
             directory.mkdir(parents=True, exist_ok=False)
-            self._record_event(event, directory)
+            frames_written, output_fps = self._record_event(event, directory)
+            with self._lock:
+                self._completed += 1
+                self._last_frames_written = frames_written
+                self._last_output_fps = output_fps
         except Exception as exc:
+            with self._lock:
+                self._failed += 1
             LOGGER.error(
                 "Manual fire recording failed: event_id=%s error=%s",
                 event.event_id,
@@ -258,8 +297,11 @@ class ManualFireRecorder:
                 )
             except Exception:
                 LOGGER.exception("Could not persist failed manual fire recording metadata: %s", event.event_id)
+        finally:
+            with self._lock:
+                self._active = False
 
-    def _record_event(self, event: ManualFireEvent, directory: Path) -> None:
+    def _record_event(self, event: ManualFireEvent, directory: Path) -> tuple[int, float]:
         requested_window_seconds = self.config.pre_roll_seconds + self.config.post_roll_seconds
         requested_start = event.fire_started_monotonic - self.config.pre_roll_seconds
         initial_pre_roll = self.camera.buffered_frame_metadata(
@@ -413,6 +455,7 @@ class ManualFireRecorder:
         LOGGER.info("Manual fire zoom recording saved: %s", zoom_path)
         if self.config.save_full_frame_clip:
             LOGGER.info("Manual fire recording saved: %s", full_path)
+        return frames_written, output_fps
 
     @staticmethod
     def _output_fps(frame_count: int, recording_window_seconds: float) -> float:

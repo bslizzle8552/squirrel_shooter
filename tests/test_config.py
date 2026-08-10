@@ -29,6 +29,7 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.dashboard.port == 5000
     assert config.shared_camera.reconnect_enabled is True
     assert config.runtime.headless is False
+    assert config.runtime.opencv_threads == 1
     assert config.night_mode.pause_recording_and_classifier is True
     assert config.night_mode.enter_consecutive_frames == 5
     assert config.night_mode.exit_consecutive_frames == 10
@@ -51,12 +52,14 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.manual_control.recording.enabled is True
     assert config.manual_control.recording.pre_roll_seconds == 2.0
     assert config.manual_control.recording.post_roll_seconds == 5.0
+    assert config.manual_control.recording.target_fps == 12.0
     assert config.manual_control.recording.zoom_factor == 2.0
     assert (config.manual_control.recording.crop_center_x, config.manual_control.recording.crop_center_y) == (640, 360)
     assert config.manual_control.recording.save_full_frame_clip is True
     assert config.manual_control.recording.clip_codec == "MJPG"
     assert config.valve == ValveConfig(enabled=True, gpio_pin=24, active_high=True)
     assert config.motion.min_blob_area == 500
+    assert config.motion.target_fps == 10.0
     assert config.motion.inclusion_zone.enabled is True
     assert config.motion.inclusion_zone.polygon == (
         (0.0, 0.569476),
@@ -168,6 +171,7 @@ def test_valve_cannot_be_enabled_without_a_gpio_pin(tmp_path: Path) -> None:
     "updates",
     [
         {"zoom_factor": 1.0},
+        {"target_fps": 0},
         {"crop_center_x": None, "crop_center_y": 360},
         {"clip_codec": "too-long"},
     ],

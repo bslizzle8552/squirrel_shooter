@@ -10,6 +10,7 @@ import queue
 import re
 import shutil
 import threading
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ import cv2
 import numpy as np
 
 from .config import AppConfig, ClassifierConfig
+from .thread_names import set_current_thread_name
 
 
 LOGGER = logging.getLogger(__name__)
@@ -106,6 +108,7 @@ class ClassifierStatus:
     errors: int = 0
     paused: bool = False
     skipped_while_paused: int = 0
+    inference_fps: float = 0.0
 
 
 class MobileNetSSDDetector:
@@ -835,13 +838,14 @@ class EventClassifier:
         self._skipped_while_paused = 0
         self._last_latency_ms: float | None = None
         self._last_error: str | None = None
+        self._completion_times: deque[float] = deque()
 
     def start(self) -> None:
         if not self.config.enabled or (self._thread is not None and self._thread.is_alive()):
             return
         self.store.prepare()
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="squirrel-classifier", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="classifier", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -937,6 +941,9 @@ class EventClassifier:
 
     def status(self) -> ClassifierStatus:
         with self._lock:
+            cutoff = perf_counter() - 60.0
+            while self._completion_times and self._completion_times[0] < cutoff:
+                self._completion_times.popleft()
             return ClassifierStatus(
                 self.config.enabled,
                 self._thread is not None and self._thread.is_alive(),
@@ -951,9 +958,11 @@ class EventClassifier:
                 self._errors,
                 self._paused,
                 self._skipped_while_paused,
+                len(self._completion_times) / 60.0,
             )
 
     def _run(self) -> None:
+        set_current_thread_name("classifier")
         detector: MobileNetSSDDetector | None = None
         detector_error: str | None = None
         while not self._stop_event.is_set() or not self._tasks.empty():
@@ -1011,6 +1020,7 @@ class EventClassifier:
                 with self._lock:
                     self._completed += 1
                     self._last_latency_ms = latency
+                    self._completion_times.append(perf_counter())
                     self._last_error = error
                     if record["auto_accepted"]:
                         self._auto_accepted += 1

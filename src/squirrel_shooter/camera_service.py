@@ -17,6 +17,7 @@ import numpy as np
 
 from .camera_common import FrameRateMeter, capture_dimensions, capture_fourcc, open_camera
 from .config import CameraConfig, SharedCameraConfig
+from .thread_names import set_current_thread_name
 
 
 LOGGER = logging.getLogger(__name__)
@@ -54,6 +55,13 @@ class CameraStatus:
     annotated_frames: int = 0
     last_annotated_at: str | None = None
     annotated_frame_age_seconds: float | None = None
+    dashboard_viewers: int = 0
+    dashboard_stream_fps: float = 0.0
+    dashboard_frames_encoded: int = 0
+    pre_roll_frames_buffered: int = 0
+    pre_roll_buffer_fps: float = 0.0
+    pre_roll_target_fps: float = 0.0
+    pre_roll_frames_encoded: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,7 @@ class CameraService:
         jpeg_quality: int = 80,
         encode_jpeg: bool = True,
         frame_buffer_seconds: float = 0.0,
+        frame_buffer_fps: float = 12.0,
     ) -> None:
         self.settings = settings
         self.shared_settings = shared_settings or SharedCameraConfig(
@@ -111,10 +120,15 @@ class CameraService:
         self._encode_jpeg = encode_jpeg
         if frame_buffer_seconds < 0:
             raise ValueError("frame_buffer_seconds must be zero or greater")
+        if frame_buffer_fps <= 0:
+            raise ValueError("frame_buffer_fps must be greater than zero")
         self._frame_buffer_seconds = float(frame_buffer_seconds)
+        self._frame_buffer_fps = float(frame_buffer_fps)
+        self._frame_buffer_interval = 1.0 / self._frame_buffer_fps
         self._condition = threading.Condition()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._mjpeg_thread: threading.Thread | None = None
         self._capture: Any | None = None
         self._online = False
         self._width = settings.requested_width
@@ -123,9 +137,16 @@ class CameraService:
         self._reported_fps = 0.0
         self._error: str | None = "Camera has not started"
         self._latest_frame: np.ndarray | None = None
-        self._latest_raw_jpeg: bytes | None = None
         self._latest_annotated_frame: np.ndarray | None = None
-        self._latest_annotated_jpeg: bytes | None = None
+        self._mjpeg: bytes | None = None
+        self._mjpeg_sequence = 0
+        self._mjpeg_source: tuple[str, int] | None = None
+        self._mjpeg_maximum_fps = 0.0
+        self._mjpeg_annotated_only = True
+        self._dashboard_viewers = 0
+        self._dashboard_stream_fps = 0.0
+        self._dashboard_frames_encoded = 0
+        self._dashboard_meter = FrameRateMeter()
         self._frame_buffer: deque[_BufferedJpegFrame] = deque()
         self._sequence = 0
         self._annotated_sequence = 0
@@ -139,6 +160,10 @@ class CameraService:
         self._read_failures = 0
         self._reconnects = 0
         self._camera_open_count = 0
+        self._next_buffer_monotonic: float | None = None
+        self._pre_roll_buffer_fps = 0.0
+        self._pre_roll_frames_encoded = 0
+        self._pre_roll_meter = FrameRateMeter()
 
     @property
     def stopped(self) -> bool:
@@ -158,15 +183,25 @@ class CameraService:
             self._online = False
             self._error = None
             self._latest_frame = None
-            self._latest_raw_jpeg = None
             self._latest_annotated_frame = None
-            self._latest_annotated_jpeg = None
+            self._mjpeg = None
+            self._mjpeg_sequence = 0
+            self._mjpeg_source = None
+            self._mjpeg_annotated_only = True
+            self._dashboard_viewers = 0
+            self._dashboard_stream_fps = 0.0
+            self._dashboard_frames_encoded = 0
+            self._dashboard_meter = FrameRateMeter()
             self._frame_buffer.clear()
+            self._next_buffer_monotonic = None
+            self._pre_roll_buffer_fps = 0.0
+            self._pre_roll_frames_encoded = 0
+            self._pre_roll_meter = FrameRateMeter()
             self._last_frame_at = None
             self._last_frame_monotonic = None
             self._last_annotated_at = None
             self._last_annotated_monotonic = None
-            self._thread = threading.Thread(target=self._capture_loop, name="squirrel-camera", daemon=True)
+            self._thread = threading.Thread(target=self._capture_loop, name="camera-capture", daemon=True)
             self._thread.start()
         LOGGER.info("Shared camera runtime started", extra={"structured_data": {"event": "camera_runtime_started"}})
 
@@ -185,6 +220,9 @@ class CameraService:
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)
+        mjpeg_thread = self._mjpeg_thread
+        if mjpeg_thread is not None and mjpeg_thread is not threading.current_thread():
+            mjpeg_thread.join(timeout=timeout)
         with self._condition:
             if thread is not None and thread.is_alive():
                 self._error = "Camera thread did not stop before the shutdown timeout"
@@ -214,6 +252,13 @@ class CameraService:
                 self._annotated_frames,
                 self._last_annotated_at,
                 annotated_age,
+                self._dashboard_viewers,
+                self._dashboard_stream_fps,
+                self._dashboard_frames_encoded,
+                len(self._frame_buffer),
+                self._pre_roll_buffer_fps,
+                self._frame_buffer_fps if self._frame_buffer_seconds > 0 else 0.0,
+                self._pre_roll_frames_encoded,
             )
 
     def latest_frame(self, *, copy: bool = True) -> np.ndarray | None:
@@ -290,18 +335,14 @@ class CameraService:
             yield FramePacket(item.sequence, frame, item.received_at, item.received_monotonic)
 
     def publish_annotated(self, source_sequence: int, frame: np.ndarray) -> bool:
-        """Publish motion annotations for the dashboard; never touch the camera."""
+        """Publish motion annotations without encoding work when nobody is viewing."""
 
-        encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
-        if not encoded:
-            raise RuntimeError("OpenCV could not encode an annotated dashboard frame")
         now_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
         now = monotonic()
         with self._condition:
             if source_sequence < self._last_annotated_source_sequence:
                 return False
             self._latest_annotated_frame = frame.copy()
-            self._latest_annotated_jpeg = jpeg.tobytes()
             self._last_annotated_source_sequence = source_sequence
             self._annotated_sequence += 1
             self._annotated_frames += 1
@@ -316,42 +357,97 @@ class CameraService:
         maximum_fps: float | None = None,
         annotated_only: bool = False,
     ) -> Iterator[bytes]:
-        """Yield MJPEG frames, optionally waiting for watcher annotations only."""
+        """Yield frames from one shared encoder that sleeps when there are no viewers."""
 
+        requested_fps = float(maximum_fps or self.settings.requested_fps)
+        if requested_fps <= 0:
+            raise ValueError("maximum_fps must be greater than zero")
         sequence = -1
-        last_yield = 0.0
-        interval = 0.0 if maximum_fps is None else 1.0 / maximum_fps
-        while not self._stop_event.is_set():
-            def frame_ready() -> bool:
-                if self._stop_event.is_set():
-                    return True
-                if self._latest_annotated_jpeg is not None:
-                    return self._annotated_sequence != sequence
-                return not annotated_only and self._latest_raw_jpeg is not None and self._sequence != sequence
-
-            with self._condition:
-                self._condition.wait_for(
-                    frame_ready,
-                    timeout=self.shared_settings.consumer_wait_timeout_seconds,
+        with self._condition:
+            if self._dashboard_viewers == 0:
+                self._dashboard_meter = FrameRateMeter()
+            self._dashboard_viewers += 1
+            self._mjpeg_annotated_only = self._mjpeg_annotated_only and annotated_only
+            if self._mjpeg_maximum_fps <= 0:
+                self._mjpeg_maximum_fps = requested_fps
+            else:
+                self._mjpeg_maximum_fps = min(self._mjpeg_maximum_fps, requested_fps)
+            if self._mjpeg_thread is None or not self._mjpeg_thread.is_alive():
+                self._mjpeg_thread = threading.Thread(
+                    target=self._mjpeg_encode_loop,
+                    name="mjpeg-encoder",
+                    daemon=True,
                 )
+                self._mjpeg_thread.start()
+            self._condition.notify_all()
+        try:
+            while not self._stop_event.is_set():
+                with self._condition:
+                    self._condition.wait_for(
+                        lambda: self._mjpeg_sequence > sequence or self._stop_event.is_set(),
+                        timeout=self.shared_settings.consumer_wait_timeout_seconds,
+                    )
+                    if self._stop_event.is_set():
+                        return
+                    if self._mjpeg_sequence <= sequence or self._mjpeg is None:
+                        continue
+                    sequence = self._mjpeg_sequence
+                    jpeg = self._mjpeg
+                yield b"--frame\r\nContent-Type: image/jpeg\r\nCache-Control: no-cache\r\n\r\n" + jpeg + b"\r\n"
+        finally:
+            with self._condition:
+                self._dashboard_viewers = max(0, self._dashboard_viewers - 1)
+                if self._dashboard_viewers == 0:
+                    self._mjpeg_maximum_fps = 0.0
+                    self._mjpeg_annotated_only = True
+                    self._dashboard_stream_fps = 0.0
+                self._condition.notify_all()
+
+    def _mjpeg_encode_loop(self) -> None:
+        set_current_thread_name("mjpeg-encoder")
+        last_encoded_at = 0.0
+        while not self._stop_event.is_set():
+            with self._condition:
+                def frame_ready() -> bool:
+                    if self._stop_event.is_set():
+                        return True
+                    if self._dashboard_viewers <= 0:
+                        return False
+                    source = self._current_mjpeg_source()
+                    return source is not None and source[0] != self._mjpeg_source
+
+                self._condition.wait_for(frame_ready)
                 if self._stop_event.is_set():
                     return
-                if self._annotated_sequence:
-                    current_sequence = self._annotated_sequence
-                    jpeg = self._latest_annotated_jpeg
-                elif annotated_only:
-                    continue
-                else:
-                    current_sequence = self._sequence
-                    jpeg = self._latest_raw_jpeg
-                if jpeg is None or current_sequence == sequence:
-                    continue
-                sequence = current_sequence
-            remaining = interval - (monotonic() - last_yield)
+                maximum_fps = self._mjpeg_maximum_fps
+            interval = 1.0 / maximum_fps if maximum_fps > 0 else 0.0
+            remaining = interval - (monotonic() - last_encoded_at)
             if remaining > 0 and self._stop_event.wait(remaining):
                 return
-            last_yield = monotonic()
-            yield b"--frame\r\nContent-Type: image/jpeg\r\nCache-Control: no-cache\r\n\r\n" + jpeg + b"\r\n"
+            with self._condition:
+                source = self._current_mjpeg_source()
+                if self._dashboard_viewers <= 0 or source is None or source[0] == self._mjpeg_source:
+                    continue
+                source_key, frame = source
+            encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
+            if not encoded:
+                LOGGER.warning("OpenCV could not encode a dashboard frame")
+                continue
+            last_encoded_at = monotonic()
+            with self._condition:
+                self._mjpeg = jpeg.tobytes()
+                self._mjpeg_source = source_key
+                self._mjpeg_sequence += 1
+                self._dashboard_frames_encoded += 1
+                self._dashboard_stream_fps = self._dashboard_meter.update(last_encoded_at)
+                self._condition.notify_all()
+
+    def _current_mjpeg_source(self) -> tuple[tuple[str, int], np.ndarray] | None:
+        if self._latest_annotated_frame is not None:
+            return ("annotated", self._annotated_sequence), self._latest_annotated_frame
+        if not self._mjpeg_annotated_only and self._encode_jpeg and self._latest_frame is not None:
+            return ("raw", self._sequence), self._latest_frame
+        return None
 
     def _capture_thread_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -364,6 +460,7 @@ class CameraService:
             self._condition.notify_all()
 
     def _capture_loop(self) -> None:
+        set_current_thread_name("camera-capture")
         if not self._platform_checker():
             self._set_offline("Camera capture is disabled because this host is not a Raspberry Pi")
             return
@@ -413,13 +510,25 @@ class CameraService:
                     consecutive_failures = 0
                     height, width = frame.shape[:2]
                     fps = meter.update()
+                    received_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+                    received_monotonic = monotonic()
                     jpeg_bytes: bytes | None = None
-                    if self._encode_jpeg or self._frame_buffer_seconds > 0:
+                    should_buffer = (
+                        self._frame_buffer_seconds > 0
+                        and (
+                            self._next_buffer_monotonic is None
+                            or received_monotonic >= self._next_buffer_monotonic
+                        )
+                    )
+                    if should_buffer:
+                        if self._next_buffer_monotonic is None:
+                            self._next_buffer_monotonic = received_monotonic + self._frame_buffer_interval
+                        else:
+                            while self._next_buffer_monotonic <= received_monotonic:
+                                self._next_buffer_monotonic += self._frame_buffer_interval
                         encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
                         if encoded:
                             jpeg_bytes = jpeg.tobytes()
-                    received_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
-                    received_monotonic = monotonic()
                     with self._condition:
                         self._online = True
                         self._width = width
@@ -427,12 +536,13 @@ class CameraService:
                         self._fps = fps
                         self._error = None
                         self._latest_frame = frame.copy()
-                        self._latest_raw_jpeg = jpeg_bytes
                         self._sequence += 1
                         self._last_frame_at = received_at
                         self._last_frame_monotonic = received_monotonic
                         self._frames_received += 1
                         if self._frame_buffer_seconds > 0 and jpeg_bytes is not None:
+                            self._pre_roll_frames_encoded += 1
+                            self._pre_roll_buffer_fps = self._pre_roll_meter.update(received_monotonic)
                             self._frame_buffer.append(
                                 _BufferedJpegFrame(
                                     self._sequence,

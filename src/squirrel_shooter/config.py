@@ -48,6 +48,7 @@ class SharedCameraConfig:
 class RuntimeConfig:
     headless: bool
     shutdown_timeout_seconds: float
+    opencv_threads: int = 1
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,7 @@ class DebugOutputConfig:
 class MotionConfig:
     enabled: bool
     processing_width: int
+    target_fps: float
     learning_frames: int
     history: int
     variance_threshold: float
@@ -470,6 +472,11 @@ def _manual_control_config(raw: dict[str, Any]) -> ManualControlConfig:
                     "manual_control.recording.post_roll_seconds",
                     exclusive=True,
                 ),
+                target_fps=_number(
+                    recording_raw.get("target_fps", recording_defaults.target_fps),
+                    "manual_control.recording.target_fps",
+                    exclusive=True,
+                ),
                 zoom_factor=_number(
                     recording_raw.get("zoom_factor", recording_defaults.zoom_factor),
                     "manual_control.recording.zoom_factor",
@@ -593,6 +600,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     motion_config = MotionConfig(
         enabled=_bool(motion.get("enabled"), "motion.enabled"),
         processing_width=_int(motion.get("processing_width"), "motion.processing_width", minimum=1),
+        target_fps=_number(motion.get("target_fps", 10.0), "motion.target_fps", exclusive=True),
         learning_frames=_int(motion.get("learning_frames"), "motion.learning_frames", minimum=1),
         history=_int(motion.get("history"), "motion.history", minimum=1),
         variance_threshold=_number(motion.get("variance_threshold"), "motion.variance_threshold", exclusive=True),
@@ -774,6 +782,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         runtime=RuntimeConfig(
             _bool(runtime.get("headless"), "runtime.headless"),
             _number(runtime.get("shutdown_timeout_seconds"), "runtime.shutdown_timeout_seconds", exclusive=True),
+            _int(runtime.get("opencv_threads", 1), "runtime.opencv_threads", minimum=1),
         ),
         dashboard=DashboardConfig(
             _bool(dashboard.get("enabled"), "dashboard.enabled"),

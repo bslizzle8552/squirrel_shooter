@@ -23,6 +23,7 @@ from .event_storage import EventLogWriter, EventRecorder, RollingFrameBuffer, Se
 from .files import timestamped_output_path
 from .frame_selection import BestEventFrameSelector
 from .watch_detection import MotionWatcherDetector, WatchDetectionResult, annotate_watch_frame
+from .thread_names import set_current_thread_name
 
 
 LOGGER = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class MotionRuntimeStatus:
     last_event_summary: dict[str, Any] | None
     night_mode_paused: bool = False
     night_mode_evidence: str | None = None
+    target_fps: float = 0.0
 
 
 class MotionProcessingService:
@@ -106,10 +108,6 @@ class MotionProcessingService:
         self._night_mode_evidence: str | None = "explicit_camera_setting" if self._night_mode_paused else None
         self._night_mono_frames = 0
         self._night_color_frames = 0
-        self._latest_frame: np.ndarray | None = None
-        self._latest_annotated: np.ndarray | None = None
-        self._latest_result: WatchDetectionResult | None = None
-        self._latest_sequence = -1
         self._force_event_requested = False
         self._classifier_selectors: dict[str, BestEventFrameSelector] = {}
         self._classifier_clip_offsets: dict[str, int] = {}
@@ -148,7 +146,7 @@ class MotionProcessingService:
             self._finalized = False
             self._prepare_outputs()
             self.classifier.start()
-            self._thread = threading.Thread(target=self._run, name="squirrel-motion", daemon=True)
+            self._thread = threading.Thread(target=self._run, name="motion-detect", daemon=True)
             self._thread.start()
         LOGGER.info("Shared motion processor started", extra={"structured_data": {"event": "motion_runtime_started"}})
 
@@ -196,6 +194,7 @@ class MotionProcessingService:
                 None if self._last_event_summary is None else dict(self._last_event_summary),
                 self._night_mode_paused,
                 self._night_mode_evidence,
+                self.config.motion.target_fps,
             )
 
     def status_dict(self) -> dict[str, Any]:
@@ -226,8 +225,7 @@ class MotionProcessingService:
             return True
 
     def save_manual_still(self) -> Path | None:
-        with self._condition:
-            frame = None if self._latest_annotated is None else self._latest_annotated.copy()
+        frame = self.camera.latest_annotated_frame()
         if frame is None:
             return None
         directory = self.config.camera.output_directory / "manual"
@@ -272,10 +270,16 @@ class MotionProcessingService:
         self._session.save()
 
     def _run(self) -> None:
+        set_current_thread_name("motion-detect")
         camera_sequence = -1
+        next_frame_at = 0.0
+        frame_interval = 1.0 / self.config.motion.target_fps
         clean = False
         try:
             while not self._stop_event.is_set():
+                remaining = next_frame_at - monotonic()
+                if remaining > 0 and self._stop_event.wait(remaining):
+                    break
                 try:
                     packet = self.camera.wait_for_frame(camera_sequence)
                 except Exception as exc:
@@ -286,6 +290,7 @@ class MotionProcessingService:
                 if packet is None:
                     continue
                 camera_sequence = packet.sequence
+                next_frame_at = monotonic() + frame_interval
                 try:
                     self._process_packet(packet)
                 except Exception as exc:
@@ -319,11 +324,12 @@ class MotionProcessingService:
             }
             self._session.sample_fps(measured_fps)
         result = self.detector.process(packet.frame, now=now)
-        annotated = annotate_watch_frame(packet.frame, result, measured_fps=measured_fps)
+        processing_fps = result.measured_processing_fps
+        annotated = annotate_watch_frame(packet.frame, result, measured_fps=processing_fps)
         self._update_night_mode(result, now)
         if not self._night_mode_paused:
             self._handle_rejection(result, measured_fps)
-            self._handle_events(packet, result, annotated, now, measured_fps)
+            self._handle_events(packet, result, annotated, now, processing_fps)
             live_annotated = self._add_live_box_holds(annotated, result.groups, now)
             self._prebuffer.append(now, annotated)
         else:
@@ -339,10 +345,6 @@ class MotionProcessingService:
             self._frames_processed += 1
             self._candidates_seen += len(result.groups)
             self._current_groups = groups
-            self._latest_frame = packet.frame.copy()
-            self._latest_annotated = live_annotated.copy()
-            self._latest_result = result
-            self._latest_sequence = packet.sequence
             self._last_detector_update = now_iso
             self._last_detector_monotonic = monotonic()
             self._last_error = None

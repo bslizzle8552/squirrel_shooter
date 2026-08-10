@@ -106,6 +106,7 @@ def test_shared_camera_keeps_compact_decodable_manual_fire_pre_roll(tmp_path: Pa
         platform_checker=lambda: True,
         encode_jpeg=False,
         frame_buffer_seconds=0.2,
+        frame_buffer_fps=20.0,
     )
     service.start()
     try:
@@ -120,6 +121,138 @@ def test_shared_camera_keeps_compact_decodable_manual_fire_pre_roll(tmp_path: Pa
         service.stop()
 
 
+def test_shared_camera_does_not_encode_dashboard_jpegs_without_viewers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    released = threading.Event()
+    raw = np.full((36, 64, 3), 40, dtype=np.uint8)
+    service = CameraService(
+        CameraConfig(0, 64, 36, 30, tmp_path),
+        capture_factory=lambda _: ContinuousCapture(raw, released),
+        platform_checker=lambda: True,
+        frame_buffer_seconds=0,
+    )
+    real_encode = cv2.imencode
+    encode_calls = 0
+
+    def counting_encode(*args: object, **kwargs: object):
+        nonlocal encode_calls
+        encode_calls += 1
+        return real_encode(*args, **kwargs)
+
+    monkeypatch.setattr("squirrel_shooter.camera_service.cv2.imencode", counting_encode)
+    service.start()
+    stream = None
+    try:
+        wait_until(lambda: service.status().frames_received >= 3)
+        packet = service.wait_for_frame(-1)
+        assert packet is not None
+        service.publish_annotated(packet.sequence, packet.frame)
+        time.sleep(0.05)
+        assert encode_calls == 0
+        assert service.status().dashboard_viewers == 0
+
+        stream = service.mjpeg_frames(maximum_fps=8, annotated_only=True)
+        assert next(stream).startswith(b"--frame")
+        assert encode_calls == 1
+        assert service.status().dashboard_viewers == 1
+    finally:
+        if stream is not None:
+            stream.close()
+        service.stop()
+    assert service.status().dashboard_viewers == 0
+
+
+def test_dashboard_viewers_share_one_encoded_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    released = threading.Event()
+    raw = np.full((36, 64, 3), 40, dtype=np.uint8)
+    service = CameraService(
+        CameraConfig(0, 64, 36, 30, tmp_path),
+        capture_factory=lambda _: ContinuousCapture(raw, released),
+        platform_checker=lambda: True,
+        frame_buffer_seconds=0,
+    )
+    real_encode = cv2.imencode
+    encode_calls = 0
+
+    def counting_encode(*args: object, **kwargs: object):
+        nonlocal encode_calls
+        encode_calls += 1
+        return real_encode(*args, **kwargs)
+
+    monkeypatch.setattr("squirrel_shooter.camera_service.cv2.imencode", counting_encode)
+    service.start()
+    first = second = None
+    try:
+        wait_until(lambda: service.status().frames_received > 0)
+        packet = service.wait_for_frame(-1)
+        assert packet is not None
+        service.publish_annotated(packet.sequence, packet.frame)
+        first = service.mjpeg_frames(maximum_fps=8, annotated_only=True)
+        first_frame = next(first)
+        second = service.mjpeg_frames(maximum_fps=8, annotated_only=True)
+        second_frame = next(second)
+        assert first_frame == second_frame
+        assert encode_calls == 1
+        assert service.status().dashboard_viewers == 2
+    finally:
+        if first is not None:
+            first.close()
+        if second is not None:
+            second.close()
+        service.stop()
+
+
+def test_manual_pre_roll_jpeg_encoding_is_rate_limited(tmp_path: Path) -> None:
+    released = threading.Event()
+    service = CameraService(
+        CameraConfig(0, 64, 36, 30, tmp_path),
+        capture_factory=lambda _: ContinuousCapture(np.zeros((36, 64, 3), dtype=np.uint8), released),
+        platform_checker=lambda: True,
+        encode_jpeg=False,
+        frame_buffer_seconds=1.0,
+        frame_buffer_fps=10.0,
+    )
+    service.start()
+    try:
+        wait_until(lambda: service.status().frames_received >= 25)
+        status = service.status()
+        assert status.pre_roll_frames_encoded < status.frames_received / 3
+        assert 1 <= status.pre_roll_frames_buffered <= 5
+        assert status.pre_roll_target_fps == 10.0
+    finally:
+        service.stop()
+
+
+def test_motion_processing_samples_fast_camera_at_configured_rate(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+
+    class FastCamera:
+        def __init__(self) -> None:
+            self.sequence = 0
+
+        def wait_for_frame(self, _after_sequence: int):
+            self.sequence += 1
+            return SimpleNamespace(sequence=self.sequence)
+
+        def status(self):
+            return SimpleNamespace(read_failures=0)
+
+    motion = MotionProcessingService(FastCamera(), config)  # type: ignore[arg-type]
+    processed: list[float] = []
+    motion._process_packet = lambda _packet: processed.append(time.monotonic())  # type: ignore[method-assign]
+    motion._finalize = lambda *, clean: None  # type: ignore[method-assign]
+    thread = threading.Thread(target=motion._run)
+    thread.start()
+    time.sleep(0.36)
+    motion._stop_event.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert 3 <= len(processed) <= 5
+    assert all(later - earlier >= 0.08 for earlier, later in zip(processed, processed[1:]))
+
+
 def test_application_runtime_retains_the_configured_elapsed_recording_window(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
     runtime = ApplicationRuntime(config)
@@ -130,6 +263,7 @@ def test_application_runtime_retains_the_configured_elapsed_recording_window(tmp
         + config.manual_control.fire_pulse_seconds
         + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
     )
+    assert runtime.camera.status().pre_roll_target_fps == config.manual_control.recording.target_fps
 
 
 def test_live_stream_holds_last_seen_box_during_tracker_gap(tmp_path: Path) -> None:
@@ -301,7 +435,10 @@ def test_motion_and_dashboard_share_exactly_one_camera_open(tmp_path: Path) -> N
         stream = dashboard.test_client().get("/video_feed", buffered=False)
         assert status.status_code == events.status_code == 200
         assert status.json["camera"]["camera_open_count"] == 1
+        assert status.json["camera"]["dashboard_viewers"] == 0
+        assert "pre_roll_target_fps" in status.json["camera"]
         assert status.json["detector"]["frames_processed"] > 0
+        assert status.json["detector"]["target_fps"] == config.motion.target_fps
         assert status.json["application_mode"] == "shared-camera-motion-watch"
         assert next(stream.response).startswith(b"--frame")
         stream.close()

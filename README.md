@@ -459,6 +459,7 @@ shared_camera:
 runtime:
   headless: false
   shutdown_timeout_seconds: 10.0
+  opencv_threads: 1
 
 dashboard:
   enabled: true
@@ -483,8 +484,9 @@ returns, and the pre-event buffer is cleared at both transitions so night frames
 cannot be attached to a daytime event. These thresholds are visual evidence,
 not an FPS inference.
 
-The dashboard stream is capped below the currently observed camera rate to leave
-CPU time for detection and event recording. Change `host` or `port` in YAML, or
+The dashboard stream is encoded only while at least one viewer is connected.
+All viewers share the same cached JPEG, capped at `stream_fps`; with no viewers,
+the MJPEG encoder blocks and performs no image work. Change `host` or `port` in YAML, or
 temporarily override them with `--host` and `--port`. Setting `dashboard.enabled`
 to `false` is equivalent to `--no-dashboard`.
 
@@ -492,6 +494,8 @@ to `false` is equivalent to `--no-dashboard`.
 
 ```yaml
 motion:
+  processing_width: 640
+  target_fps: 10.0
   history: 500
   variance_threshold: 32
   min_blob_area: 500

@@ -24,6 +24,9 @@ shared_camera:
 runtime:
   headless: false
   shutdown_timeout_seconds: 10.0
+  # Avoid OpenCV turning each image operation into several continuously busy
+  # native workers on the four-core Pi. Event-driven inference remains enabled.
+  opencv_threads: 1
 
 dashboard:
   enabled: true
@@ -99,6 +102,8 @@ manual_control:
     # If pre-roll is unavailable, the recorder extends post-roll to about 7s.
     pre_roll_seconds: 2.0
     post_roll_seconds: 5.0
+    # Sample the compact rolling buffer; do not JPEG-encode all 30 camera FPS.
+    target_fps: 12.0
     zoom_factor: 2.0
     # Target-click shots use their verified camera pixel. D-pad/manual-angle
     # shots use this fixed 1280x720 garden fallback until an inverse mapping exists.
@@ -117,6 +122,9 @@ valve:
 motion:
   enabled: true
   processing_width: 640
+  # Motion timing remains elapsed-time based while expensive vision work samples
+  # the shared 30 FPS camera at a rate suitable for garden monitoring.
+  target_fps: 10.0
   history: 500
   variance_threshold: 32
   detect_shadows: true

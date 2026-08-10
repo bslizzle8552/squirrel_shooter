@@ -19,6 +19,7 @@ from .config import AppConfig, ConfigError, DEFAULT_CONFIG_PATH, load_config
 from .diagnostics import configure_logging
 from .manual_control import ManualControlService, build_manual_control_service
 from .motion_runtime import MotionProcessingService
+from .thread_names import set_current_thread_name
 from .web_dashboard import create_app
 
 
@@ -37,6 +38,7 @@ class ApplicationRuntime:
         motion: MotionProcessingService | None = None,
     ) -> None:
         self.config = config
+        cv2.setNumThreads(config.runtime.opencv_threads)
         self.camera = camera or CameraService(
             config.camera,
             shared_settings=config.shared_camera,
@@ -50,6 +52,7 @@ class ApplicationRuntime:
                 if config.manual_control.recording.enabled
                 else 0.0
             ),
+            frame_buffer_fps=config.manual_control.recording.target_fps,
         )
         self.motion = motion or MotionProcessingService(self.camera, config)
         self._lock = threading.Lock()
@@ -90,7 +93,7 @@ class DashboardServer:
         self.port = port
         self._server: BaseWSGIServer = make_server(host, port, flask_app, threaded=True)
         self.port = self._server.server_port
-        self._thread = threading.Thread(target=self._serve, name="squirrel-dashboard", daemon=True)
+        self._thread = threading.Thread(target=self._serve, name="dashboard-http", daemon=True)
         self.error: str | None = None
 
     @property
@@ -107,6 +110,7 @@ class DashboardServer:
         self._server.server_close()
 
     def _serve(self) -> None:
+        set_current_thread_name("dashboard-http")
         try:
             self._server.serve_forever()
         except Exception as exc:

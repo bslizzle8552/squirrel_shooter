@@ -581,6 +581,11 @@ class ManualControlService:
             except ControlError as exc:
                 targeting_readiness_error = str(exc)
         targeting_enabled = self.servo_available and targeting_readiness_error is None
+        recorder_status: dict[str, object] = {"enabled": False, "active": False}
+        if self._fire_recorder is not None:
+            status_reader = getattr(self._fire_recorder, "status", None)
+            if callable(status_reader):
+                recorder_status = status_reader()
         return {
             "state": state.value,
             "pan": self._display_angle(self._pan),
@@ -610,6 +615,7 @@ class ManualControlService:
             "servo_error": self._servo_error,
             "valve_error": self._valve_error,
             "calibration_error": calibration_error,
+            "recording": recorder_status,
         }
 
     def move(self, direction: str, step_degrees: int) -> PanTiltPosition:
