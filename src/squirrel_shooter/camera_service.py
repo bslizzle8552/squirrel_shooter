@@ -67,6 +67,15 @@ class FramePacket:
 
 
 @dataclass(frozen=True)
+class BufferedFrameInfo:
+    """Timing metadata for one compact frame in the rolling event buffer."""
+
+    sequence: int
+    received_at: str
+    received_monotonic: float
+
+
+@dataclass(frozen=True)
 class _BufferedJpegFrame:
     sequence: int
     jpeg: bytes
@@ -134,6 +143,10 @@ class CameraService:
     @property
     def stopped(self) -> bool:
         return self._stop_event.is_set()
+
+    @property
+    def frame_buffer_seconds(self) -> float:
+        return self._frame_buffer_seconds
 
     def start(self) -> None:
         """Start one camera owner; repeated starts never open another handle."""
@@ -233,14 +246,40 @@ class CameraService:
                 self._last_frame_monotonic or monotonic(),
             )
 
-    def buffered_frames(self, since_monotonic: float, *, after_sequence: int = -1) -> Iterator[FramePacket]:
-        """Yield decoded copies from the compact rolling JPEG pre-roll buffer."""
+    def buffered_frame_metadata(
+        self,
+        since_monotonic: float,
+        *,
+        until_monotonic: float | None = None,
+        after_sequence: int = -1,
+    ) -> list[BufferedFrameInfo]:
+        """Return lightweight timing data without decoding buffered JPEGs."""
+
+        with self._condition:
+            return [
+                BufferedFrameInfo(item.sequence, item.received_at, item.received_monotonic)
+                for item in self._frame_buffer
+                if item.received_monotonic >= since_monotonic
+                and (until_monotonic is None or item.received_monotonic <= until_monotonic)
+                and item.sequence > after_sequence
+            ]
+
+    def buffered_frames(
+        self,
+        since_monotonic: float,
+        *,
+        until_monotonic: float | None = None,
+        after_sequence: int = -1,
+    ) -> Iterator[FramePacket]:
+        """Yield decoded copies from the compact rolling JPEG event buffer."""
 
         with self._condition:
             buffered = [
                 item
                 for item in self._frame_buffer
-                if item.received_monotonic >= since_monotonic and item.sequence > after_sequence
+                if item.received_monotonic >= since_monotonic
+                and (until_monotonic is None or item.received_monotonic <= until_monotonic)
+                and item.sequence > after_sequence
             ]
         for item in buffered:
             encoded = np.frombuffer(item.jpeg, dtype=np.uint8)

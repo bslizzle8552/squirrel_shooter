@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 from conftest import write_test_config
 from squirrel_shooter.app import ApplicationRuntime, DashboardServer, _apply_overrides, build_parser
@@ -110,11 +111,25 @@ def test_shared_camera_keeps_compact_decodable_manual_fire_pre_roll(tmp_path: Pa
     try:
         wait_until(lambda: service.status().frames_received >= 3)
         frames = list(service.buffered_frames(0.0))
+        metadata = service.buffered_frame_metadata(0.0)
         assert frames
+        assert [item.sequence for item in metadata] == [item.sequence for item in frames]
         assert all(packet.frame.shape == raw.shape for packet in frames)
         assert [packet.sequence for packet in frames] == sorted(packet.sequence for packet in frames)
     finally:
         service.stop()
+
+
+def test_application_runtime_retains_the_configured_elapsed_recording_window(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+    runtime = ApplicationRuntime(config)
+
+    assert runtime.camera.frame_buffer_seconds == pytest.approx(
+        config.manual_control.recording.pre_roll_seconds
+        + config.manual_control.recording.post_roll_seconds
+        + config.manual_control.fire_pulse_seconds
+        + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
+    )
 
 
 def test_live_stream_holds_last_seen_box_during_tracker_gap(tmp_path: Path) -> None:

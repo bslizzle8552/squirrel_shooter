@@ -95,6 +95,8 @@ manual_control:
   calibration_file: config/calibration_points.json
   recording:
     enabled: true
+    # Seven seconds of real elapsed time: about 2s before and 5s after FIRE.
+    # If pre-roll is unavailable, the recorder extends post-roll to about 7s.
     pre_roll_seconds: 2.0
     post_roll_seconds: 5.0
     zoom_factor: 2.0

@@ -93,13 +93,25 @@ class CropBounds:
 
 
 class ManualFireFrameSource(Protocol):
-    def buffered_frames(self, since_monotonic: float, *, after_sequence: int = -1) -> Iterable[Any]:
+    def buffered_frame_metadata(
+        self,
+        since_monotonic: float,
+        *,
+        until_monotonic: float | None = None,
+        after_sequence: int = -1,
+    ) -> list[Any]:
+        ...
+
+    def buffered_frames(
+        self,
+        since_monotonic: float,
+        *,
+        until_monotonic: float | None = None,
+        after_sequence: int = -1,
+    ) -> Iterable[Any]:
         ...
 
     def wait_for_frame(self, after_sequence: int, timeout: float | None = None) -> Any | None:
-        ...
-
-    def status(self) -> Any:
         ...
 
 
@@ -248,15 +260,49 @@ class ManualFireRecorder:
                 LOGGER.exception("Could not persist failed manual fire recording metadata: %s", event.event_id)
 
     def _record_event(self, event: ManualFireEvent, directory: Path) -> None:
-        since = event.fire_started_monotonic - self.config.pre_roll_seconds
-        buffered = iter(self.camera.buffered_frames(since))
-        first_packet = next(buffered, None)
-        deadline = event.fire_completed_monotonic + self.config.post_roll_seconds
-        while first_packet is None and self._clock() < deadline:
+        requested_window_seconds = self.config.pre_roll_seconds + self.config.post_roll_seconds
+        requested_start = event.fire_started_monotonic - self.config.pre_roll_seconds
+        initial_pre_roll = self.camera.buffered_frame_metadata(
+            requested_start,
+            until_monotonic=event.fire_started_monotonic,
+        )
+        available_pre_roll_seconds = min(
+            self.config.pre_roll_seconds,
+            max(
+                0.0,
+                event.fire_started_monotonic - initial_pre_roll[0].received_monotonic,
+            )
+            if initial_pre_roll
+            else 0.0,
+        )
+        recording_start = event.fire_started_monotonic - available_pre_roll_seconds
+        actual_post_roll_seconds = max(
+            self.config.post_roll_seconds,
+            requested_window_seconds - available_pre_roll_seconds,
+        )
+        deadline = event.fire_started_monotonic + actual_post_roll_seconds
+        sequence = initial_pre_roll[-1].sequence if initial_pre_roll else -1
+        while self._clock() < deadline:
             remaining = deadline - self._clock()
-            first_packet = self.camera.wait_for_frame(-1, timeout=min(1.0, max(0.01, remaining)))
-        if first_packet is None:
+            packet = self.camera.wait_for_frame(sequence, timeout=min(1.0, max(0.01, remaining)))
+            if packet is not None:
+                sequence = max(sequence, packet.sequence)
+
+        frame_metadata = self.camera.buffered_frame_metadata(
+            recording_start,
+            until_monotonic=deadline,
+        )
+        if not frame_metadata:
             raise OSError("No shared-camera frames were available for the accepted fire")
+        buffered = iter(
+            self.camera.buffered_frames(
+                recording_start,
+                until_monotonic=deadline,
+            )
+        )
+        first_packet = next(buffered, None)
+        if first_packet is None:
+            raise OSError("No shared-camera frames could be decoded for the accepted fire")
         sample = first_packet.frame
         frame_height, frame_width = sample.shape[:2]
         requested_x = event.crop_center_x
@@ -278,7 +324,8 @@ class ManualFireRecorder:
         zoom_path = directory / "manual_fire_zoom.avi"
         full_incomplete = directory / "manual_fire_full.incomplete.avi"
         zoom_incomplete = directory / "manual_fire_zoom.incomplete.avi"
-        output_fps = self._output_fps()
+        recording_window_seconds = max(0.001, deadline - recording_start)
+        output_fps = self._output_fps(len(frame_metadata), recording_window_seconds)
         fourcc = cv2.VideoWriter_fourcc(*self.config.clip_codec)
         full_writer = None
         zoom_writer = None
@@ -286,12 +333,11 @@ class ManualFireRecorder:
         first_frame_at: float | None = None
         last_frame_at: float | None = None
         frames_written = 0
-        pre_roll_available = False
         snapshot_frame: np.ndarray | None = None
         snapshot_distance = math.inf
 
         def write_packet(packet: Any) -> None:
-            nonlocal first_frame_at, last_frame_at, frames_written, pre_roll_available
+            nonlocal first_frame_at, last_frame_at, frames_written
             nonlocal snapshot_frame, snapshot_distance
             if packet.sequence in seen_sequences:
                 return
@@ -304,7 +350,6 @@ class ManualFireRecorder:
             first_frame_at = packet.received_monotonic if first_frame_at is None else first_frame_at
             last_frame_at = packet.received_monotonic
             frames_written += 1
-            pre_roll_available = pre_roll_available or packet.received_monotonic < event.fire_started_monotonic
             distance = abs(packet.received_monotonic - event.fire_started_monotonic)
             if distance < snapshot_distance:
                 snapshot_distance = distance
@@ -317,22 +362,6 @@ class ManualFireRecorder:
             write_packet(first_packet)
             for packet in buffered:
                 write_packet(packet)
-            sequence = max(seen_sequences, default=-1)
-            last_buffered_at = last_frame_at if last_frame_at is not None else since
-            while self._clock() < deadline:
-                remaining = deadline - self._clock()
-                packet = self.camera.wait_for_frame(sequence, timeout=min(1.0, max(0.01, remaining)))
-                if packet is None:
-                    continue
-                refreshed = False
-                for buffered_packet in self.camera.buffered_frames(last_buffered_at, after_sequence=sequence):
-                    refreshed = True
-                    write_packet(buffered_packet)
-                if not refreshed:
-                    write_packet(packet)
-                sequence = max(sequence, packet.sequence, max(seen_sequences, default=-1))
-                if last_frame_at is not None:
-                    last_buffered_at = last_frame_at
         finally:
             if full_writer is not None:
                 full_writer.release()
@@ -351,10 +380,14 @@ class ManualFireRecorder:
             "status": "complete",
             "recording_status": "success",
             "end_timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-            "duration": round(max(0.0, last_frame_at - first_frame_at), 3),
+            "duration": round(recording_window_seconds, 3),
+            "captured_frame_span_seconds": round(max(0.0, last_frame_at - first_frame_at), 3),
             "pre_roll_requested_seconds": self.config.pre_roll_seconds,
             "post_roll_requested_seconds": self.config.post_roll_seconds,
-            "pre_roll_available": pre_roll_available,
+            "pre_roll_available": available_pre_roll_seconds > 0,
+            "actual_pre_roll_seconds": round(available_pre_roll_seconds, 3),
+            "actual_post_roll_seconds": round(actual_post_roll_seconds, 3),
+            "timing_basis": "monotonic_elapsed_time",
             "frames_written": frames_written,
             "output_fps": round(output_fps, 3),
             "source_width": frame_width,
@@ -381,10 +414,11 @@ class ManualFireRecorder:
         if self.config.save_full_frame_clip:
             LOGGER.info("Manual fire recording saved: %s", full_path)
 
-    def _output_fps(self) -> float:
-        status = self.camera.status()
-        measured = float(getattr(status, "fps", 0.0) or getattr(status, "reported_fps", 0.0) or 0.0)
-        return measured if measured > 0 else 1.0
+    @staticmethod
+    def _output_fps(frame_count: int, recording_window_seconds: float) -> float:
+        if frame_count <= 0 or recording_window_seconds <= 0:
+            raise ValueError("A positive frame count and recording window are required")
+        return min(120.0, max(0.01, frame_count / recording_window_seconds))
 
     def _open_writer(self, path: Path, fourcc: int, fps: float, size: tuple[int, int]) -> Any:
         writer = self._video_writer_factory(str(path), fourcc, fps, size)

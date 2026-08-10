@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,11 +45,34 @@ class FakeCamera:
     def __init__(self, frames: list[FramePacket]) -> None:
         self.frames = frames
 
-    def buffered_frames(self, since_monotonic: float, *, after_sequence: int = -1) -> list[FramePacket]:
+    def buffered_frame_metadata(
+        self,
+        since_monotonic: float,
+        *,
+        until_monotonic: float | None = None,
+        after_sequence: int = -1,
+    ) -> list[FramePacket]:
         return [
             frame
             for frame in self.frames
-            if frame.received_monotonic >= since_monotonic and frame.sequence > after_sequence
+            if frame.received_monotonic >= since_monotonic
+            and (until_monotonic is None or frame.received_monotonic <= until_monotonic)
+            and frame.sequence > after_sequence
+        ]
+
+    def buffered_frames(
+        self,
+        since_monotonic: float,
+        *,
+        until_monotonic: float | None = None,
+        after_sequence: int = -1,
+    ) -> list[FramePacket]:
+        return [
+            frame
+            for frame in self.frames
+            if frame.received_monotonic >= since_monotonic
+            and (until_monotonic is None or frame.received_monotonic <= until_monotonic)
+            and frame.sequence > after_sequence
         ]
 
     def wait_for_frame(self, after_sequence: int, timeout: float | None = None) -> None:
@@ -120,6 +144,7 @@ def test_recorder_associates_full_and_zoom_clips_with_one_manual_event(tmp_path:
     assert metadata["recording_status"] == "success"
     assert metadata["event_type"] == "manual_fire"
     assert metadata["pre_roll_available"] is True
+    assert metadata["timing_basis"] == "monotonic_elapsed_time"
     assert Path(metadata["clip_path"]).parent == directory
     assert Path(metadata["full_frame_clip_path"]).parent == directory
     assert Path(metadata["clip_path"]).name == "manual_fire_zoom.avi"
@@ -129,6 +154,101 @@ def test_recorder_associates_full_and_zoom_clips_with_one_manual_event(tmp_path:
     assert len(written) == 2
     assert all(len(frames_written) == 3 for frames_written in written.values())
     assert all(frame.shape == (36, 64, 3) for frames_written in written.values() for frame in frames_written)
+
+
+@pytest.mark.parametrize(
+    "timestamps",
+    [
+        [8.0, 9.5, 11.0, 14.9],
+        [8.0 + index * 0.5 for index in range(15)],
+    ],
+)
+def test_recording_playback_duration_uses_elapsed_time_at_variable_frame_rates(
+    tmp_path: Path,
+    timestamps: list[float],
+) -> None:
+    frames = [
+        FramePacket(index, np.full((36, 64, 3), index, dtype=np.uint8), "stamp", timestamp)
+        for index, timestamp in enumerate(timestamps)
+    ]
+    writer_fps: list[float] = []
+
+    def writer_factory(path: str, _fourcc: int, fps: float, _size: tuple[int, int]) -> FakeWriter:
+        writer_fps.append(fps)
+        return FakeWriter(path, {})
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    event = replace(
+        manual_event(),
+        event_id=f"variable-fps-{len(timestamps)}",
+        fire_started_monotonic=10.0,
+        fire_completed_monotonic=10.25,
+    )
+    recorder = ManualFireRecorder(
+        FakeCamera(frames),
+        tmp_path,
+        ManualFireRecordingConfig(pre_roll_seconds=2.0, post_roll_seconds=5.0, crop_center_x=32, crop_center_y=18),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: 20.0,
+    )
+    recorder.record(event)
+    recorder.close()
+
+    directory = tmp_path / "events" / "2026-08-09" / event.event_id
+    metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
+    assert metadata["duration"] == 7.0
+    assert metadata["actual_pre_roll_seconds"] == 2.0
+    assert metadata["actual_post_roll_seconds"] == 5.0
+    assert metadata["frames_written"] == len(timestamps)
+    assert metadata["output_fps"] == pytest.approx(len(timestamps) / 7.0, abs=0.001)
+    assert writer_fps == pytest.approx([len(timestamps) / 7.0, len(timestamps) / 7.0])
+    assert len(timestamps) / writer_fps[0] == pytest.approx(7.0)
+
+
+def test_missing_pre_roll_extends_post_roll_to_seven_elapsed_seconds(tmp_path: Path) -> None:
+    timestamps = [10.0, 12.0, 14.0, 16.9]
+    frames = [
+        FramePacket(index, np.full((36, 64, 3), index, dtype=np.uint8), "stamp", timestamp)
+        for index, timestamp in enumerate(timestamps)
+    ]
+    writer_fps: list[float] = []
+
+    def writer_factory(path: str, _fourcc: int, fps: float, _size: tuple[int, int]) -> FakeWriter:
+        writer_fps.append(fps)
+        return FakeWriter(path, {})
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    event = replace(
+        manual_event(),
+        event_id="no-pre-roll",
+        fire_started_monotonic=10.0,
+        fire_completed_monotonic=10.25,
+    )
+    recorder = ManualFireRecorder(
+        FakeCamera(frames),
+        tmp_path,
+        ManualFireRecordingConfig(pre_roll_seconds=2.0, post_roll_seconds=5.0, crop_center_x=32, crop_center_y=18),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: 20.0,
+    )
+    recorder.record(event)
+    recorder.close()
+
+    directory = tmp_path / "events" / "2026-08-09" / event.event_id
+    metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
+    assert metadata["duration"] == 7.0
+    assert metadata["pre_roll_available"] is False
+    assert metadata["actual_pre_roll_seconds"] == 0.0
+    assert metadata["actual_post_roll_seconds"] == 7.0
+    assert writer_fps == pytest.approx([len(timestamps) / 7.0, len(timestamps) / 7.0])
 
 
 def test_recorder_persists_error_status_without_successful_clip(tmp_path: Path) -> None:
