@@ -88,12 +88,12 @@ pan_tilt:
   release_pwm_after_movement: false
   park_on_cleanup: true
 
-# Physically verified short pulse for normal supervised calibration and testing.
+# Configured pulse for supervised manual calibration and testing.
 manual_control:
   servo_enabled: true
   default_step_degrees: 3
   allowed_step_degrees: [1, 3, 5]
-  fire_pulse_seconds: 0.25
+  fire_pulse_seconds: 0.40
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
   recording:

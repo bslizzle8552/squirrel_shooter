@@ -204,12 +204,12 @@ so refreshing or double-tapping the page cannot bypass it.
 
 Supervised hardware commissioning is underway. The owner has physically verified
 the manual web controls, servos, dry-fire, and a wet-fire shot at 0.25 seconds.
-The checked-in configuration has returned to the normal short calibration pulse:
+The checked-in configuration now uses the requested 0.40-second manual pulse:
 
 ```yaml
 manual_control:
   servo_enabled: true
-  fire_pulse_seconds: 0.25
+  fire_pulse_seconds: 0.40
   fire_cooldown_seconds: 10.0
   calibration_file: config/calibration_points.json
 valve:
@@ -221,9 +221,9 @@ valve:
 The MOSFET signal has been physically traced: Raspberry Pi physical pin 18 is
 BCM GPIO24, and physical pin 20 is GND. Software uses BCM numbering, so the
 configured value is `24`, never `18`. Startup and cleanup command the output
-OFF/LOW. The owner has physically verified dry-fire and wet-fire operation with
-the normal 0.25-second pulse. The temporary 3.0-second demonstration setting has
-been removed. The server-enforced cooldown remains 10 seconds.
+OFF/LOW. The owner has physically verified dry-fire and wet-fire operation at
+0.25 seconds. The current 0.40-second setting still requires supervised physical
+verification; the server-enforced cooldown remains 10 seconds.
 
 The calibration page presents the nine physical blocks as a 3×3 checklist. On
 desktop, select a point and click the center of its block in the live image. The

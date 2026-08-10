@@ -105,7 +105,10 @@ def make_service(
     fire_recorder: FakeFireRecorder | None = None,
 ) -> tuple[ManualControlService, FakePanTilt, FakeValve]:
     pan_config = PanTiltConfig(settling_delay_seconds=0.15)
-    control_config = ManualControlConfig(calibration_file=tmp_path / "calibration.json")
+    control_config = ManualControlConfig(
+        fire_pulse_seconds=0.40,
+        calibration_file=tmp_path / "calibration.json",
+    )
     pan_tilt = FakePanTilt(pan_config, events)
     valve = FakeValve(events)
     calibration_store = CalibrationStore(control_config.calibration_file)
@@ -439,7 +442,7 @@ def test_manual_fire_closes_valve_then_parks_without_changing_calibration(tmp_pa
 
     def recording_sleep(seconds: float) -> None:
         delays.append(seconds)
-        events.append("pulse" if seconds == 0.25 else "settle")
+        events.append("pulse" if seconds == 0.40 else "settle")
 
     service, pan_tilt, valve = make_service(
         tmp_path,
@@ -456,7 +459,7 @@ def test_manual_fire_closes_valve_then_parks_without_changing_calibration(tmp_pa
     service.fire()
 
     assert events == ["close", "open", "pulse", "close", "move", "settle"]
-    assert delays == [0.25, 0.15]
+    assert delays == [0.40, 0.15]
     assert valve.state is ValveState.CLOSED
     assert pan_tilt.moves == [PanTiltPosition(85, 82)]
     assert service.pan_tilt_config.pan_min <= pan_tilt.moves[0].pan <= service.pan_tilt_config.pan_max
@@ -555,7 +558,7 @@ def test_accepted_manual_fire_records_verified_target_and_rejections_do_not(tmp_
     event = recorder.events[0]
     assert (event.crop_center_x, event.crop_center_y) == (150, 150)
     assert event.crop_center_source == "calibrated_target_pixel"
-    assert event.fire_pulse_seconds == 0.25
+    assert event.fire_pulse_seconds == 0.40
     with pytest.raises(FireCooldownError):
         service.fire()
     assert len(recorder.events) == 1
@@ -631,7 +634,7 @@ def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:
 
     assert result == PanTiltPosition(150, 70)
     assert events == ["move", "settle", "close", "open", "pulse", "close", "move", "settle"]
-    assert delays == [0.15, 0.25, 0.15]
+    assert delays == [0.15, 0.40, 0.15]
 
 
 def test_fire_and_movement_are_serialized(tmp_path: Path) -> None:
@@ -643,7 +646,7 @@ def test_fire_and_movement_are_serialized(tmp_path: Path) -> None:
     failures: list[Exception] = []
 
     def controlled_sleep(seconds: float) -> None:
-        if seconds == 0.25:
+        if seconds == 0.40:
             events.append("pulse")
             fire_started.set()
             assert release_fire.wait(timeout=1)

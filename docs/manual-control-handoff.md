@@ -10,7 +10,7 @@ Branch: `manual-control`. Do not merge into `main` without explicit authorizatio
 - Software configuration must use `gpio_pin: 24`, not physical pin number 18.
 - `active_high: true` remains required so the safe closed command is LOW.
 - `valve.enabled: true` remains checked in for supervised manual operation.
-- The normal physically verified 0.25-second calibration/test pulse is restored.
+- The configured manual calibration/test pulse is 0.40 seconds. The earlier 0.25-second pulse was physically verified; 0.40 seconds still requires supervised physical verification.
 - The backend-enforced cooldown remains 10 seconds.
 - CENTER remains pan 85 degrees / tilt 85 degrees.
 - PARK is configured separately as pan 85 degrees / tilt 82 degrees so the nozzle rests at the owner-selected anti-drip angle. CENTER remains 85/85; tune only `pan_tilt.park_tilt` if the installed linkage needs a different rest command.
@@ -106,7 +106,7 @@ The backend stores the last requested target pixel, calculated pan/tilt, cell, i
 
 The existing FIRE button remains the only firing action. A target click never calls the valve or `move_and_fire()`. After `AIM READY`, the operator manually presses FIRE; the pulse starts from the current commanded position and does not perform a pre-fire movement.
 
-The FIRE button retains the physically verified 0.25-second pulse and backend-enforced 10-second cooldown. Refreshes, double taps, and repeated POSTs cannot bypass it. FIRE is rejected rather than queued while movement or settling holds the coordinator. Servo movement remains allowed during cooldown.
+The FIRE button uses the configured 0.40-second pulse and retains the backend-enforced 10-second cooldown. Refreshes, double taps, and repeated POSTs cannot bypass it. FIRE is rejected rather than queued while movement or settling holds the coordinator. Servo movement remains allowed during cooldown.
 
 The separate PARK button is authenticated and uses the same serialized movement helper as every other servo command. It moves directly to configured pan 85 / tilt 82, never opens the valve, and never starts or clears cooldown. It is rejected if another control action already owns the coordinator.
 
@@ -114,7 +114,7 @@ Servo movement and valve firing remain mutually exclusive. The implemented manua
 
 ```text
 click -> interpolate -> move -> settle -> wait -> manual FIRE
-      -> valve ON for 0.25s -> valve OFF -> cooldown starts -> PARK move -> PARKED
+      -> valve ON for 0.40s -> valve OFF -> cooldown starts -> PARK move -> PARKED
 ```
 
 PARK uses the same service lock and movement helper as every other servo command. It begins only after `pulse_valve()` has returned the valve to LOW/OFF. Cooldown is timestamped when the pulse ends, so the PARK movement safely occurs during cooldown. PARK updates only commanded pan/tilt state; it never writes a calibration point or target pixel. Clean shutdown retains the existing valve-cleanup-first and configured servo PARK behavior. Startup still initializes at an uncommanded 85/85 reference and does not move the servos.
@@ -127,7 +127,7 @@ The existing `CameraService` remains the only camera owner. It samples a rolling
 
 For a click-to-aim shot that is still at `AIM READY`, the crop center is the verified native camera pixel selected by the operator. If the operator subsequently moves with the D-pad, fires from an arbitrary manual angle, or fires from PARK, there is no verified inverse pan/tilt-to-pixel mapping; those shots use the configured fixed fallback `(640, 360)`. The implementation does not invent inverse calibration coordinates. Crop bounds clamp to the source frame, keep its aspect ratio, and resize the 2x crop back to the source playback dimensions without changing the live stream.
 
-Completed recordings are stored with the normal event archive under `captures/events/YYYY-MM-DD/manual-fire-.../`. `manual_fire_zoom.avi` is the primary replay, `manual_fire_full.avi` retains the full field, `snapshot.jpg` is the zoomed review frame, and `event.json` contains shot angles, the 0.25-second pulse, crop source/center/bounds, zoom, timing, filenames, pre-roll availability, and recording status. AVI playback FPS is calculated only after the elapsed recording window completes as `captured frame count / monotonic window seconds`. Thermal throttling therefore produces fewer frames and a lower playback FPS over the same approximately 7-second clip instead of shortening it. The site navigation's `Events` page and the manual-control `Rewatch saved manual-fire videos` link both open this archive. It labels each completed recording `Manual fire` and links both clips. MJPG AVI is used because it is already the project's reliable OpenCV/Pi event format; no external H.264 dependency is added.
+Completed recordings are stored with the normal event archive under `captures/events/YYYY-MM-DD/manual-fire-.../`. `manual_fire_zoom.avi` is the primary replay, `manual_fire_full.avi` retains the full field, `snapshot.jpg` is the zoomed review frame, and `event.json` contains shot angles, the configured 0.40-second pulse, crop source/center/bounds, zoom, timing, filenames, pre-roll availability, and recording status. AVI playback FPS is calculated only after the elapsed recording window completes as `captured frame count / monotonic window seconds`. Thermal throttling therefore produces fewer frames and a lower playback FPS over the same approximately 7-second clip instead of shortening it. The site navigation's `Events` page and the manual-control `Rewatch saved manual-fire videos` link both open this archive. It labels each completed recording `Manual fire` and links both clips. MJPG AVI is used because it is already the project's reliable OpenCV/Pi event format; no external H.264 dependency is added.
 
 ## Nine-block calibration procedure
 
@@ -137,7 +137,7 @@ The nine blocks replace the earlier painted-X marker concept; the calibration ge
 2. Click the center of the corresponding physical block in the live camera image.
 3. Confirm the backend reports the native camera pixel X/Y and restores its marker after refresh.
 4. Go outside with the phone and manually aim using the D-pad.
-5. FIRE the normal 0.25-second pulse and observe the water landing point.
+5. FIRE the configured 0.40-second pulse and observe the water landing point.
 6. Adjust aim while the backend-enforced 10-second cooldown runs; fire again only when ready.
 7. Once the water hits the block, press `SAVE AIM` on desktop.
 8. `SAVE AIM` preserves the pixel and records the current backend-commanded pan/tilt; the point becomes green and fully calibrated. Repeating the process for that point uses `UPDATE AIM`.
@@ -153,7 +153,7 @@ No new click-to-aim, 85/82 PARK, or manual-fire recording behavior is claimed as
 4. Repeat the dry check on Point 1 `(446,172 -> 84/79)`, Point 5 `(640,246 -> 70/88)`, and the other six numbered markers. Stop if any exact marker is rejected or fails to reproduce its saved aim.
 5. Click a clearly interior location in each of the four blue cells. Confirm it reports the expected cell, moves and settles only, and produces no valve activity. Do not judge water accuracy yet.
 6. Click just outside the yellow perimeter. Confirm `OUT OF RANGE`, a visible reason, and no movement. A click below Point 9 may correctly be outside even when it is still visually on the lower part of the boundary block; the yellow line is authoritative and is intentionally not expanded.
-7. Only after those dry checks pass, restore water under supervision. Click one known anchor, wait for `AIM READY` and complete servo stillness, then press the separate FIRE button once. Confirm the shot lasts 0.25 seconds and repeated FIRE remains blocked by the 10-second cooldown.
+7. Only after those dry checks pass, restore water under supervision. Click one known anchor, wait for `AIM READY` and complete servo stillness, then press the separate FIRE button once. Confirm the shot lasts 0.40 seconds and repeated FIRE remains blocked by the 10-second cooldown.
 8. Perform a separate dry-fire PARK check and observe that the valve is OFF before movement to pan 85 / tilt 82. Confirm this owner-selected rest angle reduces dripping without binding or overtravel; CENTER stays 85/85 and servo limits remain unchanged.
 9. Wait at least 5 seconds after one accepted FIRE, then open the event archive. Confirm the `Manual fire` card opens a zoom replay centered on the clicked target and a separate full-field clip. Repeat once after a D-pad adjustment and confirm the metadata reports `configured_fixed_fallback`; tune only `manual_control.recording.crop_center_x/y` if that fallback does not cover the installed garden target area.
 
