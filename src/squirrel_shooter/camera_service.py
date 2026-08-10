@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import Any
 
 import cv2
@@ -17,6 +17,7 @@ import numpy as np
 
 from .camera_common import FrameRateMeter, capture_dimensions, capture_fourcc, open_camera
 from .config import CameraConfig, SharedCameraConfig
+from .performance import AverageTimer, ThreadCpuMeter
 from .thread_names import set_current_thread_name
 
 
@@ -62,6 +63,11 @@ class CameraStatus:
     pre_roll_buffer_fps: float = 0.0
     pre_roll_target_fps: float = 0.0
     pre_roll_frames_encoded: int = 0
+    pre_roll_frames_copied: int = 0
+    capture_read_average_ms: float = 0.0
+    frame_publish_average_ms: float = 0.0
+    pre_roll_copy_average_ms: float = 0.0
+    capture_thread_cpu_percent: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -84,9 +90,9 @@ class BufferedFrameInfo:
 
 
 @dataclass(frozen=True)
-class _BufferedJpegFrame:
+class _BufferedRawFrame:
     sequence: int
-    jpeg: bytes
+    frame: np.ndarray
     received_at: str
     received_monotonic: float
 
@@ -147,7 +153,7 @@ class CameraService:
         self._dashboard_stream_fps = 0.0
         self._dashboard_frames_encoded = 0
         self._dashboard_meter = FrameRateMeter()
-        self._frame_buffer: deque[_BufferedJpegFrame] = deque()
+        self._frame_buffer: deque[_BufferedRawFrame] = deque()
         self._sequence = 0
         self._annotated_sequence = 0
         self._last_annotated_source_sequence = -1
@@ -163,7 +169,12 @@ class CameraService:
         self._next_buffer_monotonic: float | None = None
         self._pre_roll_buffer_fps = 0.0
         self._pre_roll_frames_encoded = 0
+        self._pre_roll_frames_copied = 0
         self._pre_roll_meter = FrameRateMeter()
+        self._capture_read_timer = AverageTimer()
+        self._frame_publish_timer = AverageTimer()
+        self._pre_roll_copy_timer = AverageTimer()
+        self._capture_cpu = ThreadCpuMeter()
 
     @property
     def stopped(self) -> bool:
@@ -172,6 +183,11 @@ class CameraService:
     @property
     def frame_buffer_seconds(self) -> float:
         return self._frame_buffer_seconds
+
+    @property
+    def has_dashboard_viewers(self) -> bool:
+        with self._condition:
+            return self._dashboard_viewers > 0
 
     def start(self) -> None:
         """Start one camera owner; repeated starts never open another handle."""
@@ -196,7 +212,12 @@ class CameraService:
             self._next_buffer_monotonic = None
             self._pre_roll_buffer_fps = 0.0
             self._pre_roll_frames_encoded = 0
+            self._pre_roll_frames_copied = 0
             self._pre_roll_meter = FrameRateMeter()
+            self._capture_read_timer = AverageTimer()
+            self._frame_publish_timer = AverageTimer()
+            self._pre_roll_copy_timer = AverageTimer()
+            self._capture_cpu = ThreadCpuMeter()
             self._last_frame_at = None
             self._last_frame_monotonic = None
             self._last_annotated_at = None
@@ -259,6 +280,11 @@ class CameraService:
                 self._pre_roll_buffer_fps,
                 self._frame_buffer_fps if self._frame_buffer_seconds > 0 else 0.0,
                 self._pre_roll_frames_encoded,
+                self._pre_roll_frames_copied,
+                self._capture_read_timer.average_ms,
+                self._frame_publish_timer.average_ms,
+                self._pre_roll_copy_timer.average_ms,
+                self._capture_cpu.percent,
             )
 
     def latest_frame(self, *, copy: bool = True) -> np.ndarray | None:
@@ -298,7 +324,7 @@ class CameraService:
         until_monotonic: float | None = None,
         after_sequence: int = -1,
     ) -> list[BufferedFrameInfo]:
-        """Return lightweight timing data without decoding buffered JPEGs."""
+        """Return lightweight timing data without copying buffered images."""
 
         with self._condition:
             return [
@@ -316,7 +342,7 @@ class CameraService:
         until_monotonic: float | None = None,
         after_sequence: int = -1,
     ) -> Iterator[FramePacket]:
-        """Yield decoded copies from the compact rolling JPEG event buffer."""
+        """Yield copies from the rolling raw pre-event buffer."""
 
         with self._condition:
             buffered = [
@@ -327,12 +353,7 @@ class CameraService:
                 and item.sequence > after_sequence
             ]
         for item in buffered:
-            encoded = np.frombuffer(item.jpeg, dtype=np.uint8)
-            frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
-            if frame is None:
-                LOGGER.warning("Could not decode buffered camera frame sequence=%d", item.sequence)
-                continue
-            yield FramePacket(item.sequence, frame, item.received_at, item.received_monotonic)
+            yield FramePacket(item.sequence, item.frame.copy(), item.received_at, item.received_monotonic)
 
     def publish_annotated(self, source_sequence: int, frame: np.ndarray) -> bool:
         """Publish motion annotations without encoding work when nobody is viewing."""
@@ -493,7 +514,10 @@ class CameraService:
                 )
                 consecutive_failures = 0
                 while not self._stop_event.is_set():
+                    read_started = perf_counter()
                     ok, frame = capture.read()
+                    self._capture_read_timer.add(perf_counter() - read_started)
+                    self._capture_cpu.update()
                     if not ok or frame is None:
                         if self._stop_event.is_set():
                             break
@@ -512,7 +536,7 @@ class CameraService:
                     fps = meter.update()
                     received_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
                     received_monotonic = monotonic()
-                    jpeg_bytes: bytes | None = None
+                    buffered_frame: np.ndarray | None = None
                     should_buffer = (
                         self._frame_buffer_seconds > 0
                         and (
@@ -526,9 +550,10 @@ class CameraService:
                         else:
                             while self._next_buffer_monotonic <= received_monotonic:
                                 self._next_buffer_monotonic += self._frame_buffer_interval
-                        encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
-                        if encoded:
-                            jpeg_bytes = jpeg.tobytes()
+                        copy_started = perf_counter()
+                        buffered_frame = frame.copy()
+                        self._pre_roll_copy_timer.add(perf_counter() - copy_started)
+                    publish_started = perf_counter()
                     with self._condition:
                         self._online = True
                         self._width = width
@@ -540,13 +565,13 @@ class CameraService:
                         self._last_frame_at = received_at
                         self._last_frame_monotonic = received_monotonic
                         self._frames_received += 1
-                        if self._frame_buffer_seconds > 0 and jpeg_bytes is not None:
-                            self._pre_roll_frames_encoded += 1
+                        if self._frame_buffer_seconds > 0 and buffered_frame is not None:
+                            self._pre_roll_frames_copied += 1
                             self._pre_roll_buffer_fps = self._pre_roll_meter.update(received_monotonic)
                             self._frame_buffer.append(
-                                _BufferedJpegFrame(
+                                _BufferedRawFrame(
                                     self._sequence,
-                                    jpeg_bytes,
+                                    buffered_frame,
                                     received_at,
                                     received_monotonic,
                                 )
@@ -555,6 +580,7 @@ class CameraService:
                             while self._frame_buffer and self._frame_buffer[0].received_monotonic < cutoff:
                                 self._frame_buffer.popleft()
                         self._condition.notify_all()
+                    self._frame_publish_timer.add(perf_counter() - publish_started)
             except Exception as exc:
                 if not self._stop_event.is_set():
                     self._set_offline(str(exc))

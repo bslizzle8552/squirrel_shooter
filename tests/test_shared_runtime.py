@@ -14,7 +14,7 @@ import pytest
 
 from conftest import write_test_config
 from squirrel_shooter.app import ApplicationRuntime, DashboardServer, _apply_overrides, build_parser
-from squirrel_shooter.camera_service import CameraService
+from squirrel_shooter.camera_service import CameraService, FramePacket
 from squirrel_shooter.config import CameraConfig, SharedCameraConfig, load_config
 from squirrel_shooter.motion_runtime import MotionProcessingService
 from squirrel_shooter.web_dashboard import create_app
@@ -97,7 +97,7 @@ def test_shared_runtime_publishes_raw_and_annotated_frames(tmp_path: Path) -> No
     assert released.is_set()
 
 
-def test_shared_camera_keeps_compact_decodable_manual_fire_pre_roll(tmp_path: Path) -> None:
+def test_shared_camera_keeps_raw_manual_fire_pre_roll(tmp_path: Path) -> None:
     released = threading.Event()
     raw = np.full((36, 64, 3), 80, dtype=np.uint8)
     service = CameraService(
@@ -203,7 +203,9 @@ def test_dashboard_viewers_share_one_encoded_frame(tmp_path: Path, monkeypatch: 
         service.stop()
 
 
-def test_manual_pre_roll_jpeg_encoding_is_rate_limited(tmp_path: Path) -> None:
+def test_manual_pre_roll_copies_at_target_rate_without_jpeg_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     released = threading.Event()
     service = CameraService(
         CameraConfig(0, 64, 36, 30, tmp_path),
@@ -213,13 +215,23 @@ def test_manual_pre_roll_jpeg_encoding_is_rate_limited(tmp_path: Path) -> None:
         frame_buffer_seconds=1.0,
         frame_buffer_fps=10.0,
     )
+    encode_calls = 0
+
+    def unexpected_encode(*_args: object, **_kwargs: object):
+        nonlocal encode_calls
+        encode_calls += 1
+        raise AssertionError("idle pre-roll must not JPEG-encode")
+
+    monkeypatch.setattr("squirrel_shooter.camera_service.cv2.imencode", unexpected_encode)
     service.start()
     try:
         wait_until(lambda: service.status().frames_received >= 25)
         status = service.status()
-        assert status.pre_roll_frames_encoded < status.frames_received / 3
+        assert status.pre_roll_frames_encoded == 0
+        assert status.pre_roll_frames_copied < status.frames_received / 3
         assert 1 <= status.pre_roll_frames_buffered <= 5
         assert status.pre_roll_target_fps == 10.0
+        assert encode_calls == 0
     finally:
         service.stop()
 
@@ -253,13 +265,45 @@ def test_motion_processing_samples_fast_camera_at_configured_rate(tmp_path: Path
     assert all(later - earlier >= 0.08 for earlier, later in zip(processed, processed[1:]))
 
 
-def test_application_runtime_retains_the_configured_elapsed_recording_window(tmp_path: Path) -> None:
+def test_headless_motion_skips_idle_annotation_until_a_viewer_connects(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+    config = replace(config, runtime=replace(config.runtime, headless=True))
+
+    class Camera:
+        has_dashboard_viewers = False
+
+        def __init__(self) -> None:
+            self.published = 0
+
+        def status(self) -> SimpleNamespace:
+            return SimpleNamespace(fps=10.0, reported_fps=15.0, width=64, height=36, read_failures=0)
+
+        def publish_annotated(self, _sequence: int, _frame: np.ndarray) -> None:
+            self.published += 1
+
+    camera = Camera()
+    motion = MotionProcessingService(camera, config)  # type: ignore[arg-type]
+    frame = np.zeros((36, 64, 3), dtype=np.uint8)
+
+    motion._process_packet(FramePacket(1, frame, "stamp", 1.0))
+
+    assert motion.status().annotations_rendered == 0
+    assert motion.status().idle_annotations_skipped == 1
+    assert camera.published == 0
+
+    camera.has_dashboard_viewers = True
+    motion._process_packet(FramePacket(2, frame, "stamp", 1.1))
+
+    assert motion.status().annotations_rendered == 1
+    assert camera.published == 1
+
+
+def test_application_runtime_retains_only_the_pre_roll_window_in_memory(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
     runtime = ApplicationRuntime(config)
 
     assert runtime.camera.frame_buffer_seconds == pytest.approx(
         config.manual_control.recording.pre_roll_seconds
-        + config.manual_control.recording.post_roll_seconds
         + config.manual_control.fire_pulse_seconds
         + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
     )
@@ -319,14 +363,15 @@ def test_night_mode_finishes_active_clip_and_pauses_until_color_returns(tmp_path
     )
     motion._recorder = recorder  # type: ignore[assignment]
     motion._active_events = 1
-    motion._prebuffer.append(0.0, np.zeros((20, 20, 3), dtype=np.uint8))
+    dummy_result = SimpleNamespace()
+    motion._prebuffer.append(0.0, np.zeros((20, 20, 3), dtype=np.uint8), dummy_result, 10.0)  # type: ignore[arg-type]
     night_result = SimpleNamespace(
         global_motion=SimpleNamespace(reason="probable_ir_mode_switch", colorfulness=0.0),
         groups=(SimpleNamespace(track_id=9),),
     )
 
     motion._update_night_mode(night_result, 1.0)  # type: ignore[arg-type]
-    motion._handle_events(SimpleNamespace(), night_result, np.zeros((20, 20, 3), dtype=np.uint8), 1.0, 10.0)  # type: ignore[arg-type]
+    motion._handle_events(SimpleNamespace(), night_result, lambda: np.zeros((20, 20, 3), dtype=np.uint8), 1.0, 10.0)  # type: ignore[arg-type]
 
     assert motion._night_mode_paused is True
     assert motion._night_mode_evidence == "probable_ir_mode_switch"
@@ -437,8 +482,12 @@ def test_motion_and_dashboard_share_exactly_one_camera_open(tmp_path: Path) -> N
         assert status.json["camera"]["camera_open_count"] == 1
         assert status.json["camera"]["dashboard_viewers"] == 0
         assert "pre_roll_target_fps" in status.json["camera"]
+        assert "pre_roll_frames_copied" in status.json["camera"]
+        assert "capture_thread_cpu_percent" in status.json["camera"]
         assert status.json["detector"]["frames_processed"] > 0
         assert status.json["detector"]["target_fps"] == config.motion.target_fps
+        assert "detector_average_ms" in status.json["detector"]
+        assert "motion_thread_cpu_percent" in status.json["detector"]
         assert status.json["application_mode"] == "shared-camera-motion-watch"
         assert next(stream.response).startswith(b"--frame")
         stream.close()

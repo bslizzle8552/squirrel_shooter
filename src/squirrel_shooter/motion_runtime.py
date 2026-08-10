@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import Any, Callable
 
 import cv2
@@ -19,11 +19,12 @@ from .classifier import ClassifierEvidenceStore, EventClassifier
 from .config import AppConfig
 from .diagnostics import cleanup_oldest
 from .event_report import generate_reports, load_events
-from .event_storage import EventLogWriter, EventRecorder, RollingFrameBuffer, SessionLog, enforce_retention, recover_incomplete_events
+from .event_storage import EventLogWriter, EventRecorder, SessionLog, enforce_retention, recover_incomplete_events
 from .files import timestamped_output_path
 from .frame_selection import BestEventFrameSelector
-from .watch_detection import MotionWatcherDetector, WatchDetectionResult, annotate_watch_frame
+from .performance import AverageTimer, ThreadCpuMeter
 from .thread_names import set_current_thread_name
+from .watch_detection import MotionWatcherDetector, WatchDetectionResult, annotate_watch_frame
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +56,45 @@ class MotionRuntimeStatus:
     night_mode_paused: bool = False
     night_mode_evidence: str | None = None
     target_fps: float = 0.0
+    detector_average_ms: float = 0.0
+    annotation_average_ms: float = 0.0
+    motion_thread_cpu_percent: float = 0.0
+    annotations_rendered: int = 0
+    idle_annotations_skipped: int = 0
+
+
+@dataclass(frozen=True)
+class _BufferedDetection:
+    timestamp: float
+    frame: np.ndarray
+    result: WatchDetectionResult
+    measured_fps: float
+
+
+class _DetectionFrameBuffer:
+    """Retain raw event lead-in frames and render overlays only if an event begins."""
+
+    def __init__(self, duration_seconds: float) -> None:
+        self.duration_seconds = duration_seconds
+        self._frames: deque[_BufferedDetection] = deque()
+
+    def append(self, timestamp: float, frame: np.ndarray, result: WatchDetectionResult, measured_fps: float) -> None:
+        self._frames.append(_BufferedDetection(timestamp, frame.copy(), result, measured_fps))
+        cutoff = timestamp - self.duration_seconds
+        while self._frames and self._frames[0].timestamp < cutoff:
+            self._frames.popleft()
+
+    def rendered_frames(self, render: Callable[[np.ndarray, WatchDetectionResult, float], np.ndarray]) -> list[tuple[float, np.ndarray]]:
+        return [
+            (item.timestamp, render(item.frame, item.result, item.measured_fps))
+            for item in self._frames
+        ]
+
+    def clear(self) -> None:
+        self._frames.clear()
+
+    def __len__(self) -> int:
+        return len(self._frames)
 
 
 class MotionProcessingService:
@@ -116,7 +156,12 @@ class MotionProcessingService:
         self._logs: EventLogWriter | None = None
         self._session: SessionLog | None = None
         self._recorder: EventRecorder | None = None
-        self._prebuffer = RollingFrameBuffer(config.motion.event_lifecycle.pre_event_seconds)
+        self._prebuffer = _DetectionFrameBuffer(config.motion.event_lifecycle.pre_event_seconds)
+        self._detector_timer = AverageTimer()
+        self._annotation_timer = AverageTimer()
+        self._motion_cpu = ThreadCpuMeter()
+        self._annotations_rendered = 0
+        self._idle_annotations_skipped = 0
         self._last_rejection: str | None = None
         self._last_session_save = monotonic()
         self._last_camera_read_failures = 0
@@ -195,6 +240,11 @@ class MotionProcessingService:
                 self._night_mode_paused,
                 self._night_mode_evidence,
                 self.config.motion.target_fps,
+                self._detector_timer.average_ms,
+                self._annotation_timer.average_ms,
+                self._motion_cpu.percent,
+                self._annotations_rendered,
+                self._idle_annotations_skipped,
             )
 
     def status_dict(self) -> dict[str, Any]:
@@ -293,12 +343,14 @@ class MotionProcessingService:
                 next_frame_at = monotonic() + frame_interval
                 try:
                     self._process_packet(packet)
+                    self._motion_cpu.update()
                 except Exception as exc:
                     self._record_error("Motion frame processing failed", exc)
-                    try:
-                        self.camera.publish_annotated(packet.sequence, packet.frame)
-                    except Exception:
-                        LOGGER.exception("Could not publish raw fallback after motion failure")
+                    if self._display_requested():
+                        try:
+                            self.camera.publish_annotated(packet.sequence, packet.frame)
+                        except Exception:
+                            LOGGER.exception("Could not publish raw fallback after motion failure")
             clean = True
         except Exception as exc:
             self._record_error("Motion processor thread failed", exc)
@@ -323,18 +375,33 @@ class MotionProcessingService:
                 for key in ("actual_width", "actual_height", "camera_reported_fps", "camera_mode_if_known", "ir_mode_if_explicitly_detected_or_configured")
             }
             self._session.sample_fps(measured_fps)
+        detector_started = perf_counter()
         result = self.detector.process(packet.frame, now=now)
+        self._detector_timer.add(perf_counter() - detector_started)
         processing_fps = result.measured_processing_fps
-        annotated = annotate_watch_frame(packet.frame, result, measured_fps=processing_fps)
+        annotated: np.ndarray | None = None
+
+        def render_current() -> np.ndarray:
+            nonlocal annotated
+            if annotated is None:
+                annotated = self._render_annotation(packet.frame, result, processing_fps)
+            return annotated
+
         self._update_night_mode(result, now)
         if not self._night_mode_paused:
             self._handle_rejection(result, measured_fps)
-            self._handle_events(packet, result, annotated, now, processing_fps)
-            live_annotated = self._add_live_box_holds(annotated, result.groups, now)
-            self._prebuffer.append(now, annotated)
-        else:
-            live_annotated = self._annotate_night_pause(annotated)
-        self.camera.publish_annotated(packet.sequence, live_annotated)
+            self._handle_events(packet, result, render_current, now, processing_fps)
+            self._prebuffer.append(now, packet.frame, result, processing_fps)
+        if self._display_requested():
+            visible = render_current()
+            live_annotated = (
+                self._annotate_night_pause(visible)
+                if self._night_mode_paused
+                else self._add_live_box_holds(visible, result.groups, now)
+            )
+            self.camera.publish_annotated(packet.sequence, live_annotated)
+        elif annotated is None:
+            self._idle_annotations_skipped += 1
         now_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
         groups = tuple(group.as_dict() for group in result.groups)
         with self._condition:
@@ -485,7 +552,29 @@ class MotionProcessingService:
         elif result.state.value == "READY":
             self._last_rejection = None
 
-    def _handle_events(self, packet: FramePacket, result: WatchDetectionResult, annotated: np.ndarray, now: float, measured_fps: float) -> None:
+    def _display_requested(self) -> bool:
+        return not self.config.runtime.headless or bool(getattr(self.camera, "has_dashboard_viewers", False))
+
+    def _render_annotation(
+        self,
+        frame: np.ndarray,
+        result: WatchDetectionResult,
+        measured_fps: float,
+    ) -> np.ndarray:
+        started = perf_counter()
+        annotated = annotate_watch_frame(frame, result, measured_fps=measured_fps)
+        self._annotation_timer.add(perf_counter() - started)
+        self._annotations_rendered += 1
+        return annotated
+
+    def _handle_events(
+        self,
+        packet: FramePacket,
+        result: WatchDetectionResult,
+        get_annotated: Callable[[], np.ndarray],
+        now: float,
+        measured_fps: float,
+    ) -> None:
         if self._night_mode_paused or self._recorder is None:
             return
         groups_by_track = {group.track_id: group for group in result.groups}
@@ -500,12 +589,12 @@ class MotionProcessingService:
         for group in result.groups:
             should_begin = group.newly_confirmed or group.track_id == forced_track
             if should_begin and group.track_id not in self._recorder.active:
-                pre_event_frames = self._prebuffer.frames()
+                pre_event_frames = self._prebuffer.rendered_frames(self._render_annotation)
                 event = self._recorder.begin(
                     group.track_id,
                     group,
                     packet.frame,
-                    annotated,
+                    get_annotated(),
                     pre_event_frames,
                     now=now,
                     measured_fps=measured_fps,
@@ -532,14 +621,14 @@ class MotionProcessingService:
                     self._classifier_clip_offsets[event.event_id] = len(pre_event_frames)
                     self._consider_classifier_frame(selector, group, packet.frame)
             elif group.track_id in self._recorder.active:
-                self._recorder.update(group.track_id, group, annotated, now=now)
+                self._recorder.update(group.track_id, group, get_annotated(), now=now)
                 event = self._recorder.active[group.track_id]
                 selector = self._classifier_selectors.get(event.event_id)
                 if selector is not None:
                     self._consider_classifier_frame(selector, group, packet.frame)
         for track_id, event in list(self._recorder.active.items()):
             if track_id not in groups_by_track:
-                self._recorder.update(track_id, None, annotated, now=now)
+                self._recorder.update(track_id, None, get_annotated(), now=now)
                 selector = self._classifier_selectors.get(event.event_id)
                 if selector is not None:
                     self._consider_classifier_frame(selector, None, packet.frame)

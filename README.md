@@ -254,19 +254,14 @@ the existing Pi checkout (change only the first path if the clone is elsewhere):
 
 ```bash
 cd ~/squirrel_shooter
-git pull --ff-only origin main
-source .venv/bin/activate
-python -m pip install -e ".[test]"
-python -m squirrel_shooter.classifier_setup
-python -m pytest
+./pull-and-start.sh
 ```
 
-The setup command downloads the pinned, MIT-licensed MobileNet-SSD definition,
-weights, and license (about 23 MB total) and verifies every SHA-256 checksum before
-installing them under the ignored `models/` directory. Expected test result for
-this revision: **138 passed** without opening the USB camera. Then stop any old
-dashboard, preview, recorder, or watcher process that already owns the camera and
-start the complete system:
+The update script stops the user service, fast-forwards the branch currently
+checked out on the Pi, refreshes the editable install, runs the complete software
+test suite without opening the USB camera, and restarts the service only after the
+tests pass. The classifier setup command remains part of initial installation and
+is not repeated on every update.
 
 ```bash
 python -m squirrel_shooter.app
@@ -429,10 +424,10 @@ values for 1280x720 near 10 FPS, not final garden calibration.
 camera:
   requested_width: 1280
   requested_height: 720
-  requested_fps: 30
+  requested_fps: 15
   camera_mode_if_known: unknown
   ir_mode_if_explicitly_detected_or_configured: unknown
-  low_fps_threshold: 15.0
+  low_fps_threshold: 10.0
   reopen_after_failed_reads: 10
   reopen_delay_seconds: 2.0
 ```

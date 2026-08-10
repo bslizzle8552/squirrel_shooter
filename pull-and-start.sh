@@ -12,7 +12,12 @@ trap update_failed ERR
 
 systemctl --user stop squirrel-squirter.service 2>/dev/null || true
 cd "$REPO_DIR"
-git pull --ff-only origin main
+CURRENT_BRANCH="$(git branch --show-current)"
+if [ -z "$CURRENT_BRANCH" ]; then
+  echo "Refusing to update a detached checkout."
+  exit 1
+fi
+git pull --ff-only origin "$CURRENT_BRANCH"
 .venv/bin/python -m pip install -e ".[test]"
 .venv/bin/python -m pytest
 

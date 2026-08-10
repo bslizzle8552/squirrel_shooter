@@ -1,15 +1,15 @@
-# Conservative starting values for a fixed 1280x720 garden camera requested at
-# 30 FPS. Live event metadata currently measures about 30-39 FPS; tune again
-# after the camera is installed in its final garden view.
+# Conservative starting values for a fixed 1280x720 garden camera. Fifteen FPS
+# gives the 12 FPS evidence sampler headroom without asking the Pi to capture
+# twice as many frames as any consumer uses.
 camera:
   device_index: 0
   requested_width: 1280
   requested_height: 720
-  requested_fps: 30
+  requested_fps: 15
   output_directory: captures
   camera_mode_if_known: unknown
   ir_mode_if_explicitly_detected_or_configured: unknown
-  low_fps_threshold: 15.0
+  low_fps_threshold: 10.0
   reopen_after_failed_reads: 10
   reopen_delay_seconds: 2.0
 
@@ -102,7 +102,7 @@ manual_control:
     # If pre-roll is unavailable, the recorder extends post-roll to about 7s.
     pre_roll_seconds: 2.0
     post_roll_seconds: 5.0
-    # Sample the compact rolling buffer; do not JPEG-encode all 30 camera FPS.
+    # Sample raw pre-roll frames; JPEG work begins only for saved output/viewers.
     target_fps: 12.0
     zoom_factor: 2.0
     # Target-click shots use their verified camera pixel. D-pad/manual-angle
@@ -123,7 +123,7 @@ motion:
   enabled: true
   processing_width: 640
   # Motion timing remains elapsed-time based while expensive vision work samples
-  # the shared 30 FPS camera at a rate suitable for garden monitoring.
+  # the shared camera at a rate suitable for garden monitoring.
   target_fps: 10.0
   history: 500
   variance_threshold: 32

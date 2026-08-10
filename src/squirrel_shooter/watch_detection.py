@@ -355,6 +355,13 @@ class MotionWatcherDetector:
         self._next_track_id = 1
         self._last_confirmation_at: float | None = None
         self._previous_components: list[tuple[tuple[float, float], float]] = []
+        self._morphology_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (config.morphology_kernel, config.morphology_kernel),
+        )
+        self._zone_masks: dict[tuple[int, int], np.ndarray] = {}
+        self._zone_areas: dict[tuple[int, int], int] = {}
+        self._zone_boundaries: dict[tuple[int, int], np.ndarray] = {}
 
     def clear_candidates(self) -> None:
         self._tracks.clear()
@@ -374,19 +381,29 @@ class MotionWatcherDetector:
         reduced = cv2.resize(frame, (target_width, max(1, round(frame.shape[0] * scale))), interpolation=cv2.INTER_AREA)
         blurred = cv2.GaussianBlur(reduced, (self.config.blur_kernel, self.config.blur_kernel), 0)
         raw = self._subtractor.apply(blurred)
-        background = self._background_image(blurred.shape)
         _, foreground = cv2.threshold(raw, 200, 255, cv2.THRESH_BINARY)
-        zone_mask = inclusion_zone_mask(self.config, foreground.shape)
+        mask_shape = foreground.shape
+        zone_mask = self._zone_masks.get(mask_shape)
+        if zone_mask is None:
+            zone_mask = inclusion_zone_mask(self.config, mask_shape)
+            self._zone_masks[mask_shape] = zone_mask
+            self._zone_areas[mask_shape] = max(1, cv2.countNonZero(zone_mask))
         analysis_raw = cv2.bitwise_and(raw, zone_mask)
         foreground = cv2.bitwise_and(foreground, zone_mask)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.config.morphology_kernel, self.config.morphology_kernel))
         cleaned = foreground
         if self.config.open_iterations:
-            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=self.config.open_iterations)
+            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, self._morphology_kernel, iterations=self.config.open_iterations)
         if self.config.close_iterations:
-            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=self.config.close_iterations)
+            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, self._morphology_kernel, iterations=self.config.close_iterations)
         analysis_cleaned = cv2.bitwise_and(cleaned, zone_mask)
-        measurement = self._measure_global(reduced, analysis_raw, analysis_cleaned, zone_mask)
+        contours, _ = cv2.findContours(analysis_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        measurement = self._measure_global(
+            reduced,
+            analysis_raw,
+            analysis_cleaned,
+            contours,
+            self._zone_areas[mask_shape],
+        )
         self._frame_count += 1
 
         if not self.config.enabled:
@@ -404,7 +421,6 @@ class MotionWatcherDetector:
         else:
             state = WatchState.READY
 
-        contours, _ = cv2.findContours(analysis_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if state is not WatchState.READY:
             return WatchDetectionResult(
                 state,
@@ -420,6 +436,12 @@ class MotionWatcherDetector:
         inverse = 1.0 / scale
         components: list[MotionComponent] = []
         zone_foreground = analysis_cleaned
+        lighting_filter_enabled = self.config.candidate_filter.ignore_localized_lighting_changes
+        has_candidate_contour = any(
+            self.config.min_blob_area <= cv2.contourArea(contour) <= self.config.max_blob_area
+            for contour in contours
+        )
+        background = self._background_image(blurred.shape) if lighting_filter_enabled and has_candidate_contour else None
         for contour in contours:
             area = float(cv2.contourArea(contour))
             if area < self.config.min_blob_area or area > self.config.max_blob_area:
@@ -459,11 +481,16 @@ class MotionWatcherDetector:
         components = moving_components
         self._previous_components = [(item.centroid, current) for item in components]
 
-        zone_area_original = max(1, int(cv2.countNonZero(zone_mask) * inverse * inverse))
+        zone_area_original = max(1, int(self._zone_areas[mask_shape] * inverse * inverse))
         groups = list(group_components(components, self.config.grouping, frame.shape[0] * frame.shape[1], zone_area_original))
-        full_zone = cv2.resize(zone_mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
-        boundary = cv2.subtract(full_zone, cv2.erode(full_zone, np.ones((5, 5), dtype=np.uint8)))
-        groups = [replace(group, touched_zone_boundary=self._box_touches_mask(group.bounding_box, boundary)) for group in groups]
+        if groups:
+            full_shape = frame.shape[:2]
+            boundary = self._zone_boundaries.get(full_shape)
+            if boundary is None:
+                full_zone = cv2.resize(zone_mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+                boundary = cv2.subtract(full_zone, cv2.erode(full_zone, np.ones((5, 5), dtype=np.uint8)))
+                self._zone_boundaries[full_shape] = boundary
+            groups = [replace(group, touched_zone_boundary=self._box_touches_mask(group.bounding_box, boundary)) for group in groups]
         tracked = self._update_tracks(groups, current, frame.shape[:2])
         return WatchDetectionResult(
             state,
@@ -536,19 +563,25 @@ class MotionWatcherDetector:
         )
         return float(np.count_nonzero(luminance_only) / changed_pixels)
 
-    def _measure_global(self, frame: np.ndarray, raw: np.ndarray, cleaned: np.ndarray, zone_mask: np.ndarray) -> GlobalMotionMeasurement:
+    def _measure_global(
+        self,
+        frame: np.ndarray,
+        raw: np.ndarray,
+        cleaned: np.ndarray,
+        contours: list[np.ndarray],
+        zone_area: int,
+    ) -> GlobalMotionMeasurement:
         pixels = max(1, raw.size)
         raw_percent = 100.0 * cv2.countNonZero(raw) / pixels
         cleaned_percent = 100.0 * cv2.countNonZero(cleaned) / pixels
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        candidate_pixels = sum(cv2.contourArea(contour) for contour in contours if cv2.contourArea(contour) >= self.config.min_blob_area)
+        contour_areas = (cv2.contourArea(contour) for contour in contours)
+        candidate_pixels = sum(area for area in contour_areas if area >= self.config.min_blob_area)
         candidate_percent = 100.0 * candidate_pixels / pixels
-        zone_area = max(1, cv2.countNonZero(zone_mask))
-        zone_percent = 100.0 * cv2.countNonZero(cv2.bitwise_and(cleaned, zone_mask)) / zone_area
+        zone_percent = 100.0 * cv2.countNonZero(cleaned) / zone_area
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         luminance = float(np.mean(gray))
-        channels = cv2.split(frame.astype(np.float32))
-        colorfulness = float(np.mean(np.abs(channels[2] - channels[1]) + np.abs(channels[1] - channels[0])))
+        blue, green, red = cv2.split(frame)
+        colorfulness = float(cv2.mean(cv2.absdiff(red, green))[0] + cv2.mean(cv2.absdiff(green, blue))[0])
         luminance_delta = 0.0 if self._previous_luminance is None else abs(luminance - self._previous_luminance)
         color_delta = 0.0 if self._previous_colorfulness is None else abs(colorfulness - self._previous_colorfulness)
         previous_color = self._previous_colorfulness

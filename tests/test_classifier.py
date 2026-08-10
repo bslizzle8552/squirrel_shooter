@@ -582,10 +582,10 @@ def test_motion_submits_best_frame_once_after_event_completes(tmp_path: Path) ->
     second = SimpleNamespace(**{**first.__dict__, "newly_confirmed": False, "bounding_box": (20, 20, 45, 25)})
     third = SimpleNamespace(**{**first.__dict__, "newly_confirmed": False, "bounding_box": (20, 20, 35, 25)})
 
-    motion._handle_events(packet, SimpleNamespace(groups=(first,)), frame, 1.0, 10.0)  # type: ignore[arg-type]
-    motion._handle_events(packet, SimpleNamespace(groups=(second,)), frame, 1.1, 10.0)  # type: ignore[arg-type]
+    motion._handle_events(packet, SimpleNamespace(groups=(first,)), lambda: frame, 1.0, 10.0)  # type: ignore[arg-type]
+    motion._handle_events(packet, SimpleNamespace(groups=(second,)), lambda: frame, 1.1, 10.0)  # type: ignore[arg-type]
     assert classifier.calls == []
-    motion._handle_events(packet, SimpleNamespace(groups=(third,)), frame, 1.2, 10.0)  # type: ignore[arg-type]
+    motion._handle_events(packet, SimpleNamespace(groups=(third,)), lambda: frame, 1.2, 10.0)  # type: ignore[arg-type]
 
     assert len(classifier.calls) == 1
     event_id, frame_number, metadata = classifier.calls[0]

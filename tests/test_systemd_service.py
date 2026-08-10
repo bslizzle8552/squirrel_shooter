@@ -23,7 +23,9 @@ def test_two_command_scripts_hide_service_setup_and_safe_update_details() -> Non
 
     assert "sudo loginctl enable-linger" in start
     assert "systemctl --user enable --now squirrel-squirter.service" in start
-    assert "git pull --ff-only origin main" in update
+    assert 'CURRENT_BRANCH="$(git branch --show-current)"' in update
+    assert 'git pull --ff-only origin "$CURRENT_BRANCH"' in update
+    assert "Refusing to update a detached checkout" in update
     assert '.venv/bin/python -m pip install -e ".[test]"' in update
     assert ".venv/bin/python -m pytest" in update
     assert 'exec "$REPO_DIR/start.sh"' in update

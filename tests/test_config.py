@@ -23,7 +23,8 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.camera.device_index == 2
     assert config.camera.requested_width == 1280
     assert config.camera.requested_height == 720
-    assert config.camera.requested_fps == 30.0
+    assert config.camera.requested_fps == 15.0
+    assert config.camera.low_fps_threshold == 10.0
     assert config.camera.output_directory == Path("captures")
     assert config.dashboard.host == "0.0.0.0"
     assert config.dashboard.port == 5000

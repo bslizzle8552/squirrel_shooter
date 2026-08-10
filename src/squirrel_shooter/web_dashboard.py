@@ -117,6 +117,11 @@ def _camera_status_dict(status: CameraStatus, app_config: AppConfig) -> dict[str
         "pre_roll_buffer_fps": round(status.pre_roll_buffer_fps, 1),
         "pre_roll_target_fps": round(status.pre_roll_target_fps, 1),
         "pre_roll_frames_encoded": status.pre_roll_frames_encoded,
+        "pre_roll_frames_copied": status.pre_roll_frames_copied,
+        "capture_read_average_ms": round(status.capture_read_average_ms, 2),
+        "frame_publish_average_ms": round(status.frame_publish_average_ms, 2),
+        "pre_roll_copy_average_ms": round(status.pre_roll_copy_average_ms, 2),
+        "capture_thread_cpu_percent": round(status.capture_thread_cpu_percent, 1),
         "last_annotated_frame": status.last_annotated_at,
         "annotated_frame_stale": status.annotated_frame_age_seconds is None
         or status.annotated_frame_age_seconds > app_config.shared_camera.annotated_frame_stale_seconds,

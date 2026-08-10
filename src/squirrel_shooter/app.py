@@ -46,7 +46,6 @@ class ApplicationRuntime:
             encode_jpeg=True,
             frame_buffer_seconds=(
                 config.manual_control.recording.pre_roll_seconds
-                + config.manual_control.recording.post_roll_seconds
                 + config.manual_control.fire_pulse_seconds
                 + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
                 if config.manual_control.recording.enabled

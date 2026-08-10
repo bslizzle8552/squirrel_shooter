@@ -324,27 +324,36 @@ class ManualFireRecorder:
         )
         deadline = event.fire_started_monotonic + actual_post_roll_seconds
         sequence = initial_pre_roll[-1].sequence if initial_pre_roll else -1
+        packets_by_sequence = {
+            packet.sequence: packet
+            for packet in self.camera.buffered_frames(
+                recording_start,
+                until_monotonic=event.fire_started_monotonic,
+            )
+        }
+        next_sample_at = event.fire_started_monotonic
+        sample_interval = 1.0 / self.config.target_fps
         while self._clock() < deadline:
             remaining = deadline - self._clock()
             packet = self.camera.wait_for_frame(sequence, timeout=min(1.0, max(0.01, remaining)))
             if packet is not None:
                 sequence = max(sequence, packet.sequence)
+                if packet.received_monotonic <= deadline and packet.received_monotonic >= next_sample_at:
+                    packets_by_sequence[packet.sequence] = packet
+                    while next_sample_at <= packet.received_monotonic:
+                        next_sample_at += sample_interval
 
-        frame_metadata = self.camera.buffered_frame_metadata(
-            recording_start,
-            until_monotonic=deadline,
+        # The fallback preserves frames supplied by simpler/test sources and
+        # fills any short capture gap that is still inside the rolling buffer.
+        for packet in self.camera.buffered_frames(recording_start, until_monotonic=deadline):
+            packets_by_sequence.setdefault(packet.sequence, packet)
+        packets = sorted(
+            packets_by_sequence.values(),
+            key=lambda item: (item.received_monotonic, item.sequence),
         )
-        if not frame_metadata:
+        if not packets:
             raise OSError("No shared-camera frames were available for the accepted fire")
-        buffered = iter(
-            self.camera.buffered_frames(
-                recording_start,
-                until_monotonic=deadline,
-            )
-        )
-        first_packet = next(buffered, None)
-        if first_packet is None:
-            raise OSError("No shared-camera frames could be decoded for the accepted fire")
+        first_packet = packets[0]
         sample = first_packet.frame
         frame_height, frame_width = sample.shape[:2]
         requested_x = event.crop_center_x
@@ -367,7 +376,7 @@ class ManualFireRecorder:
         full_incomplete = directory / "manual_fire_full.incomplete.avi"
         zoom_incomplete = directory / "manual_fire_zoom.incomplete.avi"
         recording_window_seconds = max(0.001, deadline - recording_start)
-        output_fps = self._output_fps(len(frame_metadata), recording_window_seconds)
+        output_fps = self._output_fps(len(packets), recording_window_seconds)
         fourcc = cv2.VideoWriter_fourcc(*self.config.clip_codec)
         full_writer = None
         zoom_writer = None
@@ -401,8 +410,7 @@ class ManualFireRecorder:
             if self.config.save_full_frame_clip:
                 full_writer = self._open_writer(full_incomplete, fourcc, output_fps, (frame_width, frame_height))
             zoom_writer = self._open_writer(zoom_incomplete, fourcc, output_fps, (frame_width, frame_height))
-            write_packet(first_packet)
-            for packet in buffered:
+            for packet in packets:
                 write_packet(packet)
         finally:
             if full_writer is not None:

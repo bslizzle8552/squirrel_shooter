@@ -1,14 +1,14 @@
 # Raspberry Pi performance verification
 
-The production service still captures one shared 1280x720 camera at the requested 30 FPS. Expensive consumers run independently:
+The production service captures one shared 1280x720 camera at a requested 15 FPS. Expensive consumers run independently:
 
 - motion detection and annotated automatic-event clips: `motion.target_fps` (10 FPS)
-- manual-fire rolling buffer and replay: `manual_control.recording.target_fps` (12 FPS)
+- manual-fire raw pre-roll and replay: `manual_control.recording.target_fps` (12 FPS)
 - live MJPEG: `dashboard.stream_fps` (8 FPS), only while viewers are connected
 - classifier: once after a qualified event completes, never on every camera frame
 - OpenCV native image workers: `runtime.opencv_threads` (1)
 
-The dashboard encoder starts lazily for the first viewer, encodes one shared frame, and blocks when the viewer count returns to zero. Manual-fire pre-roll remains continuously available, but only its sampled frames are JPEG-encoded. The 2-second pre-roll, 5-second post-roll, crop/zoom, and full-frame evidence clip remain enabled.
+The dashboard encoder starts lazily for the first viewer, encodes one shared frame, and blocks when the viewer count returns to zero. Manual-fire pre-roll remains continuously available as sampled raw frames without idle JPEG encoding; the recorder collects future frames after an accepted FIRE. Headless motion overlays are also rendered only for an automatic event or a connected viewer. The 2-second pre-roll, 5-second post-roll, crop/zoom, and full-frame evidence clip remain enabled.
 
 ## Named runtime threads
 
@@ -23,6 +23,8 @@ From the Pi checkout:
 ```bash
 cd "$PI_REPOSITORY_PATH"
 ./pull-and-start.sh
+git rev-parse --abbrev-ref HEAD
+git rev-parse HEAD
 ```
 
 Resolve the service's Python process and inspect the system immediately after startup:
@@ -48,7 +50,7 @@ curl -s http://127.0.0.1:5000/api/health | python -m json.tool
 
 In `top`, press `H` if threads are not already displayed and `c` to toggle the command/name display. Exit with `q`.
 
-For the no-viewer baseline, `/api/health` should report `dashboard_viewers: 0`, `dashboard_stream_fps: 0`, and an unchanged `dashboard_frames_encoded` count between samples. Camera FPS should remain near the camera's negotiated rate; processing and pre-roll rates should settle near their configured targets.
+For the no-viewer baseline, `/api/health` should report `dashboard_viewers: 0`, `dashboard_stream_fps: 0`, `pre_roll_frames_encoded: 0`, and unchanged dashboard/annotation counters between samples apart from `idle_annotations_skipped`. Camera FPS should remain near the camera's negotiated rate; processing and raw pre-roll rates should settle near their configured targets. The response also exposes average capture, copy, detector, and annotation milliseconds plus per-thread CPU estimates to identify the hot worker without guessing from the process total.
 
 ## Compare viewer and recording load
 

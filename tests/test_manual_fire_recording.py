@@ -156,6 +156,61 @@ def test_recorder_associates_full_and_zoom_clips_with_one_manual_event(tmp_path:
     assert all(frame.shape == (36, 64, 3) for frames_written in written.values() for frame in frames_written)
 
 
+def test_recorder_collects_post_roll_after_the_short_pre_roll_buffer(tmp_path: Path) -> None:
+    pre_roll = [FramePacket(0, np.zeros((36, 64, 3), dtype=np.uint8), "stamp", 9.0)]
+    future = [
+        FramePacket(index, np.full((36, 64, 3), index, dtype=np.uint8), "stamp", timestamp)
+        for index, timestamp in enumerate((10.0, 10.5, 11.0), start=1)
+    ]
+
+    class CollectingCamera(FakeCamera):
+        def __init__(self) -> None:
+            super().__init__(pre_roll)
+            self.now = 10.0
+
+        def wait_for_frame(self, after_sequence: int, timeout: float | None = None) -> FramePacket | None:
+            del timeout
+            packet = next((item for item in future if item.sequence > after_sequence), None)
+            if packet is not None:
+                self.now = packet.received_monotonic
+            return packet
+
+    camera = CollectingCamera()
+    written: dict[str, list[np.ndarray]] = {}
+
+    def writer_factory(path: str, _fourcc: int, _fps: float, _size: tuple[int, int]) -> FakeWriter:
+        return FakeWriter(path, written)
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    event = replace(manual_event(), event_id="collected-post-roll", fire_started_monotonic=10.0)
+    recorder = ManualFireRecorder(
+        camera,
+        tmp_path,
+        ManualFireRecordingConfig(
+            pre_roll_seconds=1.0,
+            post_roll_seconds=1.0,
+            target_fps=2.0,
+            crop_center_x=32,
+            crop_center_y=18,
+        ),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: camera.now,
+    )
+
+    recorder.record(event)
+    recorder.close()
+
+    directory = tmp_path / "events" / "2026-08-09" / event.event_id
+    metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
+    assert metadata["frames_written"] == 4
+    assert metadata["duration"] == 2.0
+    assert all(len(frames) == 4 for frames in written.values())
+
+
 @pytest.mark.parametrize(
     "timestamps",
     [

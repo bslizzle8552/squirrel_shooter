@@ -25,6 +25,7 @@ class MaskSubtractor:
         self.masks = masks
         self.background = background
         self.index = 0
+        self.background_reads = 0
 
     def apply(self, frame: np.ndarray) -> np.ndarray:
         del frame
@@ -33,6 +34,7 @@ class MaskSubtractor:
         return mask.copy()
 
     def getBackgroundImage(self) -> np.ndarray | None:
+        self.background_reads += 1
         return None if self.background is None else self.background.copy()
 
 
@@ -108,6 +110,17 @@ def test_no_movement_and_tiny_noise_do_not_confirm(tmp_path: Path) -> None:
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     assert detector.process(frame, now=0).groups == ()
     assert detector.process(frame, now=0.1).groups == ()
+
+
+def test_idle_frames_do_not_request_the_expensive_background_image(tmp_path: Path) -> None:
+    subtractor = MaskSubtractor([box_mask(), box_mask()])
+    detector = MotionWatcherDetector(watch_config(tmp_path), subtractor=subtractor)
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    detector.process(frame, now=0)
+    detector.process(frame, now=0.1)
+
+    assert subtractor.background_reads == 0
 
 
 def test_real_mog2_detects_generated_coherent_movement(tmp_path: Path) -> None:

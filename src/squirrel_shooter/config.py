@@ -30,7 +30,7 @@ class CameraConfig:
     output_directory: Path
     camera_mode_if_known: str = "unknown"
     ir_mode_if_explicitly_detected_or_configured: str = "unknown"
-    low_fps_threshold: float = 15.0
+    low_fps_threshold: float = 10.0
     reopen_after_failed_reads: int = 10
     reopen_delay_seconds: float = 2.0
 
@@ -768,7 +768,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _path(camera.get("output_directory"), "camera.output_directory"),
             _text(camera.get("camera_mode_if_known", "unknown"), "camera.camera_mode_if_known"),
             _text(camera.get("ir_mode_if_explicitly_detected_or_configured", "unknown"), "camera.ir_mode_if_explicitly_detected_or_configured"),
-            _number(camera.get("low_fps_threshold", 15.0), "camera.low_fps_threshold", exclusive=True),
+            _number(camera.get("low_fps_threshold", 10.0), "camera.low_fps_threshold", exclusive=True),
             _int(camera.get("reopen_after_failed_reads", 10), "camera.reopen_after_failed_reads", minimum=1),
             _number(camera.get("reopen_delay_seconds", 2.0), "camera.reopen_delay_seconds"),
         ),
