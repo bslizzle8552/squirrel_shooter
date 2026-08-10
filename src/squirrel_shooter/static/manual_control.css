@@ -59,6 +59,8 @@
 .dpad-button span { display: block; margin-top: 2px; font-size: .7rem; letter-spacing: .06em; text-transform: uppercase; }
 .dpad-button:active:not(:disabled) { transform: translateY(1px); background: var(--accent); color: #071310; }
 .dpad-button.up { grid-area: up; } .dpad-button.left { grid-area: left; } .dpad-button.center { grid-area: center; } .dpad-button.right { grid-area: right; } .dpad-button.down { grid-area: down; }
+.park-button { width: 100%; min-height: 54px; margin-top: 12px; border: 2px solid var(--accent); border-radius: 12px; background: var(--accent-soft); color: var(--text); font-size: 1rem; font-weight: 900; letter-spacing: .04em; touch-action: manipulation; }
+.park-button:active:not(:disabled) { transform: translateY(1px); background: var(--accent); color: #071310; }
 .fire-card { border-color: rgba(248, 81, 73, .45); }
 .fire-status { color: var(--accent); }
 .fire-button { width: 100%; min-height: 88px; margin-top: 16px; border: 2px solid #ff625a; border-radius: 16px; background: #b4231c; color: white; font-size: 2rem; font-weight: 950; letter-spacing: .1em; touch-action: manipulation; }

@@ -35,7 +35,7 @@ Desktop/laptop responsibilities:
 Phone responsibilities:
 
 - Show the current backend-commanded pan and tilt angles.
-- Provide large 1-degree/3-degree/5-degree step buttons, D-pad, CENTER, FIRE button, and cooldown status first. Use 1 degree for fine adjustment when 3 degrees is too large.
+- Provide large 1-degree/3-degree/5-degree step buttons, D-pad, CENTER, PARK, FIRE button, and cooldown status first. Use 1 degree for fine adjustment when 3 degrees is too large. PARK moves to the configured 85/82 anti-drip rest position without firing or starting cooldown.
 - Show the active calibration point as small informational text.
 - Leave point selection and saving to the desktop console.
 
@@ -108,6 +108,8 @@ The existing FIRE button remains the only firing action. A target click never ca
 
 The FIRE button retains the physically verified 0.25-second pulse and backend-enforced 10-second cooldown. Refreshes, double taps, and repeated POSTs cannot bypass it. FIRE is rejected rather than queued while movement or settling holds the coordinator. Servo movement remains allowed during cooldown.
 
+The separate PARK button is authenticated and uses the same serialized movement helper as every other servo command. It moves directly to configured pan 85 / tilt 82, never opens the valve, and never starts or clears cooldown. It is rejected if another control action already owns the coordinator.
+
 Servo movement and valve firing remain mutually exclusive. The implemented manual sequence is:
 
 ```text
@@ -125,7 +127,7 @@ The existing `CameraService` remains the only camera owner. It keeps a compact r
 
 For a click-to-aim shot that is still at `AIM READY`, the crop center is the verified native camera pixel selected by the operator. If the operator subsequently moves with the D-pad, fires from an arbitrary manual angle, or fires from PARK, there is no verified inverse pan/tilt-to-pixel mapping; those shots use the configured fixed fallback `(640, 360)`. The implementation does not invent inverse calibration coordinates. Crop bounds clamp to the source frame, keep its aspect ratio, and resize the 2x crop back to the source playback dimensions without changing the live stream.
 
-Completed recordings are stored with the normal event archive under `captures/events/YYYY-MM-DD/manual-fire-.../`. `manual_fire_zoom.avi` is the primary replay, `manual_fire_full.avi` retains the full field, `snapshot.jpg` is the zoomed review frame, and `event.json` contains shot angles, the 0.25-second pulse, crop source/center/bounds, zoom, timing, filenames, pre-roll availability, and recording status. The event archive labels them `Manual fire` and links both clips. MJPG AVI is used because it is already the project's reliable OpenCV/Pi event format; no external H.264 dependency is added.
+Completed recordings are stored with the normal event archive under `captures/events/YYYY-MM-DD/manual-fire-.../`. `manual_fire_zoom.avi` is the primary replay, `manual_fire_full.avi` retains the full field, `snapshot.jpg` is the zoomed review frame, and `event.json` contains shot angles, the 0.25-second pulse, crop source/center/bounds, zoom, timing, filenames, pre-roll availability, and recording status. The site navigation's `Events` page and the manual-control `Rewatch saved manual-fire videos` link both open this archive. It labels each completed recording `Manual fire` and links both clips. MJPG AVI is used because it is already the project's reliable OpenCV/Pi event format; no external H.264 dependency is added.
 
 ## Nine-block calibration procedure
 

@@ -16,6 +16,7 @@
     tilt: document.getElementById('tilt-angle'),
     state: document.getElementById('control-state'),
     fire: document.getElementById('fire-button'),
+    park: document.getElementById('park-button'),
     fireStatus: document.getElementById('fire-status'),
     camera: document.getElementById('calibration-camera'),
     image: document.getElementById('calibration-image'),
@@ -258,6 +259,7 @@
     var busy = requestPending || busyState(next.state);
     var movementDisabled = !next.servo_available || busy;
     document.querySelectorAll('[data-direction]').forEach(function (button) { button.disabled = movementDisabled; });
+    els.park.disabled = movementDisabled;
     els.fire.disabled = !next.valve_available || busy || remaining > 0;
     els.fireStatus.textContent = !next.valve_available ? 'VALVE NOT CONFIGURED' : (remaining > 0 ? 'READY IN ' + remaining + 's' : (busy ? next.state : 'READY'));
     els.servoNote.hidden = next.servo_available;
@@ -305,6 +307,11 @@
   });
   document.querySelectorAll('[data-direction]').forEach(function (button) {
     button.addEventListener('click', function () { move(button.dataset.direction); });
+  });
+  els.park.addEventListener('click', async function () {
+    if (requestPending || els.park.disabled) { return; }
+    try { await requestJson(cfg.urls.park, {}); showToast('PARK complete at the anti-drip rest position.'); }
+    catch (error) { showToast(error.message); }
   });
   els.calibrationButtons.forEach(function (button) {
     button.addEventListener('click', async function () {

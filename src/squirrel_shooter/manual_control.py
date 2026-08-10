@@ -590,6 +590,8 @@ class ManualControlService:
             "pan_max": self.pan_tilt_config.pan_max,
             "tilt_min": self.pan_tilt_config.tilt_min,
             "tilt_max": self.pan_tilt_config.tilt_max,
+            "park_pan": self._display_angle(self.pan_tilt_config.park_pan),
+            "park_tilt": self._display_angle(self.pan_tilt_config.park_tilt),
             "default_step": self.config.default_step_degrees,
             "allowed_steps": list(self.config.allowed_step_degrees),
             "servo_available": self.servo_available,
@@ -691,6 +693,24 @@ class ManualControlService:
             raise ControlError(f"FIRE rejected while {busy} is active; wait for movement and settling to finish")
         try:
             self._fire_and_park_locked()
+        finally:
+            self._lock.release()
+
+    def park(self) -> PanTiltPosition:
+        """Move to the configured anti-drip rest position without firing."""
+
+        if self._pan_tilt is None:
+            raise ControlUnavailableError(self._servo_error or "Servo control is disabled")
+        if not self._lock.acquire(blocking=False):
+            busy = self._transient_state.value if self._transient_state is not None else "another control action"
+            raise ControlError(f"PARK rejected while {busy} is active; wait for the current action to finish")
+        try:
+            LOGGER.info(
+                "Manual PARK requested: pan=%.2f tilt=%.2f",
+                self.pan_tilt_config.park_pan,
+                self.pan_tilt_config.park_tilt,
+            )
+            return self._park_locked()
         finally:
             self._lock.release()
 
@@ -841,6 +861,9 @@ class ManualControlService:
             self._targeting_status = "PARK UNAVAILABLE"
             LOGGER.warning("Valve pulse completed but PARK is unavailable because servo control is disabled")
             return
+        self._park_locked()
+
+    def _park_locked(self) -> PanTiltPosition:
         target = PanTiltPosition(
             clamp_angle(self.pan_tilt_config.park_pan, self.pan_tilt_config.pan_min, self.pan_tilt_config.pan_max),
             clamp_angle(self.pan_tilt_config.park_tilt, self.pan_tilt_config.tilt_min, self.pan_tilt_config.tilt_max),
@@ -850,12 +873,13 @@ class ManualControlService:
             self._move_locked(target, action="park")
         except Exception as exc:
             self._targeting_status = "PARK ERROR"
-            self._targeting_error = f"Valve is OFF, but PARK failed: {exc}"
-            LOGGER.exception("Park failed after valve pulse; valve remains OFF")
+            self._targeting_error = f"PARK failed: {exc}"
+            LOGGER.exception("PARK failed; valve state=%s", self._valve.state.value)
             raise ControlUnavailableError(self._targeting_error) from exc
         self._targeting_status = "PARKED"
         self._targeting_error = None
         LOGGER.info("Park complete: pan=%.2f tilt=%.2f", self._pan, self._tilt)
+        return PanTiltPosition(self._pan, self._tilt)
 
     def _fire_locked(self) -> None:
         remaining = self._cooldown_remaining(self._clock())

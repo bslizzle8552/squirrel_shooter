@@ -64,6 +64,7 @@
         <button type="button" class="dpad-button right" data-direction="right" aria-label="Pan right">→<span>Right</span></button>
         <button type="button" class="dpad-button down" data-direction="down" aria-label="Tilt backward">↓<span>Backward</span></button>
       </div>
+      <button type="button" class="park-button" id="park-button" {% if not control.servo_available %}disabled{% endif %}>PARK {{ control.park_pan }}Â° / {{ control.park_tilt }}Â°</button>
       <p class="hardware-note" id="servo-note" {% if control.servo_available %}hidden{% endif %}>Servo unavailable: {{ control.servo_error or 'hardware is not enabled' }}</p>
     </section>
 
@@ -74,6 +75,7 @@
       </div>
       <button type="button" class="fire-button" id="fire-button" {% if not control.valve_available %}disabled{% endif %}>FIRE</button>
       <p>One {{ control.fire_pulse_seconds }}s pulse, followed by a hard 10-second server cooldown. Servo movement remains available during cooldown.</p>
+      <p><a class="text-link" href="{{ url_for('events') }}">Rewatch saved manual-fire videos</a> after recording finishes.</p>
       <p class="hardware-note" id="valve-note" {% if control.valve_available %}hidden{% endif %}>{{ control.valve_error or 'A verified GPIO pin is required before firing can be enabled.' }}</p>
     </section>
 
@@ -132,6 +134,7 @@ window.SS_MANUAL_CONTROL = {
   urls: {
     status: {{ url_for('api_manual_control')|tojson }},
     move: {{ url_for('api_manual_control_move')|tojson }},
+    park: {{ url_for('api_manual_control_park')|tojson }},
     aim: {{ url_for('api_manual_control_aim')|tojson }},
     fire: {{ url_for('api_manual_control_fire')|tojson }},
     calibration: {{ url_for('api_manual_control_calibration')|tojson }},

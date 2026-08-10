@@ -413,6 +413,15 @@ def create_app(
             return manual_control_error(exc)
         return jsonify(control=manual_control_status())
 
+    @app.post("/api/manual-control/park")
+    def api_manual_control_park() -> Any:
+        require_manual_control_token()
+        try:
+            manual_control.park()
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(control=manual_control_status())
+
     @app.post("/api/manual-control/calibration")
     def api_manual_control_calibration() -> Any:
         require_manual_control_token()

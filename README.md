@@ -191,6 +191,11 @@ feedback. Before the first movement, 85°/85° is visibly identified as an
 uncommanded startup reference; calibration cannot be saved until the operator
 first moves or centers the head.
 
+PARK commands the separate anti-drip rest position at pan 85Â° / tilt 82Â°
+without opening the valve or starting cooldown. Accepted FIRE requests also PARK
+automatically after the valve is closed. Completed manual-fire videos are
+rewatchable from the site's Events archive.
+
 All physical control paths pass through one serialized coordinator. Its shared
 future pipeline is target, move, settle, fire, cooldown. Manual movement is still
 allowed during valve cooldown, but movement and firing can never overlap. FIRE

@@ -184,6 +184,9 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert page.data.count(b'class="step-button') == 3
     assert b'id="fire-button"' in page.data
     assert b'id="fire-button" disabled' not in page.data
+    assert b'id="park-button"' in page.data
+    assert b"PARK 85" in page.data and b"82" in page.data
+    assert b"Rewatch saved manual-fire videos" in page.data
     assert b'id="fire-status">READY<' in page.data
     assert b"Commanded positions only" in page.data
     assert b"startup reference" in page.data
@@ -209,6 +212,13 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"Not started" in page.data
     assert b'id="calibration-confirmation"' in page.data
     assert client.post("/api/manual-control/fire", json={}).status_code == 403
+    assert client.post("/api/manual-control/park", json={}).status_code == 403
+    assert recordings == []
+    parked = client.post("/api/manual-control/park", json={}, headers=headers)
+    assert parked.status_code == 200
+    assert parked.json["control"]["pan"] == 85
+    assert parked.json["control"]["tilt"] == 82
+    assert parked.json["control"]["cooldown_remaining_seconds"] == 0
     assert recordings == []
     assert client.post("/api/manual-control/move", json={"direction": "right", "step": 3}).status_code == 403
     assert client.post(
@@ -426,6 +436,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"renderTargetMarker" in manual_script.data
     assert b"cameraMode === 'aim'" in manual_script.data
     assert b"cfg.urls.aim" in manual_script.data
+    assert b"cfg.urls.park" in manual_script.data
     assert b"cfg.urls.calibrationPixel" in manual_script.data
     assert b"calibrationPixel" in page.data
     assert b"pollIntervalMs" in page.data and b"1000" in page.data

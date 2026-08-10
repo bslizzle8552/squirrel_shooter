@@ -468,6 +468,26 @@ def test_manual_fire_closes_valve_then_parks_without_changing_calibration(tmp_pa
     assert CalibrationStore(tmp_path / "calibration.json").load() == before
 
 
+def test_manual_park_moves_to_antidrip_rest_without_firing_or_cooldown(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    def recording_sleep(seconds: float) -> None:
+        assert seconds == 0.15
+        events.append("settle")
+
+    service, pan_tilt, valve = make_service(tmp_path, sleep=recording_sleep, events=events)
+
+    position = service.park()
+
+    assert position == PanTiltPosition(85, 82)
+    assert pan_tilt.moves == [PanTiltPosition(85, 82)]
+    assert events == ["move", "settle"]
+    assert valve.state is ValveState.CLOSED
+    assert service.status()["state"] == ControlState.IDLE.value
+    assert service.status()["cooldown_remaining_seconds"] == 0
+    assert service.status()["targeting"]["status"] == "PARKED"
+
+
 def test_active_calibration_point_is_shared_service_state(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
 
@@ -652,6 +672,8 @@ def test_fire_and_movement_are_serialized(tmp_path: Path) -> None:
     move_thread = threading.Thread(target=move)
     fire_thread.start()
     assert fire_started.wait(timeout=1)
+    with pytest.raises(ControlError, match="PARK rejected while FIRING"):
+        service.park()
     move_thread.start()
     assert move_started.wait(timeout=1)
     assert not move_finished.wait(timeout=0.05)
