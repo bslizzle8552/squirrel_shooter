@@ -31,6 +31,7 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.shared_camera.reconnect_enabled is True
     assert config.runtime.headless is False
     assert config.runtime.opencv_threads == 1
+    assert config.runtime.telemetry_interval_seconds == 30.0
     assert config.night_mode.pause_recording_and_classifier is True
     assert config.night_mode.enter_consecutive_frames == 5
     assert config.night_mode.exit_consecutive_frames == 10

@@ -49,6 +49,7 @@ class RuntimeConfig:
     headless: bool
     shutdown_timeout_seconds: float
     opencv_threads: int = 1
+    telemetry_interval_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -783,6 +784,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _bool(runtime.get("headless"), "runtime.headless"),
             _number(runtime.get("shutdown_timeout_seconds"), "runtime.shutdown_timeout_seconds", exclusive=True),
             _int(runtime.get("opencv_threads", 1), "runtime.opencv_threads", minimum=1),
+            _number(
+                runtime.get("telemetry_interval_seconds", 30.0),
+                "runtime.telemetry_interval_seconds",
+                exclusive=True,
+            ),
         ),
         dashboard=DashboardConfig(
             _bool(dashboard.get("enabled"), "dashboard.enabled"),

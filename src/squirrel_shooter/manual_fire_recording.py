@@ -21,6 +21,7 @@ from .thread_names import set_current_thread_name
 
 
 LOGGER = logging.getLogger(__name__)
+MAX_QUEUED_RECORDINGS = 2
 
 
 @dataclass(frozen=True)
@@ -112,10 +113,17 @@ class ManualFireFrameSource(Protocol):
         *,
         until_monotonic: float | None = None,
         after_sequence: int = -1,
+        copy: bool = True,
     ) -> Iterable[Any]:
         ...
 
-    def wait_for_frame(self, after_sequence: int, timeout: float | None = None) -> Any | None:
+    def wait_for_frame(
+        self,
+        after_sequence: int,
+        timeout: float | None = None,
+        *,
+        copy: bool = True,
+    ) -> Any | None:
         ...
 
 
@@ -224,8 +232,11 @@ class ManualFireRecorder:
         self._active = False
         self._completed = 0
         self._failed = 0
+        self._rejected = 0
         self._last_frames_written = 0
         self._last_output_fps = 0.0
+        self._last_processing_seconds = 0.0
+        self._last_error: str | None = None
 
     def record(self, event: ManualFireEvent) -> None:
         """Queue one accepted event without doing video work in the caller."""
@@ -234,9 +245,20 @@ class ManualFireRecorder:
             return
         with self._lock:
             if self._closed:
-                raise RuntimeError("Manual fire recorder is closed")
+                self._record_submission_failure_locked("Manual fire recorder is closed")
+                raise RuntimeError(self._last_error)
+            if self._queued >= MAX_QUEUED_RECORDINGS:
+                self._record_submission_failure_locked("Manual fire recording queue is full")
+                raise RuntimeError(self._last_error)
             self._queued += 1
-            self._executor.submit(self._record_safely, event)
+            try:
+                self._executor.submit(self._record_safely, event)
+            except Exception as exc:
+                self._queued -= 1
+                self._record_submission_failure_locked(
+                    f"Manual fire recording submission failed: {type(exc).__name__}: {exc}"
+                )
+                raise
 
     def status(self) -> dict[str, object]:
         """Return lightweight event-recorder activity and output metrics."""
@@ -248,10 +270,18 @@ class ManualFireRecorder:
                 "queued": self._queued,
                 "completed": self._completed,
                 "failed": self._failed,
+                "rejected": self._rejected,
                 "target_fps": self.config.target_fps,
                 "last_frames_written": self._last_frames_written,
                 "last_output_fps": round(self._last_output_fps, 3),
+                "last_processing_seconds": round(self._last_processing_seconds, 3),
+                "last_error": self._last_error,
             }
+
+    def _record_submission_failure_locked(self, detail: str) -> None:
+        self._failed += 1
+        self._rejected += 1
+        self._last_error = detail
 
     def close(self) -> None:
         with self._lock:
@@ -262,6 +292,7 @@ class ManualFireRecorder:
 
     def _record_safely(self, event: ManualFireEvent) -> None:
         set_current_thread_name("manual-recorder")
+        processing_started = time.perf_counter()
         with self._lock:
             self._queued = max(0, self._queued - 1)
             self._active = True
@@ -278,9 +309,11 @@ class ManualFireRecorder:
                 self._completed += 1
                 self._last_frames_written = frames_written
                 self._last_output_fps = output_fps
+                self._last_error = None
         except Exception as exc:
             with self._lock:
                 self._failed += 1
+                self._last_error = f"{type(exc).__name__}: {exc}"
             LOGGER.error(
                 "Manual fire recording failed: event_id=%s error=%s",
                 event.event_id,
@@ -300,6 +333,7 @@ class ManualFireRecorder:
         finally:
             with self._lock:
                 self._active = False
+                self._last_processing_seconds = time.perf_counter() - processing_started
 
     def _record_event(self, event: ManualFireEvent, directory: Path) -> tuple[int, float]:
         requested_window_seconds = self.config.pre_roll_seconds + self.config.post_roll_seconds
@@ -329,13 +363,18 @@ class ManualFireRecorder:
             for packet in self.camera.buffered_frames(
                 recording_start,
                 until_monotonic=event.fire_started_monotonic,
+                copy=False,
             )
         }
         next_sample_at = event.fire_started_monotonic
         sample_interval = 1.0 / self.config.target_fps
         while self._clock() < deadline:
             remaining = deadline - self._clock()
-            packet = self.camera.wait_for_frame(sequence, timeout=min(1.0, max(0.01, remaining)))
+            packet = self.camera.wait_for_frame(
+                sequence,
+                timeout=min(1.0, max(0.01, remaining)),
+                copy=False,
+            )
             if packet is not None:
                 sequence = max(sequence, packet.sequence)
                 if packet.received_monotonic <= deadline and packet.received_monotonic >= next_sample_at:
@@ -345,7 +384,11 @@ class ManualFireRecorder:
 
         # The fallback preserves frames supplied by simpler/test sources and
         # fills any short capture gap that is still inside the rolling buffer.
-        for packet in self.camera.buffered_frames(recording_start, until_monotonic=deadline):
+        for packet in self.camera.buffered_frames(
+            recording_start,
+            until_monotonic=deadline,
+            copy=False,
+        ):
             packets_by_sequence.setdefault(packet.sequence, packet)
         packets = sorted(
             packets_by_sequence.values(),

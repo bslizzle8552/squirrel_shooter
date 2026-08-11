@@ -149,6 +149,59 @@ def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tm
     assert corrected["label_source"] == "human" and corrected["human_label"] == "unknown"
 
 
+def test_evidence_overview_cache_is_shared_copied_and_invalidated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    first_task = task(tmp_path, "first-event")
+    store.save_classification(
+        first_task,
+        [ClassifierDetection("person", 0.92, (1, 2, 20, 21))],
+        100.0,
+        "test-model",
+    )
+    scans = 0
+    original_scan = store._scan_overview
+
+    def counted_scan() -> dict[str, list[dict[str, object]]]:
+        nonlocal scans
+        scans += 1
+        return original_scan()
+
+    monkeypatch.setattr(store, "_scan_overview", counted_scan)
+
+    overview = store.overview()
+    overview["known"][0]["display_label"] = "Tampered"
+    overview["known"][0]["detections"][0]["label"] = "tampered"
+    assert store.list_items("known")[0]["display_label"] == "Person"
+    assert store.list_items("known")[0]["detections"][0]["label"] == "person"
+    assert store.counts()["known"] == 1
+    assert scans == 1
+
+    second_task = task(tmp_path, "second-event")
+    store.save_classification(second_task, [], 110.0, "test-model")
+    assert store.counts()["unknown"] == 1
+    assert scans == 2
+
+    store.review("second-event", "false-positive")
+    assert store.counts()["unknown"] == 0
+    assert store.counts()["false_positive"] == 1
+    assert scans == 3
+
+
+def test_classifier_completion_window_is_bounded_when_completion_is_appended(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    classifier = EventClassifier(config.classifier, ClassifierEvidenceStore(config))
+    classifier._completion_times.extend((1.0, 25.0, 59.0))
+
+    with classifier._lock:
+        classifier._append_completion_time_locked(61.1)
+
+    assert list(classifier._completion_times) == [25.0, 59.0, 61.1]
+
+
 def test_selection_metadata_is_saved_with_classification_result(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)

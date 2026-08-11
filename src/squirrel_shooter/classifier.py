@@ -11,6 +11,7 @@ import re
 import shutil
 import threading
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ VOC_LABELS = (
     "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor",
 )
 CLASSIFICATION_VIEWS = frozenset({"review", "unknown", "known", "errors", "false_positive"})
+OVERVIEW_CACHE_SECONDS = 10.0
 LEGACY_APPROVAL_LABELS = frozenset({"car", "person"})
 TRAINING_LABEL_SUGGESTIONS = (
     "squirrel",
@@ -201,6 +203,9 @@ class ClassifierEvidenceStore:
         self._lock = threading.Lock()
         self._prepare_lock = threading.Lock()
         self._prepared = False
+        self._overview_cache_lock = threading.Lock()
+        self._overview_cache: dict[str, list[dict[str, Any]]] | None = None
+        self._overview_cached_at = 0.0
 
     def prepare(self) -> None:
         with self._prepare_lock:
@@ -332,6 +337,7 @@ class ClassifierEvidenceStore:
             elif original_frame_path.is_file():
                 record["original_frame_path"] = str(original_frame_path)
             _atomic_json(metadata_path, record)
+            self._invalidate_overview_cache()
             self._update_event_classification_metadata(task.event_directory, record)
             self._append_audit({"action": "classified", **record})
         LOGGER.info(
@@ -388,31 +394,11 @@ class ClassifierEvidenceStore:
     def list_items(self, view: str) -> list[dict[str, Any]]:
         if view not in CLASSIFICATION_VIEWS:
             raise ValueError("Unknown classification view")
-        self.prepare()
-        items: list[dict[str, Any]] = []
-        for path in self.events_root.rglob(CLASSIFICATION_FILENAME):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(payload, dict) and _classification_view(payload) == view:
-                    event_relative = path.parent.relative_to(self.events_root).as_posix()
-                    payload["event_snapshot_relative"] = (
-                        f"{event_relative}/snapshot.jpg" if (path.parent / "snapshot.jpg").is_file() else None
-                    )
-                    payload["event_clip_relative"] = (
-                        f"{event_relative}/clip.avi" if (path.parent / "clip.avi").is_file() else None
-                    )
-                    payload["event_original_frame_relative"] = (
-                        f"{event_relative}/{ORIGINAL_FRAME_FILENAME}"
-                        if (path.parent / ORIGINAL_FRAME_FILENAME).is_file()
-                        else None
-                    )
-                    items.append(payload)
-            except (OSError, json.JSONDecodeError):
-                continue
-        return sorted(items, key=lambda item: str(item.get("classifier_timestamp", "")), reverse=True)
+        return deepcopy(self._cached_overview()[view])
 
     def counts(self) -> dict[str, int]:
-        return {view: len(self.list_items(view)) for view in CLASSIFICATION_VIEWS}
+        overview = self._cached_overview()
+        return {view: len(overview[view]) for view in CLASSIFICATION_VIEWS}
 
     def training_summary(self) -> dict[str, Any]:
         self.prepare()
@@ -446,12 +432,25 @@ class ClassifierEvidenceStore:
         )
 
     def overview(self) -> dict[str, list[dict[str, Any]]]:
-        """Return every view's items from a single evidence-directory scan.
+        """Return every view's items from one short-lived cached directory scan.
 
-        Polling clients (the Pi console) need items plus per-view counts; one
-        rglob pass keeps that refresh cheap compared with per-view listings.
+        Classification and review writes invalidate the cache immediately. The
+        ten-second fallback lifetime bounds staleness after an external event
+        retention or maintenance change without rereading the microSD on every
+        dashboard poll.
         """
+        return deepcopy(self._cached_overview())
+
+    def _cached_overview(self) -> dict[str, list[dict[str, Any]]]:
         self.prepare()
+        now = perf_counter()
+        with self._overview_cache_lock:
+            if self._overview_cache is None or now - self._overview_cached_at >= OVERVIEW_CACHE_SECONDS:
+                self._overview_cache = self._scan_overview()
+                self._overview_cached_at = perf_counter()
+            return self._overview_cache
+
+    def _scan_overview(self) -> dict[str, list[dict[str, Any]]]:
         grouped: dict[str, list[dict[str, Any]]] = {view: [] for view in CLASSIFICATION_VIEWS}
         for path in self.events_root.rglob(CLASSIFICATION_FILENAME):
             try:
@@ -479,6 +478,11 @@ class ClassifierEvidenceStore:
         for items in grouped.values():
             items.sort(key=lambda item: str(item.get("classifier_timestamp", "")), reverse=True)
         return grouped
+
+    def _invalidate_overview_cache(self) -> None:
+        with self._overview_cache_lock:
+            self._overview_cache = None
+            self._overview_cached_at = 0.0
 
     def get_record(self, item_id: str) -> dict[str, Any]:
         path = self._record_path(item_id)
@@ -595,6 +599,7 @@ class ClassifierEvidenceStore:
                     training_sample_relative=sample_relative,
                 )
             _atomic_json(metadata_path, record)
+            self._invalidate_overview_cache()
             self._update_event_truth(metadata_path.parent, record)
             self._append_audit({"action": "human_labeled", **record})
         return record
@@ -941,9 +946,7 @@ class EventClassifier:
 
     def status(self) -> ClassifierStatus:
         with self._lock:
-            cutoff = perf_counter() - 60.0
-            while self._completion_times and self._completion_times[0] < cutoff:
-                self._completion_times.popleft()
+            self._prune_completion_times_locked(perf_counter())
             return ClassifierStatus(
                 self.config.enabled,
                 self._thread is not None and self._thread.is_alive(),
@@ -960,6 +963,15 @@ class EventClassifier:
                 self._skipped_while_paused,
                 len(self._completion_times) / 60.0,
             )
+
+    def _prune_completion_times_locked(self, now: float) -> None:
+        cutoff = now - 60.0
+        while self._completion_times and self._completion_times[0] < cutoff:
+            self._completion_times.popleft()
+
+    def _append_completion_time_locked(self, completed_at: float) -> None:
+        self._completion_times.append(completed_at)
+        self._prune_completion_times_locked(completed_at)
 
     def _run(self) -> None:
         set_current_thread_name("classifier")
@@ -1020,7 +1032,8 @@ class EventClassifier:
                 with self._lock:
                     self._completed += 1
                     self._last_latency_ms = latency
-                    self._completion_times.append(perf_counter())
+                    completed_at = perf_counter()
+                    self._append_completion_time_locked(completed_at)
                     self._last_error = error
                     if record["auto_accepted"]:
                         self._auto_accepted += 1

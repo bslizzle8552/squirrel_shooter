@@ -123,6 +123,28 @@ def test_idle_frames_do_not_request_the_expensive_background_image(tmp_path: Pat
     assert subtractor.background_reads == 0
 
 
+def test_continuously_matched_track_keeps_bounded_history(tmp_path: Path) -> None:
+    mask = box_mask((20, 20, 15, 15))
+    detector = MotionWatcherDetector(
+        watch_config(tmp_path, persistence_frames=1),
+        subtractor=MaskSubtractor([box_mask(), mask]),
+    )
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    detector.process(frame, now=0.0)
+
+    result = None
+    for index in range(1, 501):
+        result = detector.process(frame, now=index * 0.1)
+
+    assert result is not None and result.groups
+    track = next(iter(detector._tracks.values()))
+    assert len(track.path) == 30
+    assert track.speed_samples == 499
+    assert track.speed_total == 0.0
+    assert track.peak_speed == 0.0
+    assert result.groups[0].average_speed == 0.0
+
+
 def test_real_mog2_detects_generated_coherent_movement(tmp_path: Path) -> None:
     config = watch_config(tmp_path, persistence_frames=1)
     config = replace(config, warmup=replace(config.warmup, seconds=0, minimum_frames=5))

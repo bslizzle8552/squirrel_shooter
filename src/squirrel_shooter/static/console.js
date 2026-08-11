@@ -8,6 +8,8 @@
   var ROW_H = 78; // must match --row-h in console.css
   var WINDOW = (cfg.queueWindow || 10) + 2; // small overscan
   var MAX_ITEMS = cfg.queueLimit || 100;
+  var MAX_RECENT_ITEMS = 10;
+  var POLL_TIMEOUT_MS = 8000;
   var HISTORY_MAX = 48;
 
   /* ---------- state (plain objects, no proxies) ---------- */
@@ -96,6 +98,8 @@
   var rowPool = [];
   var renderPending = false;
   var toastTimer = 0;
+  var pollPending = { status: false, events: false, review: false };
+  var pollControllers = { status: null, events: null, review: null };
 
   /* ---------- helpers ---------- */
   function clamp(value, low, high) { return value < low ? low : (value > high ? high : value); }
@@ -119,11 +123,29 @@
     return 'No model match';
   }
 
-  function getJSON(url, ok) {
-    fetch(url, { cache: 'no-store' })
+  function getJSON(key, url, ok) {
+    if (document.hidden || pollPending[key]) { return; }
+    pollPending[key] = true;
+    var controller = new AbortController();
+    var timeout = window.setTimeout(function () { controller.abort(); }, POLL_TIMEOUT_MS);
+    pollControllers[key] = controller;
+    fetch(url, { cache: 'no-store', signal: controller.signal })
       .then(function (response) { if (!response.ok) { throw new Error('http ' + response.status); } return response.json(); })
       .then(ok)
-      .catch(function () { /* next poll recovers; never blank good data */ });
+      .catch(function () { /* next poll recovers; never blank good data */ })
+      .then(function () {
+        window.clearTimeout(timeout);
+        if (pollControllers[key] === controller) {
+          pollControllers[key] = null;
+          pollPending[key] = false;
+        }
+      });
+  }
+
+  function cancelPolls() {
+    Object.keys(pollControllers).forEach(function (key) {
+      if (pollControllers[key]) { pollControllers[key].abort(); }
+    });
   }
 
   function showToast(message, isError) {
@@ -480,6 +502,7 @@
     App.mode = mode;
     els.body.dataset.mode = mode;
     setText(els.modeValue, mode === 'observe' ? 'OBSERVE' : 'REVIEW');
+    syncLiveStream();
   }
 
   function selectItem(kind, data) {
@@ -601,7 +624,7 @@
 
   /* ---------- polling ---------- */
   function pollStatus() {
-    getJSON(urls.status, function (data) {
+    getJSON('status', urls.status, function (data) {
       var camera = data.camera || {};
       var detector = data.detector || {};
       var fps = typeof detector.processing_fps === 'number' ? detector.processing_fps : 0;
@@ -648,8 +671,8 @@
   }
 
   function pollEvents() {
-    getJSON(urls.events, function (data) {
-      var events = (data.events || []).slice(0, 10);
+    getJSON('events', urls.events + '?limit=' + MAX_RECENT_ITEMS + '&summary=1', function (data) {
+      var events = (data.events || []).slice(0, MAX_RECENT_ITEMS);
       var signature = JSON.stringify(events.map(function (event) {
         return [event.event_id, event.display_label, event.classification_label_source, event.snapshot_url, event.clip_url];
       }));
@@ -663,7 +686,7 @@
   }
 
   function pollReview() {
-    getJSON(urls.review + '?state=review&limit=' + MAX_ITEMS, function (data) {
+    getJSON('review', urls.review + '?state=review&limit=' + MAX_ITEMS, function (data) {
       App.counts = data.counts || App.counts;
       pushHistory('queue', App.counts.review || 0);
       updateProgress();
@@ -713,11 +736,29 @@
     els.outdoorToggle.setAttribute('aria-pressed', App.prefs.outdoor ? 'true' : 'false');
     els.prefOutdoor.checked = App.prefs.outdoor;
     els.prefPauseStream.checked = App.prefs.pauseStream;
-    if (App.prefs.pauseStream) {
-      if (!App.streamSrc) { App.streamSrc = els.liveStream.src; }
+    syncLiveStream();
+  }
+
+  function syncLiveStream() {
+    if (!App.streamSrc) { return; }
+    var shouldStream = !App.prefs.pauseStream && !document.hidden && App.mode === 'observe';
+    if (shouldStream && !els.liveStream.hasAttribute('src')) {
+      els.liveStream.setAttribute('src', App.streamSrc);
+    } else if (!shouldStream && els.liveStream.hasAttribute('src')) {
       els.liveStream.removeAttribute('src');
-    } else if (App.streamSrc && !els.liveStream.src) {
-      els.liveStream.src = App.streamSrc;
+    }
+  }
+
+  function onVisibilityChange() {
+    syncLiveStream();
+    if (document.hidden) {
+      cancelPolls();
+    } else {
+      window.setTimeout(function () {
+        pollStatus();
+        pollEvents();
+        pollReview();
+      }, 0);
     }
   }
 
@@ -793,6 +834,7 @@
 
   /* ---------- boot ---------- */
   function boot() {
+    App.streamSrc = els.liveStream.getAttribute('src');
     loadPrefs();
     applyPrefs();
     onResize();
@@ -838,6 +880,7 @@
     byId('system-open').addEventListener('click', function () { els.systemDialog.showModal(); });
     byId('help-open').addEventListener('click', function () { els.helpDialog.showModal(); });
     document.addEventListener('keydown', onKey);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('resize', onResize);
 
     markLoaded(document);

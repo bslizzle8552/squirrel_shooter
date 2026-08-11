@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import secrets
+import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -38,6 +39,7 @@ from .vision_service import VisionService, VisionStatus
 LOGGER = logging.getLogger(__name__)
 SUPPORTED_CAPTURE_SUFFIXES = frozenset({".jpg", ".jpeg"})
 RECENT_EVENT_LIMIT = 5
+CAPTURE_COUNT_CACHE_SECONDS = 30.0
 CAPTURES_PER_PAGE = 24
 EVENTS_PER_PAGE = 20
 REVIEW_QUEUE_INITIAL = 10
@@ -118,9 +120,18 @@ def _camera_status_dict(status: CameraStatus, app_config: AppConfig) -> dict[str
         "pre_roll_target_fps": round(status.pre_roll_target_fps, 1),
         "pre_roll_frames_encoded": status.pre_roll_frames_encoded,
         "pre_roll_frames_copied": status.pre_roll_frames_copied,
+        "pre_roll_frames_reused": status.pre_roll_frames_reused,
         "capture_read_average_ms": round(status.capture_read_average_ms, 2),
         "frame_publish_average_ms": round(status.frame_publish_average_ms, 2),
         "pre_roll_copy_average_ms": round(status.pre_roll_copy_average_ms, 2),
+        "published_frame_copy_average_ms": round(status.published_frame_copy_average_ms, 2),
+        "shared_frame_borrows": status.shared_frame_borrows,
+        "dashboard_encode_average_ms": round(status.dashboard_encode_average_ms, 2),
+        "dashboard_last_jpeg_bytes": status.dashboard_last_jpeg_bytes,
+        "dashboard_estimated_egress_mbps": round(status.dashboard_estimated_egress_mbps, 3),
+        "dashboard_encode_failures": status.dashboard_encode_failures,
+        "dashboard_encoder_alive": status.dashboard_encoder_alive,
+        "dashboard_encode_error": status.dashboard_encode_error,
         "capture_thread_cpu_percent": round(status.capture_thread_cpu_percent, 1),
         "last_annotated_frame": status.last_annotated_at,
         "annotated_frame_stale": status.annotated_frame_age_seconds is None
@@ -138,6 +149,12 @@ def _vision_status_dict(status: VisionStatus, config: AppConfig) -> dict[str, An
     data.setdefault("active_events", 0)
     data.setdefault("current_groups", ())
     data.setdefault("last_event_summary", None)
+    data.setdefault("target_fps", config.motion.target_fps)
+    data.setdefault("detector_average_ms", 0.0)
+    data.setdefault("annotation_average_ms", 0.0)
+    data.setdefault("motion_thread_cpu_percent", 0.0)
+    data.setdefault("annotations_rendered", 0)
+    data.setdefault("idle_annotations_skipped", 0)
     return data
 
 
@@ -152,11 +169,34 @@ def _resolve_under(directory: Path, relative_path: str) -> Path | None:
     return candidate
 
 
-def _dashboard_events(events: list[dict[str, Any]], config: AppConfig) -> list[dict[str, Any]]:
+def _dashboard_events(
+    events: list[dict[str, Any]],
+    config: AppConfig,
+    *,
+    summary_only: bool = False,
+) -> list[dict[str, Any]]:
     output_root = config.camera.output_directory.resolve()
     prepared: list[dict[str, Any]] = []
     for event in events:
-        item = dict(event)
+        item = (
+            {
+                field: event.get(field)
+                for field in (
+                    "event_id",
+                    "status",
+                    "capture_method",
+                    "start_timestamp",
+                    "end_timestamp",
+                    "duration",
+                    "provisional_category",
+                    "snapshot_path",
+                    "clip_path",
+                    "full_frame_clip_path",
+                )
+            }
+            if summary_only
+            else dict(event)
+        )
         event_directory: Path | None = None
         for field in ("snapshot_path", "clip_path", "full_frame_clip_path"):
             try:
@@ -275,6 +315,9 @@ def create_app(
         output_directory=app_config.camera.output_directory,
     )
     started_at = monotonic()
+    capture_count_lock = threading.Lock()
+    cached_capture_count = 0
+    capture_count_cached_at: float | None = None
     app.extensions.update(
         camera_service=camera,
         vision_service=vision,
@@ -291,6 +334,21 @@ def create_app(
         camera.start()
     if start_vision:
         vision.start()
+
+    def legacy_capture_count() -> int:
+        """Avoid rescanning every legacy root capture on each status poll."""
+
+        nonlocal cached_capture_count, capture_count_cached_at
+        now = monotonic()
+        with capture_count_lock:
+            if (
+                capture_count_cached_at is None
+                or now - capture_count_cached_at >= CAPTURE_COUNT_CACHE_SECONDS
+            ):
+                cached_capture_count = len(list_capture_images(app_config.camera.output_directory))
+                capture_count_cached_at = monotonic()
+            return cached_capture_count
+
     def page_status() -> tuple[dict[str, Any], dict[str, Any], float | None, float]:
         camera_status = _camera_status_dict(camera.status(), app_config)
         detector_status = _vision_status_dict(vision.status(), app_config)
@@ -316,7 +374,11 @@ def create_app(
 
     @app.get("/")
     def dashboard() -> str:
-        events = _dashboard_events(vision.recent_events(), app_config)
+        events = _dashboard_events(
+            vision.recent_events()[:RECENT_EVENT_LIMIT],
+            app_config,
+            summary_only=True,
+        )
         camera_data, detector, temperature, uptime = page_status()
         review_overview = classifier_store.overview()
         review_counts = {view: len(items) for view, items in review_overview.items()}
@@ -325,7 +387,7 @@ def create_app(
             camera=camera_data,
             detector=detector,
             cpu_temperature=temperature,
-            events=events[:RECENT_EVENT_LIMIT],
+            events=events,
             application_mode=APPLICATION_MODE,
             uptime_seconds=uptime,
             status_refresh_ms=round(app_config.dashboard.status_refresh_interval_seconds * 1000),
@@ -506,18 +568,23 @@ def create_app(
     @app.get("/events")
     def events() -> str:
         saved_events = load_events(app_config.camera.output_directory / "events")
-        all_events = _dashboard_events(list(reversed(saved_events)), app_config)
+        newest_events = list(reversed(saved_events))
         page = max(request.args.get("page", default=1, type=int) or 1, 1)
-        total_pages = max(1, math.ceil(len(all_events) / EVENTS_PER_PAGE))
-        if page > total_pages and all_events:
+        total_pages = max(1, math.ceil(len(newest_events) / EVENTS_PER_PAGE))
+        if page > total_pages and newest_events:
             abort(404)
         start = (page - 1) * EVENTS_PER_PAGE
+        page_events = _dashboard_events(
+            newest_events[start : start + EVENTS_PER_PAGE],
+            app_config,
+            summary_only=True,
+        )
         return render_template(
             "events.html",
-            events=all_events[start : start + EVENTS_PER_PAGE],
+            events=page_events,
             page=page,
             total_pages=total_pages,
-            total_events=len(all_events),
+            total_events=len(newest_events),
             demo_mode=demo_mode,
         )
 
@@ -656,7 +723,6 @@ def create_app(
     @app.get("/api/status")
     def api_status() -> Any:
         camera_data, detector, temperature, uptime = page_status()
-        captures = list_capture_images(app_config.camera.output_directory)
         events = vision.recent_events()
         return jsonify(
             application_mode=APPLICATION_MODE,
@@ -667,7 +733,7 @@ def create_app(
             manual_recording=manual_control_status().get("recording"),
             cpu_temperature_c=temperature,
             total_events=detector["accepted_events"],
-            total_snapshots=len(captures) + len(events),
+            total_snapshots=legacy_capture_count() + len(events),
             last_event_time=detector["last_event"],
             last_snapshot_time=detector["last_snapshot"],
         )
@@ -696,9 +762,26 @@ def create_app(
             dashboard_viewers=camera_data["dashboard_viewers"],
             dashboard_stream_fps=camera_data["dashboard_stream_fps"],
             dashboard_frames_encoded=camera_data["dashboard_frames_encoded"],
+            dashboard_last_jpeg_bytes=camera_data["dashboard_last_jpeg_bytes"],
+            dashboard_estimated_egress_mbps=camera_data["dashboard_estimated_egress_mbps"],
+            dashboard_encode_failures=camera_data["dashboard_encode_failures"],
+            dashboard_encoder_alive=camera_data["dashboard_encoder_alive"],
+            dashboard_encode_error=camera_data["dashboard_encode_error"],
             pre_roll_frames_buffered=camera_data["pre_roll_frames_buffered"],
             pre_roll_buffer_fps=camera_data["pre_roll_buffer_fps"],
+            pre_roll_frames_reused=camera_data["pre_roll_frames_reused"],
+            shared_frame_borrows=camera_data["shared_frame_borrows"],
+            capture_fps=camera_data["fps"],
+            capture_read_average_ms=camera_data["capture_read_average_ms"],
+            published_frame_copy_average_ms=camera_data["published_frame_copy_average_ms"],
+            capture_thread_cpu_percent=camera_data["capture_thread_cpu_percent"],
             active_events=detector["active_events"],
+            detector_target_fps=detector["target_fps"],
+            detector_average_ms=detector["detector_average_ms"],
+            annotation_average_ms=detector["annotation_average_ms"],
+            motion_thread_cpu_percent=detector["motion_thread_cpu_percent"],
+            annotations_rendered=detector["annotations_rendered"],
+            idle_annotations_skipped=detector["idle_annotations_skipped"],
             last_error=detector["last_error"] or camera_data["error"],
             capture_directory_writable=detector["capture_directory_writable"],
             camera_state=camera_data["state"],
@@ -710,7 +793,13 @@ def create_app(
     @app.get("/api/recent-events")
     @app.get("/api/events")
     def api_recent_events() -> Any:
-        events = _dashboard_events(vision.recent_events(), app_config)
+        recent = vision.recent_events()
+        requested_limit = request.args.get("limit", type=int)
+        if requested_limit is not None:
+            limit = min(max(requested_limit, 1), app_config.motion.recent_event_limit)
+            recent = recent[:limit]
+        summary_only = request.args.get("summary", "").strip().lower() in {"1", "true", "yes"}
+        events = _dashboard_events(recent, app_config, summary_only=summary_only)
         for event in events:
             snapshot = event.get("snapshot_path_relative")
             clip = event.get("clip_path_relative")

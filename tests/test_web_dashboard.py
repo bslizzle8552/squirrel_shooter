@@ -23,6 +23,7 @@ from squirrel_shooter.pan_tilt import PanTiltController
 from squirrel_shooter.valve import GPIOValveController, ValveConfig
 from squirrel_shooter.vision_service import VisionService, VisionStatus
 from squirrel_shooter.web_dashboard import build_parser, create_app, list_capture_images
+import squirrel_shooter.web_dashboard as web_dashboard
 
 
 class OfflineCameraService:
@@ -138,6 +139,13 @@ def test_dashboard_loads_when_camera_is_unavailable(
     assert b'id="blob-count"' not in response.data
     assert b"squirrel-squirter-logo.png" in response.data
     assert b"console.css" in response.data and b"console.js" in response.data
+    console_script = app.test_client().get("/static/console.js")
+    assert b"pollPending" in console_script.data
+    assert b"document.hidden" in console_script.data
+    assert b"AbortController" in console_script.data
+    assert b"syncLiveStream" in console_script.data
+    assert b"removeAttribute('src')" in console_script.data
+    assert b"'?limit=' + MAX_RECENT_ITEMS" in console_script.data
     assert camera.start_calls == 1
     assert vision.start_calls == 1
 
@@ -438,6 +446,10 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"cfg.urls.aim" in manual_script.data
     assert b"cfg.urls.park" in manual_script.data
     assert b"cfg.urls.calibrationPixel" in manual_script.data
+    assert b"document.hidden" in manual_script.data
+    assert b"AbortController" in manual_script.data
+    assert b"syncStreamVisibility" in manual_script.data
+    assert b"removeAttribute('src')" in manual_script.data
     assert b"calibrationPixel" in page.data
     assert b"pollIntervalMs" in page.data and b"1000" in page.data
     assert b'grid-template-areas: "camera aim" "camera fire" "calibration ."' in manual_style.data
@@ -663,6 +675,7 @@ def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) ->
                 "start_timestamp": f"2026-07-16T17:0{index}:00-04:00",
                 "provisional_category": "small_animal_candidate",
                 "movement_attributes": ["coherent_travel"],
+                "group_samples": [{"large": "payload"}],
                 "snapshot_path": str(snapshot),
                 "clip_path": str(clip),
             }
@@ -682,11 +695,46 @@ def test_dashboard_shows_only_five_most_recent_grouped_events(tmp_path: Path) ->
     assert "Car" in body and "Unknown" in body and "Motion: small animal candidate" in body
     assert "All event pictures and videos" in body and "Standalone pictures" in body
     api_events = app.test_client().get("/api/events").json["events"]
+    limited_events = app.test_client().get("/api/events?limit=2").json["events"]
+    summary_events = app.test_client().get("/api/events?limit=2&summary=1").json["events"]
+    minimum_events = app.test_client().get("/api/recent-events?limit=0").json["events"]
+    assert len(api_events) == 7
+    assert [item["event_id"] for item in limited_events] == ["event-0", "event-1"]
+    assert api_events[0]["group_samples"] == [{"large": "payload"}]
+    assert "group_samples" not in summary_events[0]
+    assert [item["event_id"] for item in minimum_events] == ["event-0"]
     assert api_events[0]["display_label"] == "Car" and api_events[1]["display_label"] == "Unknown"
     assert api_events[0]["snapshot_url"].endswith("/snapshot.jpg")
     assert api_events[0]["clip_url"].endswith("/clip.avi")
     assert 'id="queue-list"' in body and 'id="recent-list"' in body
     assert "console.js" in body and "reviewToken" in body
+
+
+def test_status_caches_legacy_capture_count_for_thirty_seconds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(web_dashboard, "monotonic", lambda: now[0])
+    config_path = write_test_config(tmp_path)
+    capture_directory = tmp_path / "captures"
+    capture_directory.mkdir(exist_ok=True)
+    add_capture(capture_directory, "first.jpg", 1_700_000_000.0)
+    app = create_app(
+        config_path,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(),  # type: ignore[arg-type]
+        temperature_reader=lambda: 44.0,
+    )
+    app.config.update(TESTING=True)
+    client = app.test_client()
+
+    assert client.get("/api/status").json["total_snapshots"] == 1
+    add_capture(capture_directory, "second.jpg", 1_700_000_001.0)
+    now[0] = 129.9
+    assert client.get("/api/status").json["total_snapshots"] == 1
+    now[0] = 130.0
+    assert client.get("/api/status").json["total_snapshots"] == 2
 
 
 def test_event_archive_reads_all_saved_events_newest_first(tmp_path: Path) -> None:

@@ -35,6 +35,8 @@ EVENT_FIELDS = (
     "human_review_notes",
 )
 
+SESSION_DETAIL_LIMIT = 100
+
 
 def new_event_id(when: datetime | None = None) -> str:
     local = when or datetime.now().astimezone()
@@ -176,17 +178,22 @@ class SessionLog:
             "global_motion_rejections": 0,
             "camera_read_errors": 0,
             "retention_actions": [],
+            "retention_action_count": 0,
             "exception_details": [],
+            "exception_count": 0,
             "clean_shutdown": False,
         }
-        self._fps_samples: list[float] = []
+        self._fps_sample_count = 0
+        self._fps_sample_sum = 0.0
+        self._fps_sample_minimum: float | None = None
+        self._fps_sample_maximum: float | None = None
         self.save()
 
     def save(self) -> None:
-        if self._fps_samples:
-            self.data["average_measured_fps"] = sum(self._fps_samples) / len(self._fps_samples)
-            self.data["minimum_measured_fps"] = min(self._fps_samples)
-            self.data["maximum_measured_fps"] = max(self._fps_samples)
+        if self._fps_sample_count:
+            self.data["average_measured_fps"] = self._fps_sample_sum / self._fps_sample_count
+            self.data["minimum_measured_fps"] = self._fps_sample_minimum
+            self.data["maximum_measured_fps"] = self._fps_sample_maximum
         _atomic_json(self.path, self.data)
 
     def increment(self, field: str, amount: int = 1) -> None:
@@ -199,11 +206,33 @@ class SessionLog:
 
     def sample_fps(self, fps: float) -> None:
         if fps > 0:
-            self._fps_samples.append(fps)
+            self._fps_sample_count += 1
+            self._fps_sample_sum += fps
+            self._fps_sample_minimum = fps if self._fps_sample_minimum is None else min(self._fps_sample_minimum, fps)
+            self._fps_sample_maximum = fps if self._fps_sample_maximum is None else max(self._fps_sample_maximum, fps)
+
+    def add_retention_actions(self, actions: Iterable[dict[str, Any]]) -> None:
+        """Retain recent action detail while keeping a lifetime aggregate count."""
+
+        added = list(actions)
+        if not added:
+            return
+        self.data["retention_action_count"] = int(self.data.get("retention_action_count", 0)) + len(added)
+        details = self.data["retention_actions"]
+        details.extend(added)
+        del details[:-SESSION_DETAIL_LIMIT]
+
+    def add_exception(self, detail: str) -> None:
+        """Retain recent exception detail without growing the session forever."""
+
+        self.data["exception_count"] = int(self.data.get("exception_count", 0)) + 1
+        details = self.data["exception_details"]
+        details.append(detail)
+        del details[:-SESSION_DETAIL_LIMIT]
 
     def finish(self, *, clean: bool, exception: str | None = None) -> None:
         if exception:
-            self.data["exception_details"].append(exception)
+            self.add_exception(exception)
         self.data["shutdown_time"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
         self.data["clean_shutdown"] = clean
         self.save()

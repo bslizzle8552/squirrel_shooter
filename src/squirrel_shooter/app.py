@@ -14,13 +14,13 @@ import cv2
 from werkzeug.serving import BaseWSGIServer, make_server
 
 from .camera_preview import display_available
-from .camera_service import CameraService
+from .camera_service import CameraService, is_raspberry_pi
 from .config import AppConfig, ConfigError, DEFAULT_CONFIG_PATH, load_config
 from .diagnostics import configure_logging
 from .manual_control import ManualControlService, build_manual_control_service
 from .motion_runtime import MotionProcessingService
 from .thread_names import set_current_thread_name
-from .web_dashboard import create_app
+from .web_dashboard import create_app, read_cpu_temperature
 
 
 LOGGER = logging.getLogger(__name__)
@@ -154,6 +154,102 @@ def _cleanup_manual_control(control: ManualControlService | None) -> None:
         LOGGER.exception("Manual control cleanup failed; continuing application shutdown")
 
 
+def runtime_performance_snapshot(
+    runtime: ApplicationRuntime,
+    manual_control: ManualControlService | None,
+) -> dict[str, Any]:
+    """Return one low-overhead, mode-aware runtime performance sample."""
+
+    camera = runtime.camera.status()
+    motion = runtime.motion.status()
+    classifier = runtime.motion.classifier.status()
+    recording: dict[str, Any] = {}
+    if manual_control is not None:
+        candidate = manual_control.status().get("recording")
+        if isinstance(candidate, dict):
+            recording = candidate
+    return {
+        "capture_fps": round(camera.fps, 2),
+        "capture_read_average_ms": round(camera.capture_read_average_ms, 3),
+        "published_frame_copy_average_ms": round(camera.published_frame_copy_average_ms, 3),
+        "frame_publish_average_ms": round(camera.frame_publish_average_ms, 3),
+        "capture_thread_cpu_percent": round(camera.capture_thread_cpu_percent, 2),
+        "pre_roll_buffer_fps": round(camera.pre_roll_buffer_fps, 2),
+        "pre_roll_frames_buffered": camera.pre_roll_frames_buffered,
+        "detection_fps": round(motion.processing_fps, 2),
+        "detector_average_ms": round(motion.detector_average_ms, 3),
+        "annotation_average_ms": round(motion.annotation_average_ms, 3),
+        "motion_thread_cpu_percent": round(motion.motion_thread_cpu_percent, 2),
+        "annotations_rendered": motion.annotations_rendered,
+        "idle_annotations_skipped": motion.idle_annotations_skipped,
+        "dashboard_viewers": camera.dashboard_viewers,
+        "dashboard_stream_fps": round(camera.dashboard_stream_fps, 2),
+        "dashboard_encode_average_ms": round(camera.dashboard_encode_average_ms, 3),
+        "dashboard_last_jpeg_bytes": camera.dashboard_last_jpeg_bytes,
+        "dashboard_estimated_egress_mbps": round(camera.dashboard_estimated_egress_mbps, 4),
+        "dashboard_encode_failures": camera.dashboard_encode_failures,
+        "dashboard_encoder_alive": camera.dashboard_encoder_alive,
+        "dashboard_encode_error": camera.dashboard_encode_error,
+        "classifier_queue_depth": classifier.queue_depth,
+        "classifier_inference_fps": round(classifier.inference_fps, 4),
+        "classifier_last_latency_ms": classifier.last_latency_ms,
+        "manual_recording_active": bool(recording.get("active", False)),
+        "manual_recording_queued": int(recording.get("queued", 0) or 0),
+        "manual_recording_failed": int(recording.get("failed", 0) or 0),
+        "manual_recording_rejected": int(recording.get("rejected", 0) or 0),
+        "manual_recording_last_processing_seconds": float(
+            recording.get("last_processing_seconds", 0.0) or 0.0
+        ),
+    }
+
+
+def log_runtime_performance(
+    runtime: ApplicationRuntime,
+    manual_control: ManualControlService | None,
+) -> bool:
+    """Emit one best-effort sample without making observability service-critical."""
+
+    try:
+        telemetry = runtime_performance_snapshot(runtime, manual_control)
+        telemetry["cpu_temperature_c"] = read_cpu_temperature()
+        LOGGER.info(
+            "Runtime performance: capture=%.1f FPS detection=%.1f FPS viewers=%d",
+            telemetry["capture_fps"],
+            telemetry["detection_fps"],
+            telemetry["dashboard_viewers"],
+            extra={"structured_data": {"event": "runtime_performance", **telemetry}},
+        )
+        return True
+    except Exception as exc:
+        LOGGER.warning(
+            "Runtime performance sample failed; application work continues",
+            extra={
+                "structured_data": {
+                    "event": "runtime_performance_error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            },
+            exc_info=True,
+        )
+        return False
+
+
+def critical_worker_failure(
+    runtime: ApplicationRuntime,
+    *,
+    require_camera: bool,
+) -> str | None:
+    """Return a fatal worker-health error that systemd should restart."""
+
+    motion = runtime.motion.status()
+    if not motion.thread_alive:
+        return f"Motion processing thread stopped unexpectedly: {motion.last_error or 'no error reported'}"
+    camera = runtime.camera.status()
+    if require_camera and not camera.thread_alive:
+        return f"Camera capture thread stopped unexpectedly: {camera.error or 'no error reported'}"
+    return None
+
+
 def run(config: AppConfig) -> int:
     """Run until Ctrl+C or local q, then shut every subsystem down in order."""
 
@@ -194,11 +290,24 @@ def run(config: AppConfig) -> int:
     clean = False
     last_server_error: str | None = None
     idle_wait = threading.Event()
+    require_camera_worker = is_raspberry_pi()
+    telemetry_interval = config.runtime.telemetry_interval_seconds
+    next_telemetry_at = monotonic() + telemetry_interval
     try:
         while True:
+            worker_failure = critical_worker_failure(
+                runtime,
+                require_camera=require_camera_worker,
+            )
+            if worker_failure is not None:
+                raise RuntimeError(worker_failure)
             if server is not None and server.error and server.error != last_server_error:
                 print(f"Dashboard error: {server.error}. Motion watching remains active.")
                 last_server_error = server.error
+            now = monotonic()
+            if now >= next_telemetry_at:
+                log_runtime_performance(runtime, manual_control)
+                next_telemetry_at = now + telemetry_interval
             if show_preview:
                 frame = runtime.camera.latest_annotated_frame()
                 if frame is not None:

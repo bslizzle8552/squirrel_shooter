@@ -58,6 +58,9 @@
     detailTilt: document.getElementById('calibration-detail-tilt'),
     toast: document.getElementById('manual-toast')
   };
+  var streamSrc = els.image.getAttribute('src');
+  var refreshController = null;
+  var REFRESH_TIMEOUT_MS = 8000;
 
   function showToast(message) {
     els.toast.textContent = message;
@@ -374,18 +377,43 @@
   });
 
   async function refresh() {
-    if (requestPending || refreshPending) { return; }
+    if (document.hidden || requestPending || refreshPending) { return; }
     var revision = stateRevision;
     refreshPending = true;
+    var controller = new AbortController();
+    var timeout = window.setTimeout(function () { controller.abort(); }, REFRESH_TIMEOUT_MS);
+    refreshController = controller;
     try {
-      var response = await fetch(cfg.urls.status, {cache: 'no-store'});
+      var response = await fetch(cfg.urls.status, {cache: 'no-store', signal: controller.signal});
       if (response.ok) {
         var payload = await response.json();
         if (!requestPending && revision === stateRevision) { render(payload.control); }
       }
     } catch (_error) { /* Keep the last known state during a brief network interruption. */ }
-    finally { refreshPending = false; }
+    finally {
+      window.clearTimeout(timeout);
+      if (refreshController === controller) { refreshController = null; }
+      refreshPending = false;
+    }
   }
+
+  function syncStreamVisibility() {
+    if (document.hidden && els.image.hasAttribute('src')) {
+      els.image.removeAttribute('src');
+    } else if (!document.hidden && !els.image.hasAttribute('src')) {
+      els.image.setAttribute('src', streamSrc);
+    }
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    syncStreamVisibility();
+    if (document.hidden && refreshController) {
+      refreshController.abort();
+    } else if (!document.hidden) {
+      window.setTimeout(refresh, 0);
+    }
+  });
+  syncStreamVisibility();
   render(control);
   window.setInterval(refresh, cfg.pollIntervalMs);
 }());

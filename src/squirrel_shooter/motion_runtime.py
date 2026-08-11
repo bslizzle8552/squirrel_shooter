@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -79,7 +79,9 @@ class _DetectionFrameBuffer:
         self._frames: deque[_BufferedDetection] = deque()
 
     def append(self, timestamp: float, frame: np.ndarray, result: WatchDetectionResult, measured_fps: float) -> None:
-        self._frames.append(_BufferedDetection(timestamp, frame.copy(), result, measured_fps))
+        # CameraService gives this worker an immutable borrowed frame whose
+        # ndarray remains alive through normal Python reference ownership.
+        self._frames.append(_BufferedDetection(timestamp, frame, result, measured_fps))
         cutoff = timestamp - self.duration_seconds
         while self._frames and self._frames[0].timestamp < cutoff:
             self._frames.popleft()
@@ -165,6 +167,8 @@ class MotionProcessingService:
         self._last_rejection: str | None = None
         self._last_session_save = monotonic()
         self._last_camera_read_failures = 0
+        self._error_throttle: OrderedDict[str, tuple[float, int]] = OrderedDict()
+        self._suppressed_error_count = 0
         self._camera_metadata: dict[str, Any] = {
             "source_camera": f"opencv_device_{config.camera.device_index}",
             "camera_device_index": config.camera.device_index,
@@ -189,6 +193,8 @@ class MotionProcessingService:
                 return
             self._stop_event.clear()
             self._finalized = False
+            self._error_throttle.clear()
+            self._suppressed_error_count = 0
             self._prepare_outputs()
             self.classifier.start()
             self._thread = threading.Thread(target=self._run, name="motion-detect", daemon=True)
@@ -309,7 +315,7 @@ class MotionProcessingService:
         try:
             generate_reports(self.config)
         except Exception as exc:
-            self._session.data["exception_details"].append(f"Startup report generation failed: {exc}")
+            self._session.add_exception(f"Startup report generation failed: {exc}")
         self._recorder = EventRecorder(
             self.config,
             self._logs,
@@ -324,6 +330,7 @@ class MotionProcessingService:
         camera_sequence = -1
         next_frame_at = 0.0
         frame_interval = 1.0 / self.config.motion.target_fps
+        consecutive_failures = 0
         clean = False
         try:
             while not self._stop_event.is_set():
@@ -331,10 +338,11 @@ class MotionProcessingService:
                 if remaining > 0 and self._stop_event.wait(remaining):
                     break
                 try:
-                    packet = self.camera.wait_for_frame(camera_sequence)
+                    packet = self.camera.wait_for_frame(camera_sequence, copy=False)
                 except Exception as exc:
+                    consecutive_failures += 1
                     self._record_error("Shared frame wait failed", exc)
-                    self._stop_event.wait(0.2)
+                    self._stop_event.wait(self._failure_backoff_seconds(consecutive_failures))
                     continue
                 self._sync_camera_failures()
                 if packet is None:
@@ -344,13 +352,18 @@ class MotionProcessingService:
                 try:
                     self._process_packet(packet)
                     self._motion_cpu.update()
+                    if consecutive_failures:
+                        self._flush_suppressed_errors("Motion processing recovered")
+                    consecutive_failures = 0
                 except Exception as exc:
+                    consecutive_failures += 1
                     self._record_error("Motion frame processing failed", exc)
                     if self._display_requested():
                         try:
-                            self.camera.publish_annotated(packet.sequence, packet.frame)
+                            self.camera.publish_annotated(packet.sequence, packet.frame, copy=False)
                         except Exception:
                             LOGGER.exception("Could not publish raw fallback after motion failure")
+                    self._stop_event.wait(self._failure_backoff_seconds(consecutive_failures))
             clean = True
         except Exception as exc:
             self._record_error("Motion processor thread failed", exc)
@@ -399,7 +412,7 @@ class MotionProcessingService:
                 if self._night_mode_paused
                 else self._add_live_box_holds(visible, result.groups, now)
             )
-            self.camera.publish_annotated(packet.sequence, live_annotated)
+            self.camera.publish_annotated(packet.sequence, live_annotated, copy=False)
         elif annotated is None:
             self._idle_annotations_skipped += 1
         now_iso = datetime.now().astimezone().isoformat(timespec="milliseconds")
@@ -419,7 +432,7 @@ class MotionProcessingService:
         if self._session is not None:
             self._session.increment("raw_contours", result.raw_contour_count)
             self._session.increment("grouped_candidates", len(result.groups))
-            if monotonic() - self._last_session_save >= 10.0:
+            if monotonic() - self._last_session_save >= self.config.runtime.telemetry_interval_seconds:
                 self._session.save()
                 self._last_session_save = monotonic()
 
@@ -637,7 +650,7 @@ class MotionProcessingService:
                 active = {item.directory for item in self._recorder.active.values()}
                 actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention, active_directories=active)
                 if self._session is not None:
-                    self._session.data["retention_actions"].extend(actions)
+                    self._session.add_retention_actions(actions)
         with self._condition:
             self._active_events = len(self._recorder.active)
 
@@ -741,10 +754,66 @@ class MotionProcessingService:
             self._state = "ERROR"
             self._last_error = detail
             self._condition.notify_all()
+        now = monotonic()
+        signature = f"{message}|{type(exc).__name__}|{exc}"
+        prior = self._error_throttle.get(signature)
+        if prior is not None and now - prior[0] < self.config.runtime.telemetry_interval_seconds:
+            self._error_throttle[signature] = (prior[0], prior[1] + 1)
+            self._error_throttle.move_to_end(signature)
+            self._suppressed_error_count += 1
+            return
+        persisted_detail = detail
+        repeated = 0 if prior is None else prior[1]
+        if repeated:
+            persisted_detail += f" ({repeated} identical errors suppressed)"
+            self._suppressed_error_count = max(0, self._suppressed_error_count - repeated)
         if self._session is not None:
-            self._session.data["exception_details"].append(detail)
+            self._session.add_exception(persisted_detail)
             self._session.save()
-        LOGGER.error(message, extra={"structured_data": {"event": "motion_runtime_error", "error": str(exc)}}, exc_info=True)
+        LOGGER.error(
+            message,
+            extra={
+                "structured_data": {
+                    "event": "motion_runtime_error",
+                    "error": str(exc),
+                    "identical_errors_suppressed": repeated,
+                }
+            },
+            exc_info=True,
+        )
+        self._error_throttle[signature] = (now, 0)
+        self._error_throttle.move_to_end(signature)
+        while len(self._error_throttle) > 16:
+            self._error_throttle.popitem(last=False)
+
+    def _flush_suppressed_errors(self, context: str, *, save_session: bool = True) -> None:
+        count = self._suppressed_error_count
+        if count <= 0:
+            return
+        detail = f"{context}: {count} repeated motion errors were suppressed"
+        if self._session is not None:
+            self._session.add_exception(detail)
+            if save_session:
+                self._session.save()
+        LOGGER.warning(
+            detail,
+            extra={
+                "structured_data": {
+                    "event": "motion_runtime_errors_suppressed",
+                    "count": count,
+                    "context": context,
+                }
+            },
+        )
+        self._error_throttle = OrderedDict(
+            (signature, (persisted_at, 0))
+            for signature, (persisted_at, _) in self._error_throttle.items()
+        )
+        self._suppressed_error_count = 0
+
+    @staticmethod
+    def _failure_backoff_seconds(consecutive_failures: int) -> float:
+        return min(5.0, 0.25 * (2 ** min(max(0, consecutive_failures - 1), 5)))
 
     def _finalize(self, *, clean: bool) -> None:
         with self._condition:
@@ -758,14 +827,15 @@ class MotionProcessingService:
             with self._condition:
                 self._active_events = 0
         actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention)
+        self._flush_suppressed_errors("Motion processor stopped", save_session=False)
         if self._session is not None:
             self._sync_camera_failures()
-            self._session.data["retention_actions"].extend(actions)
+            self._session.add_retention_actions(actions)
             if self._session.data.get("camera_open_result") == "not_attempted":
                 self._session.data["camera_open_result"] = "failed"
             if self.config.reporting.rebuild_on_clean_shutdown and clean:
                 try:
                     generate_reports(self.config)
                 except Exception as exc:
-                    self._session.data["exception_details"].append(f"Report generation failed: {exc}")
+                    self._session.add_exception(f"Report generation failed: {exc}")
             self._session.finish(clean=clean)

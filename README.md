@@ -308,7 +308,8 @@ cd ~/squirrel_shooter
 ./start.sh
 ```
 
-Pull the newest `main`, install it, run tests, and start it:
+Fast-forward the branch already checked out on the Pi, install it, run tests,
+and start it:
 
 ```bash
 cd ~/squirrel_shooter

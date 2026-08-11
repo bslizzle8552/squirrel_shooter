@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from collections import deque
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from time import monotonic
@@ -160,9 +161,10 @@ class _Track:
     first_at: float
     last_at: float
     persistence: int
-    path: list[tuple[float, float]] = field(default_factory=list)
-    speeds: list[float] = field(default_factory=list)
-    areas: list[float] = field(default_factory=list)
+    path: deque[tuple[float, float]]
+    speed_total: float = 0.0
+    speed_samples: int = 0
+    peak_speed: float = 0.0
     confirmed: bool = False
 
 
@@ -642,16 +644,23 @@ class MotionWatcherDetector:
                 available.remove(track.track_id)
                 elapsed = max(1e-6, now - track.last_at)
                 speed = math.dist(track.path[-1], group.centroid) / elapsed
-                track.speeds.append(speed)
+                track.speed_total += speed
+                track.speed_samples += 1
+                track.peak_speed = max(track.peak_speed, speed)
                 track.persistence += 1
                 track.last_at = now
                 track.path.append(group.centroid)
-                track.areas.append(group.foreground_pixels)
             else:
-                track = _Track(self._next_track_id, now, now, 1, [group.centroid], [], [group.foreground_pixels])
+                track = _Track(
+                    self._next_track_id,
+                    now,
+                    now,
+                    1,
+                    deque([group.centroid], maxlen=30),
+                )
                 self._tracks[track.track_id] = track
                 self._next_track_id += 1
-            path = track.path[-30:]
+            path = list(track.path)
             segment_distances = [math.dist(path[index - 1], path[index]) for index in range(1, len(path))]
             travel = sum(segment_distances)
             displacement = math.dist(path[0], path[-1]) if len(path) > 1 else 0.0
@@ -663,8 +672,8 @@ class MotionWatcherDetector:
                 path=tuple(path),
                 duration=now - track.first_at,
                 travel_distance=travel,
-                average_speed=sum(track.speeds) / len(track.speeds) if track.speeds else 0.0,
-                peak_speed=max(track.speeds, default=0.0),
+                average_speed=track.speed_total / track.speed_samples if track.speed_samples else 0.0,
+                peak_speed=track.peak_speed,
                 direction=_direction(path),
                 coherent_motion=coherent,
                 dispersed_motion=group.dispersed_motion or (len(group.components) >= 5 and not coherent),

@@ -27,6 +27,9 @@ runtime:
   # Avoid OpenCV turning each image operation into several continuously busy
   # native workers on the four-core Pi. Event-driven inference remains enabled.
   opencv_threads: 1
+  # Aggregate runtime metrics and refresh the crash-aware session summary at a
+  # low-write cadence. No per-frame telemetry is logged.
+  telemetry_interval_seconds: 30.0
 
 dashboard:
   enabled: true

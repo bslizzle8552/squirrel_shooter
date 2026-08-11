@@ -13,11 +13,21 @@ import numpy as np
 import pytest
 
 from conftest import write_test_config
-from squirrel_shooter.app import ApplicationRuntime, DashboardServer, _apply_overrides, build_parser
+from squirrel_shooter.app import (
+    ApplicationRuntime,
+    DashboardServer,
+    _apply_overrides,
+    build_parser,
+    critical_worker_failure,
+    log_runtime_performance,
+    runtime_performance_snapshot,
+)
 from squirrel_shooter.camera_service import CameraService, FramePacket
 from squirrel_shooter.config import CameraConfig, SharedCameraConfig, load_config
 from squirrel_shooter.motion_runtime import MotionProcessingService
 from squirrel_shooter.web_dashboard import create_app
+import squirrel_shooter.motion_runtime as motion_runtime_module
+import squirrel_shooter.app as app_module
 import squirrel_shooter.web_dashboard as web_dashboard_module
 
 
@@ -203,7 +213,112 @@ def test_dashboard_viewers_share_one_encoded_frame(tmp_path: Path, monkeypatch: 
         service.stop()
 
 
-def test_manual_pre_roll_copies_at_target_rate_without_jpeg_encoding(
+def test_viewer_disconnect_during_encode_keeps_stream_fps_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released = threading.Event()
+    second_encode_started = threading.Event()
+    finish_second_encode = threading.Event()
+    service = CameraService(
+        CameraConfig(0, 64, 36, 30, tmp_path),
+        capture_factory=lambda _: ContinuousCapture(
+            np.full((36, 64, 3), 40, dtype=np.uint8),
+            released,
+        ),
+        platform_checker=lambda: True,
+        frame_buffer_seconds=0,
+    )
+    real_encode = cv2.imencode
+    encode_calls = 0
+
+    def blocking_second_encode(*args: object, **kwargs: object):
+        nonlocal encode_calls
+        encode_calls += 1
+        if encode_calls == 2:
+            second_encode_started.set()
+            assert finish_second_encode.wait(2)
+        return real_encode(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "squirrel_shooter.camera_service.cv2.imencode",
+        blocking_second_encode,
+    )
+    service.start()
+    stream = None
+    try:
+        wait_until(lambda: service.status().frames_received > 0)
+        first_packet = service.wait_for_frame(-1)
+        assert first_packet is not None
+        service.publish_annotated(first_packet.sequence, first_packet.frame)
+        stream = service.mjpeg_frames(maximum_fps=8, annotated_only=True)
+        assert next(stream).startswith(b"--frame")
+
+        second_packet = service.wait_for_frame(first_packet.sequence)
+        assert second_packet is not None
+        service.publish_annotated(second_packet.sequence, second_packet.frame)
+        assert second_encode_started.wait(2)
+        stream.close()
+        stream = None
+        assert service.status().dashboard_viewers == 0
+        finish_second_encode.set()
+        wait_until(lambda: service.status().dashboard_frames_encoded == 2)
+        assert service.status().dashboard_stream_fps == 0.0
+    finally:
+        finish_second_encode.set()
+        if stream is not None:
+            stream.close()
+        service.stop()
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_failed_dashboard_encoder_backs_off_instead_of_spinning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raises: bool,
+) -> None:
+    released = threading.Event()
+    service = CameraService(
+        CameraConfig(0, 64, 36, 30, tmp_path),
+        capture_factory=lambda _: ContinuousCapture(np.zeros((36, 64, 3), dtype=np.uint8), released),
+        platform_checker=lambda: True,
+        frame_buffer_seconds=0,
+    )
+    encode_calls = 0
+
+    def failed_encode(*_args: object, **_kwargs: object) -> tuple[bool, None]:
+        nonlocal encode_calls
+        encode_calls += 1
+        if raises:
+            raise RuntimeError("test encoder failure")
+        return False, None
+
+    monkeypatch.setattr("squirrel_shooter.camera_service.cv2.imencode", failed_encode)
+    service.start()
+    stream = None
+    consumer = None
+    try:
+        wait_until(lambda: service.status().frames_received > 0)
+        packet = service.wait_for_frame(-1)
+        assert packet is not None
+        service.publish_annotated(packet.sequence, packet.frame)
+        stream = service.mjpeg_frames(maximum_fps=8, annotated_only=True)
+        consumer = threading.Thread(target=lambda: next(stream, None))
+        consumer.start()
+        wait_until(lambda: encode_calls >= 1)
+        time.sleep(0.2)
+        assert encode_calls == 1
+        assert service.status().dashboard_encode_failures == 1
+        assert service.status().dashboard_encoder_alive is True
+    finally:
+        service.stop()
+        if consumer is not None:
+            consumer.join(timeout=1)
+        if stream is not None:
+            stream.close()
+
+
+def test_manual_pre_roll_reuses_published_frames_at_target_rate_without_jpeg_encoding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     released = threading.Event()
@@ -228,9 +343,11 @@ def test_manual_pre_roll_copies_at_target_rate_without_jpeg_encoding(
         wait_until(lambda: service.status().frames_received >= 25)
         status = service.status()
         assert status.pre_roll_frames_encoded == 0
-        assert status.pre_roll_frames_copied < status.frames_received / 3
+        assert status.pre_roll_frames_copied == 0
+        assert status.pre_roll_frames_reused < status.frames_received / 3
         assert 1 <= status.pre_roll_frames_buffered <= 5
         assert status.pre_roll_target_fps == 10.0
+        assert status.published_frame_copy_average_ms >= 0.0
         assert encode_calls == 0
     finally:
         service.stop()
@@ -242,8 +359,10 @@ def test_motion_processing_samples_fast_camera_at_configured_rate(tmp_path: Path
     class FastCamera:
         def __init__(self) -> None:
             self.sequence = 0
+            self.copy_requests: list[bool] = []
 
-        def wait_for_frame(self, _after_sequence: int):
+        def wait_for_frame(self, _after_sequence: int, *, copy: bool = True):
+            self.copy_requests.append(copy)
             self.sequence += 1
             return SimpleNamespace(sequence=self.sequence)
 
@@ -263,6 +382,41 @@ def test_motion_processing_samples_fast_camera_at_configured_rate(tmp_path: Path
     assert not thread.is_alive()
     assert 3 <= len(processed) <= 5
     assert all(later - earlier >= 0.08 for earlier, later in zip(processed, processed[1:]))
+    assert motion.camera.copy_requests and not any(motion.camera.copy_requests)  # type: ignore[attr-defined]
+
+
+def test_motion_failure_backoff_is_bounded_and_exponential() -> None:
+    assert MotionProcessingService._failure_backoff_seconds(1) == 0.25
+    assert MotionProcessingService._failure_backoff_seconds(2) == 0.5
+    assert MotionProcessingService._failure_backoff_seconds(6) == 5.0
+    assert MotionProcessingService._failure_backoff_seconds(100) == 5.0
+
+
+def test_motion_error_throttle_preserves_distinct_errors_and_flushes_repeats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    motion = MotionProcessingService(SimpleNamespace(), runtime_config(tmp_path))  # type: ignore[arg-type]
+    monkeypatch.setattr(motion_runtime_module, "monotonic", lambda: 100.0)
+
+    with caplog.at_level("WARNING"):
+        motion._record_error("Detector failed", RuntimeError("same failure"))
+        motion._record_error("Detector failed", RuntimeError("same failure"))
+        motion._record_error("Camera wait failed", OSError("different failure"))
+
+        error_records = [
+            record
+            for record in caplog.records
+            if getattr(record, "structured_data", {}).get("event") == "motion_runtime_error"
+        ]
+        assert len(error_records) == 2
+        assert motion._suppressed_error_count == 1
+
+        motion._flush_suppressed_errors("Motion processing recovered")
+
+    assert motion._suppressed_error_count == 0
+    assert any("1 repeated motion errors" in record.getMessage() for record in caplog.records)
 
 
 def test_headless_motion_skips_idle_annotation_until_a_viewer_connects(tmp_path: Path) -> None:
@@ -278,7 +432,8 @@ def test_headless_motion_skips_idle_annotation_until_a_viewer_connects(tmp_path:
         def status(self) -> SimpleNamespace:
             return SimpleNamespace(fps=10.0, reported_fps=15.0, width=64, height=36, read_failures=0)
 
-        def publish_annotated(self, _sequence: int, _frame: np.ndarray) -> None:
+        def publish_annotated(self, _sequence: int, _frame: np.ndarray, *, copy: bool = True) -> None:
+            assert copy is False
             self.published += 1
 
     camera = Camera()
@@ -308,6 +463,61 @@ def test_application_runtime_retains_only_the_pre_roll_window_in_memory(tmp_path
         + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
     )
     assert runtime.camera.status().pre_roll_target_fps == config.manual_control.recording.target_fps
+
+
+def test_runtime_performance_snapshot_exposes_major_stage_costs(tmp_path: Path) -> None:
+    runtime = ApplicationRuntime(runtime_config(tmp_path))
+
+    payload = runtime_performance_snapshot(runtime, None)
+
+    assert payload["capture_fps"] == 0.0
+    assert payload["detector_average_ms"] == 0.0
+    assert payload["dashboard_viewers"] == 0
+    assert payload["dashboard_encode_average_ms"] == 0.0
+    assert payload["dashboard_estimated_egress_mbps"] == 0.0
+    assert payload["classifier_queue_depth"] == 0
+    assert payload["manual_recording_active"] is False
+
+
+def test_runtime_telemetry_failure_does_not_escape_into_service_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = ApplicationRuntime(runtime_config(tmp_path))
+    monkeypatch.setattr(
+        app_module,
+        "runtime_performance_snapshot",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("broken metric")),
+    )
+
+    with caplog.at_level("WARNING"):
+        assert log_runtime_performance(runtime, None) is False
+
+    assert any(
+        getattr(record, "structured_data", {}).get("event") == "runtime_performance_error"
+        for record in caplog.records
+    )
+
+
+def test_critical_worker_failure_requires_motion_and_pi_camera_workers() -> None:
+    healthy = SimpleNamespace(
+        motion=SimpleNamespace(
+            status=lambda: SimpleNamespace(thread_alive=True, last_error=None),
+        ),
+        camera=SimpleNamespace(
+            status=lambda: SimpleNamespace(thread_alive=True, error=None),
+        ),
+    )
+    assert critical_worker_failure(healthy, require_camera=True) is None
+
+    healthy.motion.status = lambda: SimpleNamespace(thread_alive=False, last_error="detector died")
+    assert "detector died" in str(critical_worker_failure(healthy, require_camera=True))
+
+    healthy.motion.status = lambda: SimpleNamespace(thread_alive=True, last_error=None)
+    healthy.camera.status = lambda: SimpleNamespace(thread_alive=False, error="camera died")
+    assert critical_worker_failure(healthy, require_camera=False) is None
+    assert "camera died" in str(critical_worker_failure(healthy, require_camera=True))
 
 
 def test_live_stream_holds_last_seen_box_during_tracker_gap(tmp_path: Path) -> None:
@@ -476,6 +686,7 @@ def test_motion_and_dashboard_share_exactly_one_camera_open(tmp_path: Path) -> N
         )
         dashboard.config.update(TESTING=True)
         status = dashboard.test_client().get("/api/status")
+        health = dashboard.test_client().get("/api/health")
         events = dashboard.test_client().get("/api/events")
         stream = dashboard.test_client().get("/video_feed", buffered=False)
         assert status.status_code == events.status_code == 200
@@ -484,10 +695,14 @@ def test_motion_and_dashboard_share_exactly_one_camera_open(tmp_path: Path) -> N
         assert "pre_roll_target_fps" in status.json["camera"]
         assert "pre_roll_frames_copied" in status.json["camera"]
         assert "capture_thread_cpu_percent" in status.json["camera"]
+        assert "dashboard_estimated_egress_mbps" in status.json["camera"]
         assert status.json["detector"]["frames_processed"] > 0
         assert status.json["detector"]["target_fps"] == config.motion.target_fps
         assert "detector_average_ms" in status.json["detector"]
         assert "motion_thread_cpu_percent" in status.json["detector"]
+        assert "published_frame_copy_average_ms" in health.json
+        assert "detector_average_ms" in health.json
+        assert "dashboard_estimated_egress_mbps" in health.json
         assert status.json["application_mode"] == "shared-camera-motion-watch"
         assert next(stream.response).startswith(b"--frame")
         stream.close()

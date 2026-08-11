@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +23,7 @@ from squirrel_shooter.event_storage import (
     new_event_id,
     recover_incomplete_events,
 )
+from squirrel_shooter.diagnostics import RoutineAccessFilter, configure_logging
 from squirrel_shooter.watch_detection import GroupedCandidate, MotionComponent
 
 
@@ -149,6 +152,29 @@ def test_rejection_and_session_logs_capture_required_counters(tmp_path: Path) ->
     assert json.loads(logs.rejection_path.read_text(encoding="utf-8"))["reason"] == "excessive_zone_motion"
 
 
+def test_session_metrics_and_details_remain_bounded_for_long_runs(tmp_path: Path) -> None:
+    session = SessionLog(configured(tmp_path), {"requested_width": 1280})
+
+    for index in range(10_000):
+        session.sample_fps(9.0 + (index % 3))
+    session.add_retention_actions({"event_id": str(index)} for index in range(150))
+    for index in range(150):
+        session.add_exception(f"failure-{index}")
+    session.finish(clean=True)
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    assert not hasattr(session, "_fps_samples")
+    assert session._fps_sample_count == 10_000
+    assert payload["minimum_measured_fps"] == 9.0
+    assert payload["maximum_measured_fps"] == 11.0
+    assert payload["retention_action_count"] == 150
+    assert len(payload["retention_actions"]) == 100
+    assert payload["retention_actions"][0]["event_id"] == "50"
+    assert payload["exception_count"] == 150
+    assert len(payload["exception_details"]) == 100
+    assert payload["exception_details"][0] == "failure-50"
+
+
 def test_completed_log_files_rotate_without_deleting_active_log(tmp_path: Path) -> None:
     config = configured(tmp_path)
     config = replace(config, logging=replace(config.logging, maximum_active_log_megabytes=0.000001, retained_log_rotations=2))
@@ -158,6 +184,75 @@ def test_completed_log_files_rotate_without_deleting_active_log(tmp_path: Path) 
     assert logs.csv_path.exists() and logs.jsonl_path.exists()
     assert logs.csv_path.with_name(logs.csv_path.name + ".1").exists()
     assert logs.jsonl_path.with_name(logs.jsonl_path.name + ".1").exists()
+
+
+def test_application_log_is_bounded_and_only_successful_routine_access_is_suppressed(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    root = logging.getLogger()
+    existing = set(root.handlers)
+    werkzeug = logging.getLogger("werkzeug")
+    previous_werkzeug_level = werkzeug.level
+    existing_werkzeug_filters = set(werkzeug.filters)
+
+    try:
+        path = configure_logging(config.logging, max_log_files=3)
+        created = [handler for handler in root.handlers if handler not in existing]
+        rotating = next(handler for handler in created if isinstance(handler, RotatingFileHandler))
+
+        assert path is not None and path.exists()
+        assert rotating.maxBytes == int(config.logging.maximum_active_log_megabytes * 1024 * 1024)
+        assert rotating.backupCount == config.logging.retained_log_rotations
+        assert werkzeug.level == logging.INFO
+        access_filter = next(item for item in werkzeug.filters if isinstance(item, RoutineAccessFilter))
+        routine_ok = logging.LogRecord(
+            "werkzeug",
+            logging.INFO,
+            "",
+            0,
+            '127.0.0.1 - - [date] "GET /api/status HTTP/1.1" 200 -',
+            (),
+            None,
+        )
+        rejected_control = logging.LogRecord(
+            "werkzeug",
+            logging.INFO,
+            "",
+            0,
+            '127.0.0.1 - - [date] "POST /api/manual-control/fire HTTP/1.1" 403 -',
+            (),
+            None,
+        )
+        manual_poll = logging.LogRecord(
+            "werkzeug",
+            logging.INFO,
+            "",
+            0,
+            '127.0.0.1 - - [date] "GET /api/manual-control HTTP/1.1" 200 -',
+            (),
+            None,
+        )
+        failed_poll = logging.LogRecord(
+            "werkzeug",
+            logging.INFO,
+            "",
+            0,
+            '127.0.0.1 - - [date] "GET /api/status HTTP/1.1" 500 -',
+            (),
+            None,
+        )
+        assert access_filter.filter(routine_ok) is False
+        assert access_filter.filter(manual_poll) is False
+        assert access_filter.filter(rejected_control) is True
+        assert access_filter.filter(failed_poll) is True
+    finally:
+        for handler in list(root.handlers):
+            if handler not in existing:
+                root.removeHandler(handler)
+                handler.close()
+        for access_filter in list(werkzeug.filters):
+            if access_filter not in existing_werkzeug_filters:
+                werkzeug.removeFilter(access_filter)
+        werkzeug.setLevel(previous_werkzeug_level)
 
 
 def test_incomplete_event_recovery_preserves_files_and_marks_folder(tmp_path: Path) -> None:

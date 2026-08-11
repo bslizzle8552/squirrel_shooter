@@ -9,6 +9,21 @@ def frame(value: int = 0) -> np.ndarray:
     return np.full((100, 160, 3), value, dtype=np.uint8)
 
 
+class CopyCountingFrame(np.ndarray):
+    def __new__(cls, counter: list[int]) -> "CopyCountingFrame":
+        value = np.zeros((100, 160, 3), dtype=np.uint8).view(cls)
+        value.counter = counter
+        return value
+
+    def __array_finalize__(self, source: np.ndarray | None) -> None:
+        self.counter = getattr(source, "counter", None)
+
+    def copy(self, *args: object, **kwargs: object) -> np.ndarray:
+        if self.counter is not None:
+            self.counter[0] += 1
+        return super().copy(*args, **kwargs)
+
+
 def test_largest_valid_in_frame_motion_candidate_is_selected() -> None:
     selector = BestEventFrameSelector(fallback_frame_number=1, minimum_motion_area=500)
     selector.consider(1, frame(1), (20, 20, 20, 20), 600)
@@ -22,6 +37,23 @@ def test_largest_valid_in_frame_motion_candidate_is_selected() -> None:
     assert selected.method == "best"
     assert selected.bounding_box_area == 1500
     assert selected.total_frames_considered == 3
+
+
+def test_frames_are_copied_only_when_a_retained_role_changes() -> None:
+    copies = [0]
+    selector = BestEventFrameSelector(fallback_frame_number=1, minimum_motion_area=100)
+    selector.consider(1, CopyCountingFrame(copies), (20, 20, 60, 40), 1000)
+
+    for frame_number in range(2, 102):
+        selector.consider(
+            frame_number,
+            CopyCountingFrame(copies),
+            (20, 20, 20, 20),
+            200,
+        )
+
+    assert copies == [1]
+    assert selector._first is selector._configured_fallback is selector._best
 
 
 def test_large_edge_touching_candidate_does_not_beat_clear_in_frame_candidate() -> None:

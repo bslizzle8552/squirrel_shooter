@@ -64,20 +64,30 @@ class BestEventFrameSelector:
         assert frame is not None
         box = bounding_box or (0, 0, 0, 0)
         box_area = _box_area(box)
-        stored = _StoredFrame(
+        candidate = _StoredFrame(
             frame_number,
-            frame.copy(),
+            frame,
             box,
             box_area,
             motion_area,
         )
-        if self._first is None:
-            self._first = stored
-        if frame_number == self.fallback_frame_number:
-            self._configured_fallback = stored
-        if self.selection_mode != "best" or not self._is_valid_candidate(stored):
+        keep_first = self._first is None
+        keep_configured = frame_number == self.fallback_frame_number
+        keep_best = (
+            self.selection_mode == "best"
+            and self._is_valid_candidate(candidate)
+            and (self._best is None or self._rank(candidate) > self._rank(self._best))
+        )
+        if not (keep_first or keep_configured or keep_best):
             return
-        if self._best is None or self._rank(stored) > self._rank(self._best):
+        # One retained copy can serve first/configured/best roles when they
+        # coincide. Frames that cannot improve any role are never copied.
+        stored = _StoredFrame(frame_number, frame.copy(), box, box_area, motion_area)
+        if keep_first:
+            self._first = stored
+        if keep_configured:
+            self._configured_fallback = stored
+        if keep_best:
             self._best = stored
 
     def select(

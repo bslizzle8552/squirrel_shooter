@@ -66,7 +66,9 @@ class FakeCamera:
         *,
         until_monotonic: float | None = None,
         after_sequence: int = -1,
+        copy: bool = True,
     ) -> list[FramePacket]:
+        del copy
         return [
             frame
             for frame in self.frames
@@ -75,7 +77,14 @@ class FakeCamera:
             and frame.sequence > after_sequence
         ]
 
-    def wait_for_frame(self, after_sequence: int, timeout: float | None = None) -> None:
+    def wait_for_frame(
+        self,
+        after_sequence: int,
+        timeout: float | None = None,
+        *,
+        copy: bool = True,
+    ) -> None:
+        del after_sequence, timeout, copy
         return None
 
     def status(self) -> SimpleNamespace:
@@ -156,6 +165,28 @@ def test_recorder_associates_full_and_zoom_clips_with_one_manual_event(tmp_path:
     assert all(frame.shape == (36, 64, 3) for frames_written in written.values() for frame in frames_written)
 
 
+def test_recorder_rejects_unbounded_queue_growth(tmp_path: Path) -> None:
+    recorder = ManualFireRecorder(
+        FakeCamera([]),
+        tmp_path,
+        ManualFireRecordingConfig(),
+    )
+    with recorder._lock:
+        recorder._queued = 2
+
+    with pytest.raises(RuntimeError, match="queue is full"):
+        recorder.record(manual_event())
+
+    status = recorder.status()
+    assert status["failed"] == 1
+    assert status["rejected"] == 1
+    assert status["last_error"] == "Manual fire recording queue is full"
+
+    with recorder._lock:
+        recorder._queued = 0
+    recorder.close()
+
+
 def test_recorder_collects_post_roll_after_the_short_pre_roll_buffer(tmp_path: Path) -> None:
     pre_roll = [FramePacket(0, np.zeros((36, 64, 3), dtype=np.uint8), "stamp", 9.0)]
     future = [
@@ -168,8 +199,14 @@ def test_recorder_collects_post_roll_after_the_short_pre_roll_buffer(tmp_path: P
             super().__init__(pre_roll)
             self.now = 10.0
 
-        def wait_for_frame(self, after_sequence: int, timeout: float | None = None) -> FramePacket | None:
-            del timeout
+        def wait_for_frame(
+            self,
+            after_sequence: int,
+            timeout: float | None = None,
+            *,
+            copy: bool = True,
+        ) -> FramePacket | None:
+            del timeout, copy
             packet = next((item for item in future if item.sequence > after_sequence), None)
             if packet is not None:
                 self.now = packet.received_monotonic
