@@ -47,8 +47,9 @@ night_mode:
   enter_consecutive_frames: 5
   exit_consecutive_frames: 10
 
-# One asynchronous classification of the best valid in-frame motion candidate
-# after each event completes. The pinned MobileNet-SSD model is unchanged.
+# One asynchronous classification per qualified event. It uses the best frame
+# after completion by default, or the qualified live frame when auto-fire is
+# explicitly enabled. The pinned MobileNet-SSD model is unchanged.
 classifier:
   enabled: true
   model_definition: models/mobilenet-ssd/deploy.prototxt
