@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import OrderedDict, deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from time import monotonic, perf_counter
@@ -14,20 +14,38 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from .auto_fire import AutoFireDetection, AutoFireService, AutoFireTargetSnapshot
 from .camera_service import CameraService, FramePacket
-from .classifier import ClassifierEvidenceStore, EventClassifier
+from .classifier import ClassifierDetection, ClassifierEvidenceStore, ClassifierTask, EventClassifier
 from .config import AppConfig
 from .diagnostics import cleanup_oldest
 from .event_report import generate_reports, load_events
 from .event_storage import EventLogWriter, EventRecorder, SessionLog, enforce_retention, recover_incomplete_events
 from .files import timestamped_output_path
 from .frame_selection import BestEventFrameSelector
+from .manual_control import ManualControlService
 from .performance import AverageTimer, ThreadCpuMeter
 from .thread_names import set_current_thread_name
 from .watch_detection import MotionWatcherDetector, WatchDetectionResult, annotate_watch_frame
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _UnavailableAutoFireError(RuntimeError):
+    reason = "hardware_not_ready"
+
+
+class _UnavailableAutoFireCoordinator:
+    """Fail-closed placeholder when the shared physical coordinator was not built."""
+
+    @staticmethod
+    def cooldown_remaining_seconds() -> float:
+        return 0.0
+
+    @staticmethod
+    def automatic_engage(*_args: object, **_kwargs: object) -> object:
+        raise _UnavailableAutoFireError("The shared physical coordinator is unavailable")
 
 
 @dataclass(frozen=True)
@@ -61,6 +79,7 @@ class MotionRuntimeStatus:
     motion_thread_cpu_percent: float = 0.0
     annotations_rendered: int = 0
     idle_annotations_skipped: int = 0
+    auto_fire: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,6 +129,8 @@ class MotionProcessingService:
         detector: MotionWatcherDetector | None = None,
         classifier_service: EventClassifier | None = None,
         classifier_store: ClassifierEvidenceStore | None = None,
+        manual_control_service: ManualControlService | None = None,
+        auto_fire_service: AutoFireService | None = None,
         video_writer_factory: Callable[..., Any] = cv2.VideoWriter,
         image_writer: Callable[[str, np.ndarray], bool] = cv2.imwrite,
     ) -> None:
@@ -117,10 +138,23 @@ class MotionProcessingService:
         self.config = config
         self.detector = detector or MotionWatcherDetector(config.motion)
         self.classifier_store = classifier_store or ClassifierEvidenceStore(config)
-        self.classifier = classifier_service or EventClassifier(config.classifier, self.classifier_store)
         self._video_writer_factory = video_writer_factory
         self._image_writer = image_writer
         self._condition = threading.Condition()
+        self._live_auto_targets: dict[tuple[str, int], AutoFireTargetSnapshot] = {}
+        self.manual_control = manual_control_service
+        coordinator = manual_control_service or _UnavailableAutoFireCoordinator()
+        self.auto_fire = auto_fire_service or AutoFireService(
+            config.auto_fire,
+            coordinator,
+            self._auto_fire_target,
+            self._auto_fire_night_mode,
+        )
+        self.classifier = classifier_service or EventClassifier(
+            config.classifier,
+            self.classifier_store,
+            result_handler=self._handle_classifier_result,
+        )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._finalized = False
@@ -188,6 +222,7 @@ class MotionProcessingService:
     def start(self) -> None:
         """Start consuming frames; this method never starts or opens the camera."""
 
+        self.auto_fire.start_accepting()
         with self._condition:
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -204,6 +239,7 @@ class MotionProcessingService:
     def stop(self, timeout: float = 10.0) -> None:
         """Finish events/logs/reports without releasing the shared camera."""
 
+        self.auto_fire.begin_shutdown()
         self._stop_event.set()
         with self._condition:
             self._condition.notify_all()
@@ -251,6 +287,7 @@ class MotionProcessingService:
                 self._motion_cpu.percent,
                 self._annotations_rendered,
                 self._idle_annotations_skipped,
+                self.auto_fire.status(),
             )
 
     def status_dict(self) -> dict[str, Any]:
@@ -264,6 +301,31 @@ class MotionProcessingService:
     def recent_events(self) -> list[dict[str, Any]]:
         with self._condition:
             return [dict(event) for event in reversed(self._recent_events)]
+
+    def _auto_fire_target(self, event_id: str, track_id: int) -> AutoFireTargetSnapshot | None:
+        with self._condition:
+            return self._live_auto_targets.get((event_id, track_id))
+
+    def _auto_fire_night_mode(self) -> bool:
+        with self._condition:
+            return self._night_mode_paused
+
+    def _handle_classifier_result(
+        self,
+        task: ClassifierTask,
+        detections: list[ClassifierDetection],
+        error: str | None,
+        _record: dict[str, Any],
+    ) -> None:
+        if task.context != "auto_fire_live_event":
+            return
+        self.auto_fire.handle_classification(
+            event_id=task.event_id,
+            track_id=task.track_id,  # type: ignore[arg-type]
+            classified_observation_monotonic=task.target_observed_monotonic,  # type: ignore[arg-type]
+            detections=tuple(AutoFireDetection(item.label, item.confidence) for item in detections),
+            error=error,
+        )
 
     def mjpeg_frames(self):  # type: ignore[no-untyped-def]
         return self.camera.mjpeg_frames(
@@ -470,6 +532,7 @@ class MotionProcessingService:
             with self._condition:
                 self._active_events = 0
                 self._force_event_requested = False
+                self._live_auto_targets.clear()
             LOGGER.info(
                 "Night vision detected; event recording and classifier paused",
                 extra={"structured_data": {"event": "night_mode_paused", "evidence": self._night_mode_evidence}},
@@ -625,34 +688,97 @@ class MotionProcessingService:
                 if self._session is not None:
                     self._session.increment("confirmed_events")
                 if self.config.classifier.enabled:
-                    selector = BestEventFrameSelector(
-                        fallback_frame_number=self.config.classifier.fallback_event_frame_number,
-                        minimum_motion_area=self.config.motion.min_blob_area,
-                        selection_mode=self.config.classifier.frame_selection,
-                    )
-                    self._classifier_selectors[event.event_id] = selector
-                    self._classifier_clip_offsets[event.event_id] = len(pre_event_frames)
-                    self._consider_classifier_frame(selector, group, packet.frame)
+                    if self.config.auto_fire.enabled:
+                        self._update_live_auto_target(event.event_id, group, packet.frame, now)
+                        self._submit_live_auto_fire_classification(event, group, packet, now)
+                    else:
+                        selector = BestEventFrameSelector(
+                            fallback_frame_number=self.config.classifier.fallback_event_frame_number,
+                            minimum_motion_area=self.config.motion.min_blob_area,
+                            selection_mode=self.config.classifier.frame_selection,
+                        )
+                        self._classifier_selectors[event.event_id] = selector
+                        self._classifier_clip_offsets[event.event_id] = len(pre_event_frames)
+                        self._consider_classifier_frame(selector, group, packet.frame)
             elif group.track_id in self._recorder.active:
                 self._recorder.update(group.track_id, group, get_annotated(), now=now)
                 event = self._recorder.active[group.track_id]
+                if self.config.auto_fire.enabled:
+                    self._update_live_auto_target(event.event_id, group, packet.frame, now)
                 selector = self._classifier_selectors.get(event.event_id)
                 if selector is not None:
                     self._consider_classifier_frame(selector, group, packet.frame)
         for track_id, event in list(self._recorder.active.items()):
             if track_id not in groups_by_track:
+                with self._condition:
+                    self._live_auto_targets.pop((event.event_id, track_id), None)
                 self._recorder.update(track_id, None, get_annotated(), now=now)
                 selector = self._classifier_selectors.get(event.event_id)
                 if selector is not None:
                     self._consider_classifier_frame(selector, None, packet.frame)
             if self._recorder.should_finish(event, now):
                 self._record_completed_event(self._recorder.finish(track_id, now=now))
+                with self._condition:
+                    self._live_auto_targets.pop((event.event_id, track_id), None)
                 active = {item.directory for item in self._recorder.active.values()}
                 actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention, active_directories=active)
                 if self._session is not None:
                     self._session.add_retention_actions(actions)
         with self._condition:
             self._active_events = len(self._recorder.active)
+
+    def _update_live_auto_target(
+        self,
+        event_id: str,
+        group: Any,
+        frame: np.ndarray,
+        observed_monotonic: float,
+    ) -> None:
+        centroid_x, centroid_y = group.centroid
+        frame_height, frame_width = frame.shape[:2]
+        snapshot = AutoFireTargetSnapshot(
+            event_id=event_id,
+            track_id=int(group.track_id),
+            observed_monotonic=observed_monotonic,
+            pixel_x=max(0, round(float(centroid_x))),
+            pixel_y=max(0, round(float(centroid_y))),
+            bounding_box=tuple(int(value) for value in group.bounding_box),  # type: ignore[arg-type]
+            frame_width=int(frame_width),
+            frame_height=int(frame_height),
+            confirmed=bool(group.confirmed),
+            event_eligible=bool(group.event_eligible),
+            provisional_category=str(group.provisional_category),
+        )
+        with self._condition:
+            self._live_auto_targets[(snapshot.event_id, snapshot.track_id)] = snapshot
+
+    def _submit_live_auto_fire_classification(
+        self,
+        event: Any,
+        group: Any,
+        packet: FramePacket,
+        observed_monotonic: float,
+    ) -> None:
+        centroid_x, centroid_y = group.centroid
+        width, height = int(group.bounding_box[2]), int(group.bounding_box[3])
+        self.classifier.submit(
+            event.event_id,
+            event.directory,
+            1,
+            packet.frame,
+            tuple(int(value) for value in group.bounding_box),
+            selection_method="qualified_live_target",
+            selected_motion_bounding_box_area=width * height,
+            total_event_frames_considered=1,
+            context="auto_fire_live_event",
+            track_id=int(group.track_id),
+            frame_sequence=getattr(packet, "sequence", None),
+            target_pixel=(max(0, round(float(centroid_x))), max(0, round(float(centroid_y)))),
+            target_observed_monotonic=observed_monotonic,
+            target_provisional_category=str(group.provisional_category),
+            target_confirmed=bool(group.confirmed),
+            target_event_eligible=bool(group.event_eligible),
+        )
 
     @staticmethod
     def _consider_classifier_frame(
@@ -734,6 +860,28 @@ class MotionProcessingService:
 
     def _record_completed_event(self, record: dict[str, Any]) -> None:
         self._submit_completed_event(record)
+        snapshot_path = record.get("snapshot_path")
+        event_directory = (
+            Path(snapshot_path).parent
+            if isinstance(snapshot_path, str) and snapshot_path
+            else None
+        )
+        classification = (
+            None
+            if event_directory is None
+            else self.classifier_store.reconcile_completed_event(event_directory)
+        )
+        if classification is not None and event_directory is not None:
+            record = {
+                **record,
+                "classification_path": str(event_directory / "classification.json"),
+                "classifier_input_path": classification.get("input_image_path"),
+                "original_frame_path": classification.get("original_frame_path"),
+                "predicted_class": classification.get("top_label"),
+                "prediction_confidence": classification.get("top_confidence"),
+                "classification_status": classification.get("classification_status"),
+                "classification_error": classification.get("error"),
+            }
         with self._condition:
             self._recent_events.append(record)
             self._last_event_summary = dict(record)
@@ -824,8 +972,9 @@ class MotionProcessingService:
         if self._recorder is not None:
             for record in self._recorder.finish_all(now=now):
                 self._record_completed_event(record)
-            with self._condition:
-                self._active_events = 0
+        with self._condition:
+            self._active_events = 0
+            self._live_auto_targets.clear()
         actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention)
         self._flush_suppressed_errors("Motion processor stopped", save_session=False)
         if self._session is not None:

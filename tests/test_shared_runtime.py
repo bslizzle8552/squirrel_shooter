@@ -17,6 +17,7 @@ from squirrel_shooter.app import (
     ApplicationRuntime,
     DashboardServer,
     _apply_overrides,
+    build_application_runtime,
     build_parser,
     critical_worker_failure,
     log_runtime_performance,
@@ -476,7 +477,158 @@ def test_runtime_performance_snapshot_exposes_major_stage_costs(tmp_path: Path) 
     assert payload["dashboard_encode_average_ms"] == 0.0
     assert payload["dashboard_estimated_egress_mbps"] == 0.0
     assert payload["classifier_queue_depth"] == 0
+    assert payload["auto_fire_candidates_evaluated"] == 0
+    assert payload["auto_fire_accepted"] == 0
+    assert payload["auto_fire_rejected"] == 0
+    assert payload["auto_fire_shots_in_rolling_window"] == 0
     assert payload["manual_recording_active"] is False
+
+
+def test_headless_auto_fire_builds_one_shared_physical_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime_config(tmp_path)
+    config = replace(
+        config,
+        dashboard=replace(config.dashboard, enabled=False),
+        auto_fire=replace(config.auto_fire, enabled=True, allowed_classes=("dog", "bird")),
+    )
+    camera = SimpleNamespace()
+    control = SimpleNamespace()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(app_module, "CameraService", lambda *_args, **_kwargs: camera)
+    monkeypatch.setattr(
+        app_module,
+        "build_manual_control_service",
+        lambda *_args, **_kwargs: control,
+    )
+
+    def build_motion(
+        supplied_camera: object,
+        supplied_config: object,
+        *,
+        manual_control_service: object,
+    ) -> object:
+        captured.update(
+            camera=supplied_camera,
+            config=supplied_config,
+            control=manual_control_service,
+        )
+        return SimpleNamespace()
+
+    monkeypatch.setattr(app_module, "MotionProcessingService", build_motion)
+
+    runtime = build_application_runtime(config)
+
+    assert runtime.camera is camera
+    assert runtime.manual_control is control
+    assert runtime.motion is not None
+    assert captured == {"camera": camera, "config": config, "control": control}
+
+
+def test_runtime_composition_failure_cleans_prebuilt_physical_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime_config(tmp_path)
+    config = replace(
+        config,
+        dashboard=replace(config.dashboard, enabled=False),
+        auto_fire=replace(config.auto_fire, enabled=True, allowed_classes=("dog", "bird")),
+    )
+    cleanup_calls: list[str] = []
+    control = SimpleNamespace(cleanup=lambda: cleanup_calls.append("cleanup"))
+    monkeypatch.setattr(app_module, "CameraService", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        app_module,
+        "build_manual_control_service",
+        lambda *_args, **_kwargs: control,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "MotionProcessingService",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("composition failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="composition failed"):
+        build_application_runtime(config)
+
+    assert cleanup_calls == ["cleanup"]
+
+
+def test_runtime_camera_start_failure_cleans_shared_control_before_returning(
+    tmp_path: Path,
+) -> None:
+    config = runtime_config(tmp_path)
+    calls: list[str] = []
+
+    class Camera:
+        def start(self) -> None:
+            calls.append("camera_start")
+            raise RuntimeError("synthetic camera start failure")
+
+        def stop(self, *, timeout: float) -> None:
+            del timeout
+            calls.append("camera_stop")
+
+    class Motion:
+        def start(self) -> None:
+            raise AssertionError("motion must not start after the camera fails")
+
+    control = SimpleNamespace(cleanup=lambda: calls.append("control_cleanup"))
+    runtime = ApplicationRuntime(
+        config,
+        camera=Camera(),  # type: ignore[arg-type]
+        motion=Motion(),  # type: ignore[arg-type]
+        manual_control=control,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic camera start failure"):
+        runtime.start()
+
+    assert calls == ["camera_start", "control_cleanup", "camera_stop"]
+
+
+def test_runtime_shutdown_stops_candidates_then_control_then_camera(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+    calls: list[str] = []
+
+    class Camera:
+        def start(self) -> None:
+            calls.append("camera_start")
+
+        def stop(self, *, timeout: float) -> None:
+            del timeout
+            calls.append("camera_stop")
+
+    class Motion:
+        def start(self) -> None:
+            calls.append("motion_start")
+
+        def stop(self, *, timeout: float) -> None:
+            del timeout
+            calls.append("motion_stop")
+
+    control = SimpleNamespace(cleanup=lambda: calls.append("control_cleanup"))
+    runtime = ApplicationRuntime(
+        config,
+        camera=Camera(),  # type: ignore[arg-type]
+        motion=Motion(),  # type: ignore[arg-type]
+        manual_control=control,  # type: ignore[arg-type]
+    )
+
+    runtime.start()
+    runtime.stop()
+
+    assert calls == [
+        "camera_start",
+        "motion_start",
+        "motion_stop",
+        "control_cleanup",
+        "camera_stop",
+    ]
 
 
 def test_runtime_telemetry_failure_does_not_escape_into_service_loop(

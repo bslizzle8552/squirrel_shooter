@@ -19,6 +19,7 @@ from .manual_fire_recording import (
     ManualFireRecorder,
     ManualFireRecordingConfig,
     ManualFireRecordingSink,
+    new_auto_fire_event_id,
     new_manual_fire_event_id,
 )
 from .pan_tilt import PanTiltConfig, PanTiltController, PanTiltPosition, clamp_angle
@@ -58,6 +59,15 @@ class FireCooldownError(ControlError):
     def __init__(self, remaining_seconds: float) -> None:
         self.remaining_seconds = remaining_seconds
         super().__init__(f"Valve cooldown active for {math.ceil(remaining_seconds)} more seconds")
+
+
+class AutomaticEngagementError(ControlError):
+    """Typed automatic-engagement rejection or failure."""
+
+    def __init__(self, reason: str, message: str | None = None, *, shot_attempted: bool = False) -> None:
+        self.reason = reason
+        self.shot_attempted = shot_attempted
+        super().__init__(message or reason.replace("_", " "))
 
 
 @dataclass(frozen=True)
@@ -183,6 +193,17 @@ class InterpolatedAim:
     tilt: float
     cell: tuple[int, int, int, int]
     triangle: None = None
+
+
+@dataclass(frozen=True)
+class AutomaticEngagementResult:
+    """Authoritative facts returned after one completed automatic engagement."""
+
+    aim: InterpolatedAim
+    event_id: str
+    cooldown_seconds: float
+    recording_queued: bool
+    shot_attempted: bool = True
 
 
 CALIBRATION_CELLS = (
@@ -458,20 +479,87 @@ class CalibrationStore:
         self.path = path
         self._lock = threading.Lock()
         self._cache: list[CalibrationPoint] | None = None
+        self._frame_size: tuple[int, int] | None = None
+        self._frame_verified_points: set[int] = set()
 
     def load(self) -> list[CalibrationPoint]:
         with self._lock:
             return list(self._points_unlocked())
 
-    def save(self, point: CalibrationPoint) -> list[CalibrationPoint]:
+    def frame_size(self) -> tuple[int, int] | None:
+        """Return native geometry only after all nine pixel anchors verify it."""
+
+        with self._lock:
+            self._points_unlocked()
+            if self._frame_size is None or not set(range(1, 10)).issubset(
+                self._frame_verified_points
+            ):
+                return None
+            return self._frame_size
+
+    def frame_geometry_status(self) -> dict[str, object]:
+        """Expose bounded calibration-geometry migration progress for health/UI."""
+
+        with self._lock:
+            self._points_unlocked()
+            return {
+                "width": None if self._frame_size is None else self._frame_size[0],
+                "height": None if self._frame_size is None else self._frame_size[1],
+                "verified_points": sorted(self._frame_verified_points),
+                "complete": self._frame_size is not None
+                and set(range(1, 10)).issubset(self._frame_verified_points),
+            }
+
+    def save(
+        self,
+        point: CalibrationPoint,
+        *,
+        frame_width: int | None = None,
+        frame_height: int | None = None,
+    ) -> list[CalibrationPoint]:
         with self._lock:
             points = {item.point: item for item in self._points_unlocked()}
+            previous = points.get(point.point)
+            if (frame_width is None) != (frame_height is None):
+                raise ValueError("frame_width and frame_height must be provided together")
+            if frame_width is not None and frame_height is not None:
+                if (
+                    isinstance(frame_width, bool)
+                    or not isinstance(frame_width, int)
+                    or frame_width <= 0
+                    or isinstance(frame_height, bool)
+                    or not isinstance(frame_height, int)
+                    or frame_height <= 0
+                ):
+                    raise ValueError("Calibration frame dimensions must be positive integers")
+                requested_size = (frame_width, frame_height)
+                if self._frame_size is not None and requested_size != self._frame_size:
+                    raise ValueError(
+                        "Calibration frame dimensions changed; start a new calibration file "
+                        "instead of mixing pixel geometries"
+                    )
+                self._frame_size = requested_size
+                self._frame_verified_points.add(point.point)
+            elif previous is not None and (
+                previous.pixel_x != point.pixel_x or previous.pixel_y != point.pixel_y
+            ):
+                self._frame_verified_points.discard(point.point)
             points[point.point] = point
             ordered = [points[index] for index in sorted(points)]
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.path.with_name(f".{self.path.name}.tmp")
+            payload: dict[str, object] = {
+                "schema_version": 2,
+                "points": [asdict(item) for item in ordered],
+            }
+            if self._frame_size is not None:
+                payload.update(
+                    frame_width=self._frame_size[0],
+                    frame_height=self._frame_size[1],
+                    frame_verified_points=sorted(self._frame_verified_points),
+                )
             temporary.write_text(
-                json.dumps({"points": [asdict(item) for item in ordered]}, indent=2) + "\n",
+                json.dumps(payload, indent=2) + "\n",
                 encoding="utf-8",
             )
             os.replace(temporary, self.path)
@@ -490,9 +578,40 @@ class CalibrationStore:
         records = raw.get("points") if isinstance(raw, dict) else None
         if not isinstance(records, list):
             raise ValueError("Calibration file must contain a points list")
+        frame_width = raw.get("frame_width")
+        frame_height = raw.get("frame_height")
+        raw_verified_points = raw.get("frame_verified_points", [])
+        if (
+            not isinstance(raw_verified_points, list)
+            or any(
+                isinstance(point, bool) or not isinstance(point, int) or not 1 <= point <= 9
+                for point in raw_verified_points
+            )
+            or len(set(raw_verified_points)) != len(raw_verified_points)
+        ):
+            raise ValueError("Calibration file frame_verified_points must be unique point numbers 1-9")
+        if frame_width is None and frame_height is None:
+            if raw_verified_points:
+                raise ValueError("Calibration file cannot verify frame points without dimensions")
+            self._frame_size = None
+            self._frame_verified_points = set()
+        elif (
+            isinstance(frame_width, bool)
+            or not isinstance(frame_width, int)
+            or frame_width <= 0
+            or isinstance(frame_height, bool)
+            or not isinstance(frame_height, int)
+            or frame_height <= 0
+        ):
+            raise ValueError("Calibration file frame dimensions must be positive integers")
+        else:
+            self._frame_size = (frame_width, frame_height)
+            self._frame_verified_points = set(raw_verified_points)
         points = [CalibrationPoint(**record) for record in records]
         if len({point.point for point in points}) != len(points):
             raise ValueError("Calibration file contains duplicate point numbers")
+        if not self._frame_verified_points.issubset({point.point for point in points}):
+            raise ValueError("Calibration file verifies frame geometry for a missing point")
         return sorted(points, key=lambda point: point.point)
 
 
@@ -544,6 +663,7 @@ class ManualControlService:
         self._position_commanded = False
         self._active_calibration_point = 1
         self._last_fire_completed_at: float | None = None
+        self._last_fire_cooldown_seconds = float(control_config.fire_cooldown_seconds)
         self._target_pixel: tuple[int, int] | None = None
         self._target_aim: InterpolatedAim | None = None
         self._target_in_range: bool | None = None
@@ -560,16 +680,28 @@ class ManualControlService:
     def valve_available(self) -> bool:
         return not isinstance(self._valve, DisabledValveController)
 
+    def cooldown_remaining_seconds(self) -> float:
+        """Return the shared backend cooldown without loading status metadata."""
+
+        return self._cooldown_remaining(self._clock())
+
     def status(self) -> dict[str, object]:
         now = self._clock()
         remaining = self._cooldown_remaining(now)
         state = self._transient_state or (ControlState.COOLDOWN if remaining > 0 else ControlState.IDLE)
         try:
             calibration_points = self._calibration.load()
+            calibration_frame = self._calibration.frame_geometry_status()
             points = [self._calibration_point_payload(point) for point in calibration_points]
             calibration_error = None
         except (OSError, ValueError, TypeError) as exc:
             calibration_points = []
+            calibration_frame = {
+                "width": None,
+                "height": None,
+                "verified_points": [],
+                "complete": False,
+            }
             points = []
             calibration_error = str(exc)
         if calibration_error is not None:
@@ -606,6 +738,7 @@ class ManualControlService:
             "fire_pulse_seconds": self.config.fire_pulse_seconds,
             "active_calibration_point": self._active_calibration_point,
             "calibration_points": points,
+            "calibration_frame": calibration_frame,
             "completed_calibration_count": sum(bool(point["complete"]) for point in points),
             "targeting": self._targeting_payload(
                 enabled=targeting_enabled,
@@ -736,6 +869,224 @@ class ManualControlService:
             self._fire_and_park_locked()
             return position
 
+    def automatic_engage(
+        self,
+        pixel_x: int,
+        pixel_y: int,
+        *,
+        frame_width: int,
+        frame_height: int,
+        cooldown_seconds: float,
+        final_safety_check: Callable[[], bool],
+        evidence: dict[str, object],
+    ) -> AutomaticEngagementResult:
+        """Reserve the shared coordinator and perform one bounded automatic shot.
+
+        Automatic callers are never queued behind another physical action. The
+        target is interpolated twice from the same native pixel, and the supplied
+        final guard runs exactly once immediately before the valve checks/pulse.
+        """
+
+        for name, value in (("pixel_x", pixel_x), ("pixel_y", pixel_y)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AutomaticEngagementError("invalid_request", f"{name} must be a non-negative integer")
+        for name, value in (("frame_width", frame_width), ("frame_height", frame_height)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise AutomaticEngagementError(
+                    "invalid_request",
+                    f"{name} must be a positive integer",
+                )
+        if pixel_x >= frame_width or pixel_y >= frame_height:
+            raise AutomaticEngagementError(
+                "invalid_request",
+                "Automatic target pixel must be inside the current native camera frame",
+            )
+        if (
+            isinstance(cooldown_seconds, bool)
+            or not isinstance(cooldown_seconds, (int, float))
+            or not math.isfinite(float(cooldown_seconds))
+            or cooldown_seconds <= 0
+        ):
+            raise AutomaticEngagementError(
+                "invalid_request",
+                "cooldown_seconds must be a finite number greater than zero",
+            )
+        if not callable(final_safety_check):
+            raise AutomaticEngagementError("invalid_request", "final_safety_check must be callable")
+        if not isinstance(evidence, dict):
+            raise AutomaticEngagementError("invalid_request", "evidence must be a dictionary")
+        if self._pan_tilt is None:
+            raise AutomaticEngagementError(
+                "hardware_not_ready",
+                self._servo_error or "Servo control is disabled",
+            )
+        if not self.valve_available:
+            raise AutomaticEngagementError(
+                "valve_disabled",
+                self._valve_error or "Valve control is disabled",
+            )
+        if self._fire_recorder is None:
+            raise AutomaticEngagementError(
+                "recording_unavailable",
+                "Automatic firing requires the shared fire recorder",
+            )
+        if not self._lock.acquire(blocking=False):
+            raise AutomaticEngagementError(
+                "coordinator_busy",
+                "Automatic engagement rejected while another physical-control action is active",
+            )
+
+        movement_started = False
+        park_attempted = False
+        shot_attempted = False
+        try:
+            if self._valve.state is not ValveState.CLOSED:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    "Automatic engagement rejected because the valve is not confirmed closed",
+                )
+            remaining = self._cooldown_remaining(self._clock())
+            if remaining > 0:
+                raise AutomaticEngagementError(
+                    "cooldown_active",
+                    f"Automatic engagement rejected during shared cooldown ({remaining:.3f}s remaining)",
+                )
+            self._validate_auto_calibration_frame_locked(frame_width, frame_height)
+
+            self._target_pixel = (pixel_x, pixel_y)
+            self._target_aim = None
+            self._target_in_range = None
+            self._targeting_status = "VALIDATING AUTO TARGET"
+            self._targeting_error = None
+            try:
+                aim = interpolate_calibration_target(
+                    self._calibration.load(),
+                    pixel_x,
+                    pixel_y,
+                    self.pan_tilt_config,
+                )
+            except (ControlError, OSError, ValueError, TypeError) as exc:
+                reason = "outside_safe_bounds" if "outside the calibrated area" in str(exc).lower() else "interpolation_failed"
+                self._target_in_range = False if reason == "outside_safe_bounds" else None
+                self._targeting_status = "AUTO TARGET REJECTED"
+                self._targeting_error = str(exc)
+                raise AutomaticEngagementError(reason, str(exc)) from exc
+            self._target_aim = aim
+            self._target_in_range = True
+
+            movement_started = True
+            self._targeting_status = "AUTO MOVING"
+            try:
+                self._move_locked(PanTiltPosition(aim.pan, aim.tilt), action="automatic")
+            except Exception as exc:
+                self._targeting_status = "AUTO MOVE ERROR"
+                self._targeting_error = str(exc)
+                raise AutomaticEngagementError("movement_failed", str(exc)) from exc
+
+            self._targeting_status = "AUTO FINAL SAFETY CHECK"
+            self._validate_auto_calibration_frame_locked(frame_width, frame_height)
+            try:
+                final_aim = interpolate_calibration_target(
+                    self._calibration.load(),
+                    pixel_x,
+                    pixel_y,
+                    self.pan_tilt_config,
+                )
+            except (ControlError, OSError, ValueError, TypeError) as exc:
+                reason = "outside_safe_bounds" if "outside the calibrated area" in str(exc).lower() else "interpolation_failed"
+                raise AutomaticEngagementError(reason, str(exc)) from exc
+            if final_aim != aim:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    "Automatic target interpolation changed during movement",
+                )
+            try:
+                final_safe = final_safety_check()
+            except Exception as exc:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    f"Final automatic safety check failed: {type(exc).__name__}: {exc}",
+                ) from exc
+            if final_safe is not True:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    "Final automatic safety check rejected the engagement",
+                )
+            if self._valve.state is not ValveState.CLOSED:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    "Valve is not confirmed closed immediately before automatic fire",
+                )
+            remaining = self._cooldown_remaining(self._clock())
+            if remaining > 0:
+                raise AutomaticEngagementError(
+                    "cooldown_active",
+                    f"Shared cooldown became active ({remaining:.3f}s remaining)",
+                )
+
+            event_evidence = dict(evidence)
+            event_evidence.update(
+                target_pixel_x=pixel_x,
+                target_pixel_y=pixel_y,
+                target_frame_width=frame_width,
+                target_frame_height=frame_height,
+                calculated_pan=final_aim.pan,
+                calculated_tilt=final_aim.tilt,
+                cooldown_seconds=float(cooldown_seconds),
+                safe_bound_result="inside_calibrated_area",
+                interpolation_result="success",
+                calibration_cell=list(final_aim.cell),
+            )
+            shot_attempted = True
+            try:
+                event_id, recording_queued = self._fire_locked(
+                    cooldown_seconds=float(cooldown_seconds),
+                    event_type="auto_fire",
+                    evidence=event_evidence,
+                    crop_center=(pixel_x, pixel_y, "auto_fire_target_pixel"),
+                )
+            except FireCooldownError as exc:
+                shot_attempted = False
+                raise AutomaticEngagementError("cooldown_active", str(exc), shot_attempted=False) from exc
+            except Exception as exc:
+                raise AutomaticEngagementError(
+                    "valve_failure",
+                    f"Automatic valve pulse failed: {type(exc).__name__}: {exc}",
+                    shot_attempted=True,
+                ) from exc
+
+            park_attempted = True
+            try:
+                self._park_locked()
+            except Exception as exc:
+                raise AutomaticEngagementError(
+                    "park_failed",
+                    str(exc),
+                    shot_attempted=True,
+                ) from exc
+            return AutomaticEngagementResult(
+                aim=final_aim,
+                event_id=event_id,
+                cooldown_seconds=float(cooldown_seconds),
+                recording_queued=recording_queued,
+            )
+        except AutomaticEngagementError as exc:
+            if movement_started and not park_attempted:
+                self._attempt_automatic_park_locked()
+            if exc.shot_attempted or not shot_attempted:
+                raise
+            raise AutomaticEngagementError(exc.reason, str(exc), shot_attempted=True) from exc
+        except Exception as exc:
+            if movement_started and not park_attempted:
+                self._attempt_automatic_park_locked()
+            raise AutomaticEngagementError(
+                "safety_state_invalid",
+                f"Automatic engagement failed: {type(exc).__name__}: {exc}",
+                shot_attempted=shot_attempted,
+            ) from exc
+        finally:
+            self._lock.release()
+
     def save_calibration_point(
         self,
         point: int,
@@ -788,7 +1139,11 @@ class ManualControlService:
                 existing.pan if existing is not None else None,
                 existing.tilt if existing is not None else None,
             )
-            self._calibration.save(record)
+            self._calibration.save(
+                record,
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
             self._targeting_error = None
             self._targeting_status = None
             return record
@@ -818,15 +1173,18 @@ class ManualControlService:
             return record
 
     def cleanup(self) -> None:
-        try:
-            self._valve.cleanup()
-        finally:
+        # Serialize teardown with the same physical-control lock so valve,
+        # servo, and recorder cleanup can never race an in-flight engagement.
+        with self._lock:
             try:
-                if self._pan_tilt is not None:
-                    self._pan_tilt.cleanup()
+                self._valve.cleanup()
             finally:
-                if self._fire_recorder is not None:
-                    self._fire_recorder.close()
+                try:
+                    if self._pan_tilt is not None:
+                        self._pan_tilt.cleanup()
+                finally:
+                    if self._fire_recorder is not None:
+                        self._fire_recorder.close()
 
     def _move_locked(self, target: PanTiltPosition, *, action: str = "manual") -> PanTiltPosition:
         if self._valve.state is ValveState.OPEN:
@@ -869,6 +1227,50 @@ class ManualControlService:
             return
         self._park_locked()
 
+    def _attempt_automatic_park_locked(self) -> None:
+        """Best-effort PARK after a moved automatic engagement is cancelled."""
+
+        if self._valve.state is not ValveState.CLOSED:
+            try:
+                self._valve.close()
+            except Exception:
+                LOGGER.exception("Valve close also failed while cancelling automatic engagement")
+        if self._pan_tilt is None or self._valve.state is not ValveState.CLOSED:
+            LOGGER.error(
+                "Automatic PARK skipped after failure; servo_available=%s valve_state=%s",
+                self._pan_tilt is not None,
+                self._valve.state.value,
+            )
+            return
+        try:
+            self._park_locked()
+        except Exception:
+            LOGGER.exception("Automatic PARK also failed while preserving the original engagement error")
+
+    def _validate_auto_calibration_frame_locked(
+        self,
+        frame_width: int,
+        frame_height: int,
+    ) -> None:
+        try:
+            calibrated_size = self._calibration.frame_size()
+        except (OSError, ValueError, TypeError) as exc:
+            raise AutomaticEngagementError(
+                "interpolation_failed",
+                f"Could not validate calibration frame geometry: {exc}",
+            ) from exc
+        if calibrated_size is None:
+            raise AutomaticEngagementError(
+                "calibration_frame_unknown",
+                "Automatic engagement requires calibration saved with native frame dimensions",
+            )
+        if calibrated_size != (frame_width, frame_height):
+            raise AutomaticEngagementError(
+                "calibration_frame_mismatch",
+                "Current camera frame geometry does not match the saved calibration "
+                f"({frame_width}x{frame_height} != {calibrated_size[0]}x{calibrated_size[1]})",
+            )
+
     def _park_locked(self) -> PanTiltPosition:
         target = PanTiltPosition(
             clamp_angle(self.pan_tilt_config.park_pan, self.pan_tilt_config.pan_min, self.pan_tilt_config.pan_max),
@@ -887,47 +1289,88 @@ class ManualControlService:
         LOGGER.info("Park complete: pan=%.2f tilt=%.2f", self._pan, self._tilt)
         return PanTiltPosition(self._pan, self._tilt)
 
-    def _fire_locked(self) -> None:
+    def _fire_locked(
+        self,
+        *,
+        cooldown_seconds: float | None = None,
+        event_type: str = "manual_fire",
+        evidence: dict[str, object] | None = None,
+        crop_center: tuple[int | None, int | None, str] | None = None,
+    ) -> tuple[str, bool]:
+        applied_cooldown = float(
+            self.config.fire_cooldown_seconds if cooldown_seconds is None else cooldown_seconds
+        )
+        if not math.isfinite(applied_cooldown) or applied_cooldown <= 0:
+            raise ValueError("cooldown_seconds must be a finite number greater than zero")
+        if event_type not in {"manual_fire", "auto_fire"}:
+            raise ValueError("event_type must be manual_fire or auto_fire")
         remaining = self._cooldown_remaining(self._clock())
         if remaining > 0:
             raise FireCooldownError(remaining)
         fire_started = self._clock()
         fire_timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
-        crop_center_x, crop_center_y, crop_center_source = self._recording_crop_center_locked()
+        crop_center_x, crop_center_y, crop_center_source = (
+            self._recording_crop_center_locked() if crop_center is None else crop_center
+        )
         shot_pan, shot_tilt = self._pan, self._tilt
         self._transient_state = ControlState.FIRING
         self._targeting_status = "FIRING"
         LOGGER.info("Valve pulse started: duration=%.2fs", self.config.fire_pulse_seconds)
+        fire_completed: float | None = None
+        closure_error: Exception | None = None
         try:
             pulse_valve(self._valve, self.config.fire_pulse_seconds, sleep=self._sleep)
         finally:
-            self._last_fire_completed_at = self._clock()
+            if self._valve.state is not ValveState.CLOSED:
+                try:
+                    self._valve.close()
+                except Exception as exc:
+                    closure_error = exc
+                    LOGGER.exception("Valve close retry failed after pulse")
+            if self._valve.state is ValveState.CLOSED:
+                fire_completed = self._clock()
+                self._last_fire_completed_at = fire_completed
+                self._last_fire_cooldown_seconds = applied_cooldown
             self._transient_state = None
-            LOGGER.info("Valve pulse ended; valve state=%s; cooldown started", self._valve.state.value)
-        LOGGER.info("Manual fire pulse completed")
+            LOGGER.info(
+                "Valve pulse ended; valve state=%s; cooldown_started=%s",
+                self._valve.state.value,
+                fire_completed is not None,
+            )
+        if closure_error is not None or fire_completed is None:
+            raise ControlError("Valve closure could not be confirmed after pulse") from closure_error
+        LOGGER.info("%s pulse completed", event_type.replace("_", " ").title())
         LOGGER.info(
-            "Manual FIRE accepted: pan=%.2f tilt=%.2f pulse=%.2fs",
+            "%s accepted: pan=%.2f tilt=%.2f pulse=%.2fs cooldown=%.2fs",
+            event_type.replace("_", " ").upper(),
             shot_pan,
             shot_tilt,
             self.config.fire_pulse_seconds,
+            applied_cooldown,
         )
+        event_id = new_auto_fire_event_id() if event_type == "auto_fire" else new_manual_fire_event_id()
+        recording_queued = False
         if self._fire_recorder is not None:
             event = ManualFireEvent(
-                event_id=new_manual_fire_event_id(),
+                event_id=event_id,
                 timestamp=fire_timestamp,
                 fire_started_monotonic=fire_started,
-                fire_completed_monotonic=self._last_fire_completed_at,
+                fire_completed_monotonic=fire_completed,
                 pan=shot_pan,
                 tilt=shot_tilt,
                 fire_pulse_seconds=self.config.fire_pulse_seconds,
                 crop_center_x=crop_center_x,
                 crop_center_y=crop_center_y,
                 crop_center_source=crop_center_source,
+                event_type=event_type,
+                evidence={} if evidence is None else dict(evidence),
             )
             try:
                 self._fire_recorder.record(event)
+                recording_queued = True
             except Exception as exc:
-                LOGGER.error("Manual fire recording failed to start: %s", exc, exc_info=True)
+                LOGGER.error("%s recording failed to start: %s", event_type, exc, exc_info=True)
+        return event_id, recording_queued
 
     def _recording_crop_center_locked(self) -> tuple[int | None, int | None, str]:
         aim = self._target_aim
@@ -947,7 +1390,7 @@ class ManualControlService:
     def _cooldown_remaining(self, now: float) -> float:
         if self._last_fire_completed_at is None:
             return 0.0
-        return max(0.0, self.config.fire_cooldown_seconds - (now - self._last_fire_completed_at))
+        return max(0.0, self._last_fire_cooldown_seconds - (now - self._last_fire_completed_at))
 
     @staticmethod
     def _display_angle(angle: float) -> int | float:

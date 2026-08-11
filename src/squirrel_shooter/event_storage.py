@@ -22,7 +22,7 @@ from .watch_detection import GroupedCandidate
 
 
 EVENT_FIELDS = (
-    "event_id", "session_id", "capture_method", "start_timestamp", "end_timestamp", "duration",
+    "event_id", "track_id", "session_id", "capture_method", "start_timestamp", "end_timestamp", "duration",
     "snapshot_path", "snapshot_file_role", "clip_path", "clip_file_role",
     "provisional_category", "movement_attributes", "heuristic_score", "minimum_area", "maximum_area",
     "average_area", "foreground_pixel_coverage", "frame_coverage", "inclusion_zone_coverage",
@@ -100,6 +100,7 @@ class EventLogWriter:
         self.retained_rotations = config.logging.retained_log_rotations
 
     def append_event(self, event: dict[str, Any]) -> None:
+        self._rotate_csv_if_schema_changed()
         if self._at_limit(self.csv_path) or self._at_limit(self.jsonl_path):
             self._rotate(self.csv_path)
             self._rotate(self.jsonl_path)
@@ -113,6 +114,21 @@ class EventLogWriter:
             handle.flush()
             os.fsync(handle.fileno())
         self._append_jsonl(self.jsonl_path, event)
+
+    def _rotate_csv_if_schema_changed(self) -> None:
+        """Preserve an older CSV before adding columns to the active schema."""
+
+        try:
+            if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
+                return
+            with self.csv_path.open(newline="", encoding="utf-8") as handle:
+                header = next(csv.reader(handle), None)
+        except OSError:
+            # Let the normal append surface the filesystem failure without
+            # destructively replacing the original log.
+            return
+        if header != list(EVENT_FIELDS):
+            self._rotate(self.csv_path)
 
     def append_rejection(self, rejection: dict[str, Any]) -> None:
         if self._at_limit(self.rejection_path):
@@ -241,6 +257,7 @@ class SessionLog:
 @dataclass
 class ActiveEvent:
     event_id: str
+    track_id: int
     directory: Path
     marker: Path
     snapshot_path: Path
@@ -302,7 +319,7 @@ class EventRecorder:
             marker.unlink(missing_ok=True)
             raise OSError(f"OpenCV could not open event clip {clip_incomplete}")
         event = ActiveEvent(
-            event_id, directory, marker, directory / "snapshot.jpg", clip_incomplete, directory / "clip.avi",
+            event_id, track_id, directory, marker, directory / "snapshot.jpg", clip_incomplete, directory / "clip.avi",
             now, datetime.now().astimezone().isoformat(timespec="milliseconds"), now, writer,
         )
         for _, buffered in pre_event_frames:
@@ -369,6 +386,7 @@ class EventRecorder:
             "schema_version": 1,
             "status": "complete",
             "event_id": event.event_id,
+            "track_id": event.track_id,
             "capture_method": "automatic_motion_event",
             "start_timestamp": event.start_timestamp,
             "end_timestamp": end_timestamp,

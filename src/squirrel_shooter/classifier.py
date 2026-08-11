@@ -21,15 +21,12 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from .classifier_labels import VOC_LABELS
 from .config import AppConfig, ClassifierConfig
 from .thread_names import set_current_thread_name
 
 
 LOGGER = logging.getLogger(__name__)
-VOC_LABELS = (
-    "background", "aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair", "cow",
-    "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor",
-)
 CLASSIFICATION_VIEWS = frozenset({"review", "unknown", "known", "errors", "false_positive"})
 OVERVIEW_CACHE_SECONDS = 10.0
 LEGACY_APPROVAL_LABELS = frozenset({"car", "person"})
@@ -93,6 +90,14 @@ class ClassifierTask:
     selected_motion_bounding_box_area: int | None = None
     total_event_frames_considered: int = 1
     original_image: np.ndarray | None = None
+    context: str = "completed_event"
+    track_id: int | None = None
+    frame_sequence: int | None = None
+    target_pixel: tuple[int, int] | None = None
+    target_observed_monotonic: float | None = None
+    target_provisional_category: str | None = None
+    target_confirmed: bool = False
+    target_event_eligible: bool = False
 
 
 @dataclass(frozen=True)
@@ -260,30 +265,17 @@ class ClassifierEvidenceStore:
         image_path = task.event_directory / CLASSIFIER_INPUT_FILENAME
         original_frame_path = task.event_directory / ORIGINAL_FRAME_FILENAME
         metadata_path = task.event_directory / CLASSIFICATION_FILENAME
-        event = self._load_event_record(task.event_directory)
-        source_camera = {
-            key: event.get(key)
-            for key in (
-                "source_camera",
-                "camera_device_index",
-                "actual_width",
-                "actual_height",
-                "camera_reported_fps",
-                "measured_camera_fps",
-            )
-            if event.get(key) is not None
-        }
         record = {
             "schema_version": CLASSIFICATION_SCHEMA_VERSION,
             "item_id": item_id,
             "event_id": task.event_id,
             "source_event_directory": str(task.event_directory),
-            "event_timestamp": event.get("start_timestamp"),
-            "session_id": event.get("session_id"),
-            "capture_method": event.get("capture_method", "automatic_motion_event"),
-            "software_version": event.get("software_version"),
-            "git_commit_sha": event.get("git_commit_sha"),
-            "source_camera": source_camera,
+            "event_timestamp": None,
+            "session_id": None,
+            "capture_method": "automatic_motion_event",
+            "software_version": None,
+            "git_commit_sha": None,
+            "source_camera": {},
             "classifier_timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
             "submitted_at": task.submitted_at,
             "frame_number": task.frame_number,
@@ -291,6 +283,18 @@ class ClassifierEvidenceStore:
             "frame_selection_method": task.selection_method,
             "selected_motion_bounding_box_area": task.selected_motion_bounding_box_area,
             "total_event_frames_considered": task.total_event_frames_considered,
+            "classification_context": task.context,
+            "track_id": task.track_id,
+            "source_frame_sequence": task.frame_sequence,
+            "target_pixel": (
+                None
+                if task.target_pixel is None
+                else {"x": task.target_pixel[0], "y": task.target_pixel[1]}
+            ),
+            "target_observed_monotonic": task.target_observed_monotonic,
+            "target_provisional_category": task.target_provisional_category,
+            "target_confirmed": task.target_confirmed,
+            "target_event_eligible": task.target_event_eligible,
             "source_bounding_box": _box_dict(task.source_bounding_box),
             "crop_bounding_box": _box_dict(task.crop_bounding_box),
             "model": model_name,
@@ -327,6 +331,29 @@ class ClassifierEvidenceStore:
             "reviewed_at": None,
         }
         with self._lock:
+            # Read finalized event metadata under the same lock used by the
+            # completion reconciler. Whichever side wins the race therefore
+            # observes and enriches the other side's durable record.
+            event = self._load_event_record(task.event_directory)
+            record.update(
+                event_timestamp=event.get("start_timestamp"),
+                session_id=event.get("session_id"),
+                capture_method=event.get("capture_method", "automatic_motion_event"),
+                software_version=event.get("software_version"),
+                git_commit_sha=event.get("git_commit_sha"),
+                source_camera={
+                    key: event.get(key)
+                    for key in (
+                        "source_camera",
+                        "camera_device_index",
+                        "actual_width",
+                        "actual_height",
+                        "camera_reported_fps",
+                        "measured_camera_fps",
+                    )
+                    if event.get(key) is not None
+                },
+            )
             if not self._image_writer(str(image_path), task.image):
                 raise OSError(f"Could not save classifier input image: {image_path}")
             if task.original_image is not None:
@@ -390,6 +417,45 @@ class ClassifierEvidenceStore:
             classification_error=record.get("error"),
         )
         _atomic_json(event_path, event)
+
+    def reconcile_completed_event(self, event_directory: Path) -> dict[str, Any] | None:
+        """Join an early live classification to metadata finalized with its event."""
+
+        metadata_path = event_directory / CLASSIFICATION_FILENAME
+        with self._lock:
+            try:
+                record = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            if not isinstance(record, dict):
+                return None
+            event = self._load_event_record(event_directory)
+            if not event:
+                return None
+            source_camera = {
+                key: event.get(key)
+                for key in (
+                    "source_camera",
+                    "camera_device_index",
+                    "actual_width",
+                    "actual_height",
+                    "camera_reported_fps",
+                    "measured_camera_fps",
+                )
+                if event.get(key) is not None
+            }
+            record.update(
+                event_timestamp=event.get("start_timestamp"),
+                session_id=event.get("session_id"),
+                capture_method=event.get("capture_method", "automatic_motion_event"),
+                software_version=event.get("software_version"),
+                git_commit_sha=event.get("git_commit_sha"),
+                source_camera=source_camera,
+            )
+            _atomic_json(metadata_path, record)
+            self._update_event_classification_metadata(event_directory, record)
+            self._invalidate_overview_cache()
+            return record
 
     def list_items(self, view: str) -> list[dict[str, Any]]:
         if view not in CLASSIFICATION_VIEWS:
@@ -825,10 +891,16 @@ class EventClassifier:
         store: ClassifierEvidenceStore,
         *,
         detector_factory: Callable[[], MobileNetSSDDetector] | None = None,
+        result_handler: Callable[
+            [ClassifierTask, list[ClassifierDetection], str | None, dict[str, Any]],
+            None,
+        ]
+        | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self._detector_factory = detector_factory or (lambda: MobileNetSSDDetector(config))
+        self._result_handler = result_handler
         self._tasks: queue.Queue[ClassifierTask] = queue.Queue(maxsize=config.worker_queue_capacity)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -876,6 +948,14 @@ class EventClassifier:
         selection_method: str = "configured_fallback",
         selected_motion_bounding_box_area: int | None = None,
         total_event_frames_considered: int = 1,
+        context: str = "completed_event",
+        track_id: int | None = None,
+        frame_sequence: int | None = None,
+        target_pixel: tuple[int, int] | None = None,
+        target_observed_monotonic: float | None = None,
+        target_provisional_category: str | None = None,
+        target_confirmed: bool = False,
+        target_event_eligible: bool = False,
     ) -> bool:
         with self._lock:
             paused = self._paused
@@ -894,6 +974,14 @@ class EventClassifier:
             selected_motion_bounding_box_area=selected_motion_bounding_box_area,
             total_event_frames_considered=total_event_frames_considered,
             original_image=frame.copy(),
+            context=context,
+            track_id=track_id,
+            frame_sequence=frame_sequence,
+            target_pixel=target_pixel,
+            target_observed_monotonic=target_observed_monotonic,
+            target_provisional_category=target_provisional_category,
+            target_confirmed=target_confirmed,
+            target_event_eligible=target_event_eligible,
         )
         return self._enqueue(task)
 
@@ -925,6 +1013,7 @@ class EventClassifier:
                 _optional_int(record.get("total_event_frames_considered")) or 1,
             ),
             original_image=original_image,
+            context="retry",
         )
         self.store.record_action("retry_requested", record)
         return self._enqueue(task)
@@ -939,6 +1028,7 @@ class EventClassifier:
             with self._lock:
                 self._errors += 1
                 self._last_error = str(record["error"])
+            self._notify_result(task, [], "classifier_queue_full", record)
             return False
         with self._lock:
             self._submitted += 1
@@ -1043,12 +1133,37 @@ class EventClassifier:
                         self._unknown += 1
                     elif record["classification_status"] == "unclassified":
                         self._errors += 1
+                self._notify_result(task, detections, error, record)
             except Exception as exc:
                 with self._lock:
                     self._last_error = f"{type(exc).__name__}: {exc}"
                 LOGGER.error("Classifier task failed", extra={"structured_data": {"event": "classifier_task_error", "error": str(exc)}}, exc_info=True)
             finally:
                 self._tasks.task_done()
+
+    def _notify_result(
+        self,
+        task: ClassifierTask,
+        detections: list[ClassifierDetection],
+        error: str | None,
+        record: dict[str, Any],
+    ) -> None:
+        handler = self._result_handler
+        if handler is None:
+            return
+        try:
+            handler(task, detections, error, record)
+        except Exception:
+            LOGGER.exception(
+                "Classifier result handler failed; classification evidence remains intact",
+                extra={
+                    "structured_data": {
+                        "event": "classifier_result_handler_error",
+                        "event_id": task.event_id,
+                        "classification_context": task.context,
+                    }
+                },
+            )
 
 
 def _candidate_crop(

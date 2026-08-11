@@ -189,6 +189,10 @@ def _dashboard_events(
                     "end_timestamp",
                     "duration",
                     "provisional_category",
+                    "source_event_id",
+                    "track_id",
+                    "classifier_label",
+                    "classifier_confidence",
                     "snapshot_path",
                     "clip_path",
                     "full_frame_clip_path",
@@ -212,10 +216,24 @@ def _dashboard_events(
                 classification = loaded if isinstance(loaded, dict) else {}
             except (OSError, json.JSONDecodeError):
                 pass
-        manual_fire = event.get("capture_method") == "manual_fire"
-        item["display_label"] = "Manual fire" if manual_fire else classification.get("display_label", "Unclassified")
-        item["classification_status"] = classification.get("classification_status", "unclassified")
-        item["classification_label_source"] = classification.get("label_source")
+        capture_method = event.get("capture_method")
+        if capture_method == "manual_fire":
+            item["display_label"] = "Manual fire"
+            item["classification_status"] = "unclassified"
+            item["classification_label_source"] = None
+        elif capture_method == "auto_fire":
+            auto_label = event.get("classifier_label")
+            item["display_label"] = (
+                f"Auto fire · {str(auto_label).title()}" if auto_label else "Auto fire"
+            )
+            item["classification_status"] = "auto_fire"
+            item["classification_label_source"] = "automatic"
+        else:
+            item["display_label"] = classification.get("display_label", "Unclassified")
+            item["classification_status"] = classification.get(
+                "classification_status", "unclassified"
+            )
+            item["classification_label_source"] = classification.get("label_source")
         item["motion_label"] = event.get("provisional_category", "unclassified_motion")
         prepared.append(item)
     return prepared
@@ -307,13 +325,20 @@ def create_app(
     classifier_store.prepare()
     classifier_review_token = secrets.token_urlsafe(32)
     manual_control_token = secrets.token_urlsafe(32)
-    manual_control = manual_control_service or build_manual_control_service(
-        app_config.pan_tilt,
-        app_config.manual_control,
-        app_config.valve,
-        camera_service=camera,
-        output_directory=app_config.camera.output_directory,
+    shared_manual_control = (
+        getattr(motion_service, "manual_control", None)
+        if motion_service is not None
+        else None
     )
+    manual_control = manual_control_service or shared_manual_control
+    if manual_control is None:
+        manual_control = build_manual_control_service(
+            app_config.pan_tilt,
+            app_config.manual_control,
+            app_config.valve,
+            camera_service=camera,
+            output_directory=app_config.camera.output_directory,
+        )
     started_at = monotonic()
     capture_count_lock = threading.Lock()
     cached_capture_count = 0
@@ -372,6 +397,105 @@ def create_app(
             "evidence_counts": classifier_store.counts(),
         }
 
+    def auto_fire_status() -> dict[str, Any]:
+        """Return one lightweight, fail-safe snapshot for every dashboard surface."""
+
+        settings = app_config.auto_fire
+        fallback: dict[str, Any] = {
+            "enabled": settings.enabled,
+            "state": "BLOCKED" if settings.enabled else "DISABLED",
+            "candidates_evaluated": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "rejection_counts": {},
+            "last_decision": None,
+            "last_reason": None,
+            "last_classification": None,
+            "last_confidence": None,
+            "last_event_id": None,
+            "last_track_id": None,
+            "cooldown_remaining_seconds": 0.0,
+            "shots_in_rolling_window": 0,
+            "max_shots_per_hour": settings.max_shots_per_hour,
+            "remaining_shots_in_window": settings.max_shots_per_hour,
+            "rate_limit_persistent": False,
+            "rate_limit_state_error": None,
+        }
+        service = getattr(motion_service, "auto_fire", None)
+        status_reader = getattr(service, "status", None)
+        if not callable(status_reader):
+            return fallback
+        try:
+            current = status_reader()
+        except Exception as exc:
+            fallback["state"] = "STATUS ERROR" if settings.enabled else "DISABLED"
+            fallback["rate_limit_state_error"] = f"status_unavailable:{type(exc).__name__}"
+            return fallback
+        if not isinstance(current, dict):
+            fallback["state"] = "STATUS ERROR" if settings.enabled else "DISABLED"
+            fallback["rate_limit_state_error"] = "status_unavailable:invalid_payload"
+            return fallback
+        for key in (
+            "enabled",
+            "state",
+            "candidates_evaluated",
+            "accepted",
+            "rejected",
+            "rejection_counts",
+            "last_reason",
+            "last_classification",
+            "last_confidence",
+            "last_event_id",
+            "last_track_id",
+            "cooldown_remaining_seconds",
+            "shots_in_rolling_window",
+            "max_shots_per_hour",
+            "remaining_shots_in_window",
+            "rate_limit_persistent",
+            "rate_limit_state_error",
+        ):
+            if key in current:
+                fallback[key] = current[key]
+        decision = current.get("last_decision")
+        if isinstance(decision, dict):
+            accepted = decision.get("accepted")
+            if isinstance(accepted, bool):
+                fallback["last_decision"] = "accepted" if accepted else "rejected"
+            fallback["last_reason"] = decision.get("reason", fallback["last_reason"])
+            fallback["last_classification"] = decision.get(
+                "classifier_label", fallback["last_classification"]
+            )
+            fallback["last_confidence"] = decision.get(
+                "classifier_confidence", fallback["last_confidence"]
+            )
+            fallback["last_event_id"] = decision.get("event_id", fallback["last_event_id"])
+            fallback["last_track_id"] = decision.get("track_id", fallback["last_track_id"])
+        elif decision is not None:
+            fallback["last_decision"] = decision
+        persistence = current.get("persistence")
+        if isinstance(persistence, dict):
+            fallback["rate_limit_persistent"] = bool(persistence.get("path"))
+            fallback["rate_limit_state_error"] = persistence.get("error")
+        shots = fallback["shots_in_rolling_window"]
+        maximum = fallback["max_shots_per_hour"]
+        if "remaining_shots_in_window" not in current and isinstance(shots, int) and isinstance(maximum, int):
+            fallback["remaining_shots_in_window"] = max(0, maximum - shots)
+        if "state" not in current:
+            cooldown = fallback["cooldown_remaining_seconds"]
+            if not fallback["enabled"]:
+                fallback["state"] = "DISABLED"
+            elif fallback["rate_limit_state_error"]:
+                fallback["state"] = "BLOCKED"
+            elif current.get("engagement_pending") is True:
+                fallback["state"] = "ENGAGING"
+            elif cooldown is None:
+                fallback["state"] = "BLOCKED"
+            elif isinstance(cooldown, (int, float)) and cooldown > 0:
+                fallback["state"] = "COOLDOWN"
+            else:
+                fallback["state"] = "IDLE"
+        return fallback
+
     @app.get("/")
     def dashboard() -> str:
         events = _dashboard_events(
@@ -380,12 +504,14 @@ def create_app(
             summary_only=True,
         )
         camera_data, detector, temperature, uptime = page_status()
+        auto_fire = auto_fire_status()
         review_overview = classifier_store.overview()
         review_counts = {view: len(items) for view, items in review_overview.items()}
         return render_template(
             "dashboard.html",
             camera=camera_data,
             detector=detector,
+            auto_fire=auto_fire,
             cpu_temperature=temperature,
             events=events,
             application_mode=APPLICATION_MODE,
@@ -730,6 +856,7 @@ def create_app(
             camera=camera_data,
             detector=detector,
             classifier=classifier_status(),
+            auto_fire=auto_fire_status(),
             manual_recording=manual_control_status().get("recording"),
             cpu_temperature_c=temperature,
             total_events=detector["accepted_events"],
@@ -787,6 +914,7 @@ def create_app(
             camera_state=camera_data["state"],
             detector_state=detector["state"],
             classifier=classifier_status(),
+            auto_fire=auto_fire_status(),
             manual_recording=manual_control_status().get("recording"),
         )
 

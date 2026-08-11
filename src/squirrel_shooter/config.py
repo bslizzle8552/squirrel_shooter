@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .auto_fire import AutoFireConfig, HUMAN_DENY_LABELS
+from .classifier_labels import VOC_LABELS
 from .manual_control import ManualControlConfig
 from .manual_fire_recording import ManualFireRecordingConfig
 from .pan_tilt import PanTiltConfig
@@ -266,6 +268,7 @@ class AppConfig:
     dashboard: DashboardConfig
     night_mode: NightModeConfig
     classifier: ClassifierConfig
+    auto_fire: AutoFireConfig
     pan_tilt: PanTiltConfig
     manual_control: ManualControlConfig
     valve: ValveConfig
@@ -340,6 +343,82 @@ def _text_tuple(value: Any, field: str) -> tuple[str, ...]:
     if len(set(labels)) != len(labels):
         raise ConfigError(f"{field} must not contain duplicate labels")
     return labels
+
+
+def _optional_text_tuple(value: Any, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ConfigError(f"{field} must be a list of labels")
+    labels = tuple(_text(item, f"{field} item").lower() for item in value)
+    if len(set(labels)) != len(labels):
+        raise ConfigError(f"{field} must not contain duplicate labels")
+    return labels
+
+
+def _auto_fire_config(raw: dict[str, Any]) -> AutoFireConfig:
+    defaults = AutoFireConfig()
+    allowed_classes = _optional_text_tuple(
+        raw.get("allowed_classes", list(defaults.allowed_classes)),
+        "auto_fire.allowed_classes",
+    )
+    supported_labels = frozenset(VOC_LABELS[1:])
+    unsupported = sorted(set(allowed_classes) - supported_labels)
+    if unsupported:
+        raise ConfigError(
+            "auto_fire.allowed_classes contains labels the classifier cannot emit: "
+            + ", ".join(unsupported)
+        )
+    human_labels = sorted(set(allowed_classes) & HUMAN_DENY_LABELS)
+    if human_labels:
+        raise ConfigError(
+            "auto_fire.allowed_classes must not contain human deny labels: "
+            + ", ".join(human_labels)
+        )
+    try:
+        return AutoFireConfig(
+            enabled=_bool(raw.get("enabled", defaults.enabled), "auto_fire.enabled"),
+            min_confidence=_number(
+                raw.get("min_confidence", defaults.min_confidence),
+                "auto_fire.min_confidence",
+                minimum=0.75,
+                maximum=1.0,
+            ),
+            allowed_classes=allowed_classes,
+            cooldown_seconds=_number(
+                raw.get("cooldown_seconds", defaults.cooldown_seconds),
+                "auto_fire.cooldown_seconds",
+                exclusive=True,
+            ),
+            max_shots_per_event=_int(
+                raw.get("max_shots_per_event", defaults.max_shots_per_event),
+                "auto_fire.max_shots_per_event",
+                minimum=1,
+            ),
+            minimum_reengagement_seconds=_number(
+                raw.get("minimum_reengagement_seconds", defaults.minimum_reengagement_seconds),
+                "auto_fire.minimum_reengagement_seconds",
+            ),
+            max_shots_per_hour=_int(
+                raw.get("max_shots_per_hour", defaults.max_shots_per_hour),
+                "auto_fire.max_shots_per_hour",
+                minimum=1,
+            ),
+            classification_max_age_seconds=_number(
+                raw.get("classification_max_age_seconds", defaults.classification_max_age_seconds),
+                "auto_fire.classification_max_age_seconds",
+                exclusive=True,
+            ),
+            target_max_age_seconds=_number(
+                raw.get("target_max_age_seconds", defaults.target_max_age_seconds),
+                "auto_fire.target_max_age_seconds",
+                exclusive=True,
+            ),
+            rate_limit_state_file=_path(
+                raw.get("rate_limit_state_file", str(defaults.rate_limit_state_file)),
+                "auto_fire.rate_limit_state_file",
+            ),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"Invalid auto_fire configuration: {exc}") from exc
 
 
 def _percent(mapping: dict[str, Any], key: str, prefix: str) -> float:
@@ -550,6 +629,9 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     dashboard = _mapping(raw, "dashboard")
     night_mode = _mapping(raw, "night_mode")
     classifier = _mapping(raw, "classifier")
+    auto_fire_raw = raw.get("auto_fire", {})
+    if not isinstance(auto_fire_raw, dict):
+        raise ConfigError("auto_fire must be a mapping when provided")
     pan_tilt_raw = raw.get("pan_tilt", {})
     if not isinstance(pan_tilt_raw, dict):
         raise ConfigError("pan_tilt must be a mapping when provided")
@@ -759,6 +841,25 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     pan_tilt_config = _pan_tilt_config(pan_tilt_raw)
     manual_control_config = _manual_control_config(manual_control_raw)
     valve_config = _valve_config(valve_raw)
+    auto_fire_config = _auto_fire_config(auto_fire_raw)
+    classifier_enabled = _bool(classifier.get("enabled"), "classifier.enabled")
+    night_safety_enabled = _bool(
+        night_mode.get("pause_recording_and_classifier"),
+        "night_mode.pause_recording_and_classifier",
+    )
+    if auto_fire_config.enabled:
+        required_safety = {
+            "classifier.enabled": classifier_enabled,
+            "night_mode.pause_recording_and_classifier": night_safety_enabled,
+            "manual_control.servo_enabled": manual_control_config.servo_enabled,
+            "manual_control.recording.enabled": manual_control_config.recording.enabled,
+            "valve.enabled": valve_config.enabled,
+        }
+        missing = [name for name, enabled in required_safety.items() if not enabled]
+        if missing:
+            raise ConfigError(
+                "enabled auto_fire requires these safety dependencies: " + ", ".join(missing)
+            )
 
     return AppConfig(
         camera=CameraConfig(
@@ -799,10 +900,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _number(dashboard.get("status_refresh_interval_seconds"), "dashboard.status_refresh_interval_seconds", exclusive=True),
         ),
         night_mode=NightModeConfig(
-            _bool(
-                night_mode.get("pause_recording_and_classifier"),
-                "night_mode.pause_recording_and_classifier",
-            ),
+            night_safety_enabled,
             _number(
                 night_mode.get("monochrome_colorfulness_threshold"),
                 "night_mode.monochrome_colorfulness_threshold",
@@ -820,7 +918,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             ),
         ),
         classifier=ClassifierConfig(
-            _bool(classifier.get("enabled"), "classifier.enabled"),
+            classifier_enabled,
             _path(classifier.get("model_definition"), "classifier.model_definition"),
             _path(classifier.get("model_weights"), "classifier.model_weights"),
             frame_selection,
@@ -833,6 +931,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             audit_log_filename,
             _int(classifier.get("worker_queue_capacity"), "classifier.worker_queue_capacity", minimum=1),
         ),
+        auto_fire=auto_fire_config,
         pan_tilt=pan_tilt_config,
         manual_control=manual_control_config,
         valve=valve_config,

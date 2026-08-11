@@ -5,6 +5,7 @@ import io
 import json
 import re
 import shutil
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -226,6 +227,73 @@ def test_selection_metadata_is_saved_with_classification_result(tmp_path: Path) 
     assert saved["selected_motion_bounding_box_area"] == 1200
     assert saved["total_event_frames_considered"] == 7
     assert saved["top_label"] == "person" and saved["top_confidence"] == 0.91
+
+
+def test_live_classification_reads_final_event_metadata_after_lock_race(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    live_task = replace(
+        task(tmp_path, "live-race-event"),
+        context="auto_fire_live_event",
+        track_id=7,
+    )
+
+    class SignalingLock:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.attempted = threading.Event()
+
+        def __enter__(self) -> None:
+            self.attempted.set()
+            self.lock.acquire()
+
+        def __exit__(self, *_args: object) -> None:
+            self.lock.release()
+
+    gate = SignalingLock()
+    gate.lock.acquire()
+    store._lock = gate  # type: ignore[assignment]
+    result: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            store.save_classification(
+                live_task,
+                [ClassifierDetection("dog", 0.91, (1, 2, 20, 21))],
+                100.0,
+                "test-model",
+            )
+        )
+    )
+    worker.start()
+    assert gate.attempted.wait(timeout=1)
+    (live_task.event_directory / "event.json").write_text(
+        json.dumps(
+            {
+                "event_id": live_task.event_id,
+                "start_timestamp": "2026-08-11T12:00:00-04:00",
+                "session_id": "session-race",
+                "capture_method": "automatic_motion_event",
+                "software_version": "0.3.0",
+                "git_commit_sha": "abc123",
+                "source_camera": "opencv_device_0",
+                "actual_width": 1280,
+                "actual_height": 720,
+            }
+        ),
+        encoding="utf-8",
+    )
+    gate.lock.release()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert result[0]["event_timestamp"] == "2026-08-11T12:00:00-04:00"
+    assert result[0]["session_id"] == "session-race"
+    assert result[0]["software_version"] == "0.3.0"
+    assert result[0]["source_camera"] == {
+        "source_camera": "opencv_device_0",
+        "actual_width": 1280,
+        "actual_height": 720,
+    }
 
 
 def test_original_frame_write_failure_is_recorded_without_losing_classification(tmp_path: Path) -> None:
@@ -469,6 +537,67 @@ def test_classifier_worker_is_backgrounded_and_records_one_task(tmp_path: Path) 
     assert status.queued_for_review == 0 and status.last_latency_ms == 12.5
 
 
+def test_classifier_result_handler_receives_exact_live_task_and_is_failure_isolated(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    handled: list[tuple[ClassifierTask, list[ClassifierDetection], str | None, dict[str, object]]] = []
+
+    class Detector:
+        model_name = "fake-live-detector"
+
+        def classify(self, _image: np.ndarray):
+            return [ClassifierDetection("dog", 0.91, (0, 0, 10, 10))], 9.0
+
+    def handler(
+        live_task: ClassifierTask,
+        detections: list[ClassifierDetection],
+        error: str | None,
+        record: dict[str, object],
+    ) -> None:
+        handled.append((live_task, detections, error, record))
+        raise RuntimeError("synthetic handler failure")
+
+    worker = EventClassifier(  # type: ignore[arg-type]
+        config.classifier,
+        store,
+        detector_factory=Detector,
+        result_handler=handler,
+    )
+    event_directory = tmp_path / "captures" / "events" / "live-handler"
+    event_directory.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit(
+            "live-handler",
+            event_directory,
+            1,
+            np.zeros((40, 60, 3), dtype=np.uint8),
+            (20, 10, 20, 16),
+            context="auto_fire_live_event",
+            track_id=7,
+            frame_sequence=42,
+            target_pixel=(30, 18),
+            target_observed_monotonic=100.0,
+            target_provisional_category="small_animal_candidate",
+            target_confirmed=True,
+            target_event_eligible=True,
+        )
+        deadline = time.monotonic() + 2
+        while worker.status().completed < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        worker.stop()
+
+    assert worker.status().completed == 1
+    assert len(handled) == 1
+    live_task, detections, error, record = handled[0]
+    assert live_task.context == "auto_fire_live_event" and live_task.track_id == 7
+    assert detections[0].label == "dog" and error is None
+    assert record["classification_context"] == "auto_fire_live_event"
+    assert record["track_id"] == 7 and record["target_pixel"] == {"x": 30, "y": 18}
+    assert (event_directory / "classification.json").is_file()
+
+
 def test_inference_exception_preserves_images_and_unavailable_metadata(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
@@ -647,6 +776,104 @@ def test_motion_submits_best_frame_once_after_event_completes(tmp_path: Path) ->
         "selection_method": "best",
         "selected_motion_bounding_box_area": 1125,
         "total_event_frames_considered": 3,
+    }
+
+
+def test_auto_fire_uses_one_live_qualified_task_with_track_and_freshness_context(tmp_path: Path) -> None:
+    config = classifier_config(
+        tmp_path,
+        auto_fire__enabled=True,
+        manual_control__servo_enabled=True,
+    )
+
+    class Classifier:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int, dict[str, object]]] = []
+
+        def set_paused(self, _paused: bool) -> None:
+            return None
+
+        def submit(
+            self,
+            event_id: str,
+            _directory: Path,
+            frame_number: int,
+            _frame: np.ndarray,
+            _box: tuple[int, int, int, int],
+            **metadata: object,
+        ) -> bool:
+            self.calls.append((event_id, frame_number, metadata))
+            return True
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.active: dict[int, object] = {}
+            self.updates = 0
+
+        def begin(self, track_id: int, *_args: object, **_kwargs: object) -> object:
+            directory = tmp_path / "captures" / "events" / "event-live"
+            directory.mkdir(parents=True, exist_ok=True)
+            event = SimpleNamespace(event_id="event-live", directory=directory, start_timestamp="now")
+            self.active[track_id] = event
+            return event
+
+        def update(self, *_args: object, **_kwargs: object) -> None:
+            self.updates += 1
+
+        def should_finish(self, *_args: object, **_kwargs: object) -> bool:
+            return self.updates >= 2
+
+        def finish(self, track_id: int, **_kwargs: object) -> dict[str, object]:
+            event = self.active.pop(track_id)
+            return {
+                "event_id": event.event_id,
+                "track_id": track_id,
+                "snapshot_path": str(event.directory / "snapshot.jpg"),
+                "clip_path": str(event.directory / "clip.avi"),
+            }
+
+    classifier = Classifier()
+    motion = MotionProcessingService(
+        SimpleNamespace(),
+        config,
+        classifier_service=classifier,  # type: ignore[arg-type]
+    )
+    motion._recorder = Recorder()  # type: ignore[assignment]
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    packet = SimpleNamespace(frame=frame, sequence=42)
+    first = SimpleNamespace(
+        track_id=7,
+        newly_confirmed=True,
+        foreground_pixels=100,
+        provisional_category="small_animal_candidate",
+        movement_attributes=("coherent_travel",),
+        bounding_box=(20, 20, 30, 20),
+        centroid=(35.2, 30.7),
+        contour_area=600.0,
+        confirmed=True,
+        event_eligible=True,
+    )
+    second = SimpleNamespace(**{**first.__dict__, "newly_confirmed": False, "centroid": (36.0, 31.0)})
+
+    motion._handle_events(packet, SimpleNamespace(groups=(first,)), lambda: frame, 10.0, 10.0)  # type: ignore[arg-type]
+    motion._handle_events(packet, SimpleNamespace(groups=(second,)), lambda: frame, 10.1, 10.0)  # type: ignore[arg-type]
+    motion._handle_events(packet, SimpleNamespace(groups=(second,)), lambda: frame, 10.2, 10.0)  # type: ignore[arg-type]
+
+    assert len(classifier.calls) == 1
+    event_id, frame_number, metadata = classifier.calls[0]
+    assert (event_id, frame_number) == ("event-live", 1)
+    assert metadata == {
+        "selection_method": "qualified_live_target",
+        "selected_motion_bounding_box_area": 600,
+        "total_event_frames_considered": 1,
+        "context": "auto_fire_live_event",
+        "track_id": 7,
+        "frame_sequence": 42,
+        "target_pixel": (35, 31),
+        "target_observed_monotonic": 10.0,
+        "target_provisional_category": "small_animal_candidate",
+        "target_confirmed": True,
+        "target_event_eligible": True,
     }
 
 

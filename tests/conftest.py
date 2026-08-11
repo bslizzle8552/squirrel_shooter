@@ -15,6 +15,8 @@ def write_test_config(tmp_path: Path, **changes: Any) -> Path:
     raw["motion"]["debug_outputs"]["directory"] = (tmp_path / "debug").as_posix()
     raw["logging"]["directory"] = (tmp_path / "logs").as_posix()
     raw["classifier"]["enabled"] = False
+    raw["auto_fire"]["enabled"] = False
+    raw["auto_fire"]["rate_limit_state_file"] = (tmp_path / "auto-fire-rate-limit.json").as_posix()
     raw["manual_control"]["servo_enabled"] = False
     raw["manual_control"]["calibration_file"] = (tmp_path / "calibration.json").as_posix()
     raw["classifier"]["evidence_directory"] = (tmp_path / "captures" / "classifier").as_posix()

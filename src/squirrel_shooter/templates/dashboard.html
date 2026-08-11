@@ -29,7 +29,7 @@
     </svg>
 
     <header id="statusbar" class="statusbar">
-      <a class="brand" href="{{ url_for('dashboard') }}" title="Squirrel Squirter — garden evidence, no physical outputs">
+      <a class="brand" href="{{ url_for('dashboard') }}" title="{{ 'WARNING: computer-aided physical firing is enabled' if auto_fire.enabled else 'Garden evidence and manual controls — automatic firing disabled' }}">
         <img class="brand-logo" src="{{ url_for('static', filename='squirrel-squirter-logo.png') }}" alt="Squirrel Squirter logo">
         <span class="brand-text">
           <span class="brand-name">Squirrel Squirter</span>
@@ -52,6 +52,10 @@
         </span>
         <span class="stat mode" id="stat-mode" title="Console mode">
           <span class="stat-stack"><em>MODE</em><b id="mode-value">OBSERVE</b></span>
+        </span>
+        <span class="stat" id="stat-auto-fire" title="{{ 'Computer-aided physical firing is enabled' if auto_fire.enabled else 'Automatic physical firing is disabled' }}">
+          <span class="dot {{ 'offline' if auto_fire.enabled else 'online' }}" id="auto-fire-dot"></span>
+          <span class="stat-stack"><em>AUTO FIRE</em><b id="auto-fire-value">{{ 'ENABLED' if auto_fire.enabled else 'DISABLED' }}</b></span>
         </span>
         <span class="stat cam" id="stat-cam" title="Camera state">
           <span class="dot {{ camera.state|lower }}" id="cam-dot"></span>
@@ -83,9 +87,9 @@
               <span class="hud-pill hud-chip hud-fps" id="hud-fps">{{ '%.1f'|format(detector.processing_fps) }} FPS</span>
             </div>
             <div class="hud-scrim">
-              <p class="notice {{ 'learning' if detector.state in ('LEARNING', 'WARMING_UP') else '' }}" id="detector-notice" role="status">
-                <strong id="notice-title">{{ 'Night vision paused' if detector.state == 'NIGHT_PAUSED' else ('LEARNING background' if detector.state in ('LEARNING', 'WARMING_UP') else 'Motion-only diagnostics') }}</strong>
-                <span id="notice-detail">{{ 'The live feed remains on, but clips and classifier work are paused until daytime color returns.' if detector.state == 'NIGHT_PAUSED' else ('Events are suppressed until the detector reaches READY.' if detector.state in ('LEARNING', 'WARMING_UP') else 'Labels describe size and movement; they are not person, car, or squirrel recognition.') }}</span>
+              <p class="notice {{ 'learning' if not auto_fire.enabled and detector.state in ('LEARNING', 'WARMING_UP') else '' }}" id="detector-notice" role="status">
+                <strong id="notice-title">{{ 'Night vision paused' if detector.state == 'NIGHT_PAUSED' else ('AUTO FIRE ENABLED' if auto_fire.enabled else ('LEARNING background' if detector.state in ('LEARNING', 'WARMING_UP') else 'Motion-only diagnostics')) }}</strong>
+                <span id="notice-detail">{{ 'The live feed remains on, but clips, classifier work, and automatic firing are blocked until daytime color returns.' if detector.state == 'NIGHT_PAUSED' else ('Computer-aided physical firing is armed. Backend classification, daylight, calibration, freshness, cooldown, and rate-limit safety gates still apply.' if auto_fire.enabled else ('Events are suppressed until the detector reaches READY. Automatic firing is disabled.' if detector.state in ('LEARNING', 'WARMING_UP') else 'Labels describe size and movement; automatic firing is disabled.')) }}</span>
               </p>
             </div>
             <div class="offline-message" id="offline-message">
@@ -216,13 +220,17 @@
         <dt>Events accepted</dt><dd id="sys-accepted">{{ detector.accepted_events }}</dd>
         <dt>Events rejected</dt><dd id="sys-rejected">{{ detector.rejected_events }}</dd>
         <dt>Classifier queue</dt><dd id="sys-classifier">—</dd>
+        <dt>Auto fire</dt><dd id="sys-auto-fire">{{ ('ENABLED · ' ~ auto_fire.state) if auto_fire.enabled else 'DISABLED' }}</dd>
+        <dt>Last auto decision</dt><dd id="sys-auto-decision">{% if auto_fire.last_decision %}{{ auto_fire.last_decision|replace('_', ' ')|upper }}{% if auto_fire.last_reason %} · {{ auto_fire.last_reason|replace('_', ' ') }}{% endif %}{% if auto_fire.last_classification %} · {{ auto_fire.last_classification }}{% if auto_fire.last_confidence is not none %} {{ '%.0f%%'|format(auto_fire.last_confidence * 100) }}{% endif %}{% endif %}{% else %}None yet{% endif %}</dd>
+        <dt>Auto cooldown</dt><dd id="sys-auto-cooldown">{{ ('%.1fs'|format(auto_fire.cooldown_remaining_seconds)) if auto_fire.cooldown_remaining_seconds is not none else 'Unavailable' }}</dd>
+        <dt>Shots this hour</dt><dd id="sys-auto-hourly">{{ auto_fire.shots_in_rolling_window }} / {{ auto_fire.max_shots_per_hour }} ({{ auto_fire.remaining_shots_in_window }} remaining)</dd>
         <dt>Capture storage</dt><dd id="sys-storage">—</dd>
       </dl>
       <div class="dialog-prefs">
         <label><input type="checkbox" id="pref-outdoor"> Outdoor sunlight mode</label>
         <label><input type="checkbox" id="pref-pause-stream"> Pause live stream (saves Pi CPU)</label>
       </div>
-      <p class="dialog-note">Motion-triggered garden evidence and explicitly gated manual hardware controls share one camera. Settings live in <code>config/default.yaml</code> on the Pi.</p>
+      <p class="dialog-note">{% if auto_fire.enabled %}<strong>Computer-aided physical firing is armed.</strong> It shares the existing camera and physical-control coordinator and remains subject to backend safety gates.{% else %}Motion-only automatic monitoring is active; automatic physical firing is disabled. Explicitly gated manual controls remain available.{% endif %} Settings live in <code>config/default.yaml</code> on the Pi.</p>
       <div class="dialog-links">
         <a href="{{ url_for('manual_control_page') }}">Manual aiming and calibration</a>
         <a href="{{ url_for('events') }}">All event pictures and videos</a>

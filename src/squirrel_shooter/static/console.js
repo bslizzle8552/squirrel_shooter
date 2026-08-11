@@ -76,6 +76,9 @@
     statFps: byId('stat-fps'),
     statTemp: byId('stat-temp'),
     statQueue: byId('stat-queue'),
+    statAutoFire: byId('stat-auto-fire'),
+    autoFireValue: byId('auto-fire-value'),
+    autoFireDot: byId('auto-fire-dot'),
     sparkFps: byId('spark-fps'),
     sparkTemp: byId('spark-temp'),
     sparkQueue: byId('spark-queue'),
@@ -92,6 +95,10 @@
     sysAccepted: byId('sys-accepted'),
     sysRejected: byId('sys-rejected'),
     sysClassifier: byId('sys-classifier'),
+    sysAutoFire: byId('sys-auto-fire'),
+    sysAutoDecision: byId('sys-auto-decision'),
+    sysAutoCooldown: byId('sys-auto-cooldown'),
+    sysAutoHourly: byId('sys-auto-hourly'),
     sysStorage: byId('sys-storage')
   };
 
@@ -111,6 +118,26 @@
 
   function pct(value) {
     return typeof value === 'number' ? Math.round(value * 100) + '%' : '';
+  }
+
+  function statusWords(value, uppercase) {
+    if (value === null || value === undefined || value === '') { return ''; }
+    var words = String(value).replace(/_/g, ' ');
+    return uppercase ? words.toUpperCase() : words;
+  }
+
+  function autoFireDecisionSummary(status) {
+    if (!status.last_decision) { return 'None yet'; }
+    var parts = [statusWords(status.last_decision, true)];
+    if (status.last_reason) { parts.push(statusWords(status.last_reason, false)); }
+    if (status.last_classification) {
+      var classification = String(status.last_classification);
+      if (typeof status.last_confidence === 'number') {
+        classification += ' ' + pct(status.last_confidence);
+      }
+      parts.push(classification);
+    }
+    return parts.join(' · ');
   }
 
   function suggestionLine(item) {
@@ -627,6 +654,8 @@
     getJSON('status', urls.status, function (data) {
       var camera = data.camera || {};
       var detector = data.detector || {};
+      var autoFire = data.auto_fire || {};
+      var autoFireEnabled = autoFire.enabled === true;
       var fps = typeof detector.processing_fps === 'number' ? detector.processing_fps : 0;
       setText(els.fpsValue, fps.toFixed(1));
       els.statFps.classList.toggle('low', fps > 0 && fps < 5);
@@ -649,11 +678,16 @@
       els.cameraError.textContent = camera.error || 'No fresh frames are available. The dashboard and diagnostics remain online.';
       var learning = dState === 'LEARNING' || dState === 'WARMING_UP';
       var night = dState === 'NIGHT_PAUSED';
-      els.notice.classList.toggle('learning', learning);
-      els.noticeTitle.textContent = night ? 'Night vision paused' : (learning ? 'LEARNING background' : 'Motion-only diagnostics');
+      els.notice.classList.toggle('learning', learning && !autoFireEnabled);
+      els.noticeTitle.textContent = night ? 'Night vision paused' : (autoFireEnabled ? 'AUTO FIRE ENABLED' : (learning ? 'LEARNING background' : 'Motion-only diagnostics'));
       els.noticeDetail.textContent = night
-        ? 'The live feed remains on, but clips and classifier work are paused until daytime color returns.'
-        : (learning ? 'Events are suppressed until the detector reaches READY.' : 'Labels describe size and movement; they are not person, car, or squirrel recognition.');
+        ? 'The live feed remains on, but clips, classifier work, and automatic firing are blocked until daytime color returns.'
+        : (autoFireEnabled
+          ? 'Computer-aided physical firing is armed. Backend classification, daylight, calibration, freshness, cooldown, and rate-limit safety gates still apply.'
+          : (learning ? 'Events are suppressed until the detector reaches READY. Automatic firing is disabled.' : 'Labels describe size and movement; automatic firing is disabled.'));
+      setText(els.autoFireValue, autoFireEnabled ? 'ENABLED' : 'DISABLED');
+      els.autoFireDot.className = 'dot ' + (autoFireEnabled ? 'offline' : 'online');
+      els.statAutoFire.title = autoFireEnabled ? 'Computer-aided physical firing is enabled' : 'Automatic physical firing is disabled';
       els.sysCamera.textContent = state + ' · ' + ((camera.resolution && camera.resolution.label) || '');
       els.sysDetector.textContent = dState + ' · ' + fps.toFixed(1) + ' FPS';
       els.sysTemp.textContent = temp === null || temp === undefined ? 'Unavailable' : temp.toFixed(1) + ' °C';
@@ -662,6 +696,15 @@
       els.sysRejected.textContent = String(detector.rejected_events != null ? detector.rejected_events : 0);
       var classifier = data.classifier || {};
       els.sysClassifier.textContent = 'depth ' + (classifier.queue_depth != null ? classifier.queue_depth : 0);
+      var autoState = statusWords(autoFire.state || (autoFireEnabled ? 'ENABLED' : 'DISABLED'), true);
+      els.sysAutoFire.textContent = autoFireEnabled ? 'ENABLED · ' + autoState : 'DISABLED';
+      els.sysAutoDecision.textContent = autoFireDecisionSummary(autoFire);
+      var autoCooldown = typeof autoFire.cooldown_remaining_seconds === 'number' ? Math.max(0, autoFire.cooldown_remaining_seconds) : null;
+      els.sysAutoCooldown.textContent = autoCooldown === null ? 'Unavailable' : autoCooldown.toFixed(1) + 's';
+      var hourlyShots = typeof autoFire.shots_in_rolling_window === 'number' ? autoFire.shots_in_rolling_window : 0;
+      var hourlyLimit = typeof autoFire.max_shots_per_hour === 'number' ? autoFire.max_shots_per_hour : 0;
+      var hourlyRemaining = typeof autoFire.remaining_shots_in_window === 'number' ? autoFire.remaining_shots_in_window : Math.max(0, hourlyLimit - hourlyShots);
+      els.sysAutoHourly.textContent = hourlyShots + ' / ' + hourlyLimit + ' (' + hourlyRemaining + ' remaining)';
       els.sysStorage.textContent = (data.total_snapshots != null ? data.total_snapshots : 0) + ' snapshots';
       // sparkline history
       pushHistory('fps', fps);

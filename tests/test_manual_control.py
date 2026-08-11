@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from squirrel_shooter.manual_control import (
+    AutomaticEngagementError,
+    AutomaticEngagementResult,
     CalibrationPoint,
     CalibrationStore,
     ControlError,
@@ -113,7 +115,7 @@ def make_service(
     valve = FakeValve(events)
     calibration_store = CalibrationStore(control_config.calibration_file)
     for point in calibration_points or []:
-        calibration_store.save(point)
+        calibration_store.save(point, frame_width=1280, frame_height=720)
     service = ManualControlService(
         pan_config,
         control_config,
@@ -637,6 +639,489 @@ def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:
     assert delays == [0.15, 0.40, 0.15]
 
 
+def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Path) -> None:
+    now = [100.0]
+    events: list[str] = []
+    recorder = FakeFireRecorder()
+
+    def sleep(seconds: float) -> None:
+        events.append("pulse" if seconds == 0.40 else "settle")
+
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        clock=lambda: now[0],
+        sleep=sleep,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    guard_calls: list[str] = []
+
+    def final_guard() -> bool:
+        guard_calls.append("guard")
+        events.append("guard")
+        assert valve.state is ValveState.CLOSED
+        return True
+
+    result = service.automatic_engage(
+        150,
+        150,
+        frame_width=1280,
+        frame_height=720,
+        cooldown_seconds=5.0,
+        final_safety_check=final_guard,
+        evidence={
+            "source_event_id": "motion-event-7",
+            "track_id": 7,
+            "classifier_label": "dog",
+            "classifier_confidence": 0.91,
+        },
+    )
+
+    assert isinstance(result, AutomaticEngagementResult)
+    assert result.aim == InterpolatedAim(150, 150, 120.0, 90.0, (1, 2, 4, 5))
+    assert result.event_id.startswith("auto-fire-")
+    assert result.cooldown_seconds == 5.0
+    assert result.recording_queued is True
+    assert guard_calls == ["guard"]
+    assert events == ["move", "settle", "guard", "close", "open", "pulse", "close", "move", "settle"]
+    assert pan_tilt.moves == [PanTiltPosition(120, 90), PanTiltPosition(85, 82)]
+    assert valve.state is ValveState.CLOSED
+    assert service.cooldown_remaining_seconds() == 5.0
+    assert service.status()["cooldown_remaining_seconds"] == 5.0
+    assert len(recorder.events) == 1
+    recorded = recorder.events[0]
+    assert recorded.event_id == result.event_id
+    assert recorded.event_type == "auto_fire"
+    assert recorded.fire_pulse_seconds == 0.40
+    assert recorded.crop_center_source == "auto_fire_target_pixel"
+    assert recorded.evidence["source_event_id"] == "motion-event-7"
+    assert recorded.evidence["track_id"] == 7
+    assert recorded.evidence["classifier_label"] == "dog"
+    assert recorded.evidence["classifier_confidence"] == 0.91
+    assert recorded.evidence["target_pixel_x"] == 150
+    assert recorded.evidence["calculated_pan"] == 120.0
+    assert recorded.evidence["cooldown_seconds"] == 5.0
+    assert recorded.evidence["safe_bound_result"] == "inside_calibrated_area"
+
+    with pytest.raises(FireCooldownError):
+        service.fire()
+    now[0] = 105.0
+    service.fire()
+    assert service.cooldown_remaining_seconds() == 10.0
+
+
+def test_automatic_final_guard_rejection_parks_without_firing(tmp_path: Path) -> None:
+    events: list[str] = []
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    guard_calls = 0
+
+    def reject() -> bool:
+        nonlocal guard_calls
+        guard_calls += 1
+        events.append("guard-rejected")
+        return False
+
+    with pytest.raises(AutomaticEngagementError) as rejected:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=reject,
+            evidence={},
+        )
+
+    assert rejected.value.reason == "safety_state_invalid"
+    assert rejected.value.shot_attempted is False
+    assert guard_calls == 1
+    assert pan_tilt.moves == [PanTiltPosition(120, 90), PanTiltPosition(85, 82)]
+    assert events == ["move", "guard-rejected", "move"]
+    assert valve.state is ValveState.CLOSED
+    assert "open" not in valve.events
+    assert service.cooldown_remaining_seconds() == 0
+    assert recorder.events == []
+
+
+def test_automatic_engagement_rejects_changed_interpolation_before_final_guard(tmp_path: Path) -> None:
+    initial = complete_calibration_grid()
+    changed = complete_calibration_grid()
+    point = changed[0]
+    changed[0] = CalibrationPoint(
+        point.point,
+        point.pixel_x,
+        point.pixel_y,
+        float(point.pan) - 4.0,
+        point.tilt,
+    )
+
+    class ChangingCalibration:
+        def __init__(self) -> None:
+            self.loads = 0
+
+        def load(self) -> list[CalibrationPoint]:
+            self.loads += 1
+            return initial if self.loads == 1 else changed
+
+        @staticmethod
+        def frame_size() -> tuple[int, int]:
+            return (1280, 720)
+
+    pan_config = PanTiltConfig(settling_delay_seconds=0.15)
+    pan_tilt = FakePanTilt(pan_config)
+    valve = FakeValve()
+    recorder = FakeFireRecorder()
+    service = ManualControlService(
+        pan_config,
+        ManualControlConfig(calibration_file=tmp_path / "calibration.json"),
+        pan_tilt=pan_tilt,
+        valve=valve,
+        calibration_store=ChangingCalibration(),  # type: ignore[arg-type]
+        sleep=lambda _seconds: None,
+        fire_recorder=recorder,
+    )
+    guard_calls = 0
+
+    def guard() -> bool:
+        nonlocal guard_calls
+        guard_calls += 1
+        return True
+
+    with pytest.raises(AutomaticEngagementError) as rejected:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=guard,
+            evidence={},
+        )
+
+    assert rejected.value.reason == "safety_state_invalid"
+    assert rejected.value.shot_attempted is False
+    assert guard_calls == 0
+    assert pan_tilt.moves == [PanTiltPosition(120, 90), PanTiltPosition(85, 82)]
+    assert valve.state is ValveState.CLOSED
+    assert recorder.events == []
+
+
+def test_automatic_engagement_requires_recording_and_exact_safe_interpolation(tmp_path: Path) -> None:
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        calibration_points=complete_calibration_grid(),
+    )
+
+    with pytest.raises(AutomaticEngagementError) as unavailable:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={},
+        )
+    assert unavailable.value.reason == "recording_unavailable"
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    with pytest.raises(AutomaticEngagementError) as outside:
+        service.automatic_engage(
+            50,
+            50,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={},
+        )
+    assert outside.value.reason == "outside_safe_bounds"
+    assert outside.value.shot_attempted is False
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+    assert recorder.events == []
+
+
+def test_automatic_engagement_rejects_camera_geometry_mismatch_before_movement(
+    tmp_path: Path,
+) -> None:
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+
+    with pytest.raises(AutomaticEngagementError) as mismatch:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=640,
+            frame_height=480,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={},
+        )
+
+    assert mismatch.value.reason == "calibration_frame_mismatch"
+    assert mismatch.value.shot_attempted is False
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+    assert recorder.events == []
+
+
+def test_legacy_calibration_without_frame_geometry_cannot_automatically_engage(
+    tmp_path: Path,
+) -> None:
+    pan_config = PanTiltConfig(settling_delay_seconds=0.15)
+    calibration = CalibrationStore(tmp_path / "legacy-calibration.json")
+    for point in complete_calibration_grid():
+        calibration.save(point)
+    pan_tilt = FakePanTilt(pan_config)
+    valve = FakeValve()
+    recorder = FakeFireRecorder()
+    service = ManualControlService(
+        pan_config,
+        ManualControlConfig(
+            fire_pulse_seconds=0.40,
+            calibration_file=calibration.path,
+        ),
+        pan_tilt=pan_tilt,
+        valve=valve,
+        calibration_store=calibration,
+        sleep=lambda _seconds: None,
+        fire_recorder=recorder,
+    )
+
+    with pytest.raises(AutomaticEngagementError) as unknown:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={},
+        )
+
+    assert unknown.value.reason == "calibration_frame_unknown"
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+
+
+def test_legacy_calibration_requires_all_nine_pixels_to_verify_frame_geometry(
+    tmp_path: Path,
+) -> None:
+    calibration = CalibrationStore(tmp_path / "legacy-calibration.json")
+    points = complete_calibration_grid()
+    for point in points:
+        calibration.save(point)
+
+    for point in points[:-1]:
+        calibration.save(point, frame_width=1280, frame_height=720)
+    assert calibration.frame_size() is None
+    assert calibration.frame_geometry_status() == {
+        "width": 1280,
+        "height": 720,
+        "verified_points": list(range(1, 9)),
+        "complete": False,
+    }
+
+    calibration.save(points[-1], frame_width=1280, frame_height=720)
+    assert calibration.frame_size() == (1280, 720)
+    assert calibration.frame_geometry_status()["complete"] is True
+
+
+def test_automatic_engagement_is_never_queued_behind_busy_coordinator(tmp_path: Path) -> None:
+    settling_started = threading.Event()
+    release_settling = threading.Event()
+    recorder = FakeFireRecorder()
+    failures: list[Exception] = []
+
+    def controlled_sleep(seconds: float) -> None:
+        if seconds == 0.15 and not settling_started.is_set():
+            settling_started.set()
+            assert release_settling.wait(timeout=1)
+
+    service, _, valve = make_service(
+        tmp_path,
+        sleep=controlled_sleep,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+
+    def engage() -> None:
+        try:
+            service.automatic_engage(
+                150,
+                150,
+                frame_width=1280,
+                frame_height=720,
+                cooldown_seconds=5.0,
+                final_safety_check=lambda: True,
+                evidence={"event_id": "first"},
+            )
+        except Exception as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=engage)
+    worker.start()
+    assert settling_started.wait(timeout=1)
+
+    with pytest.raises(AutomaticEngagementError) as busy:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={"event_id": "second"},
+        )
+    assert busy.value.reason == "coordinator_busy"
+    assert busy.value.shot_attempted is False
+    assert valve.state is ValveState.CLOSED
+
+    release_settling.set()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert failures == []
+    assert len(recorder.events) == 1
+
+
+def test_cleanup_waits_for_in_flight_automatic_engagement(tmp_path: Path) -> None:
+    settling_started = threading.Event()
+    release_settling = threading.Event()
+    recorder = FakeFireRecorder()
+
+    def controlled_sleep(seconds: float) -> None:
+        if seconds == 0.15 and not settling_started.is_set():
+            settling_started.set()
+            assert release_settling.wait(timeout=1)
+
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        sleep=controlled_sleep,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    engagement = threading.Thread(
+        target=lambda: service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={"source_event_id": "event-one"},
+        )
+    )
+    cleanup = threading.Thread(target=service.cleanup)
+
+    engagement.start()
+    assert settling_started.wait(timeout=1)
+    cleanup.start()
+    cleanup.join(timeout=0.05)
+
+    assert cleanup.is_alive()
+    assert valve.cleaned is False
+    assert pan_tilt.cleaned is False
+    assert recorder.closed is False
+
+    release_settling.set()
+    engagement.join(timeout=1)
+    cleanup.join(timeout=1)
+
+    assert not engagement.is_alive()
+    assert not cleanup.is_alive()
+    assert valve.cleaned is True
+    assert pan_tilt.cleaned is True
+    assert recorder.closed is True
+
+
+def test_automatic_valve_failure_closes_then_parks_and_sets_auto_cooldown(tmp_path: Path) -> None:
+    events: list[str] = []
+    recorder = FakeFireRecorder()
+    pan_config = PanTiltConfig(settling_delay_seconds=0.15)
+    control_config = ManualControlConfig(
+        fire_pulse_seconds=0.40,
+        calibration_file=tmp_path / "calibration.json",
+    )
+    calibration = CalibrationStore(control_config.calibration_file)
+    for point in complete_calibration_grid():
+        calibration.save(point, frame_width=1280, frame_height=720)
+    pan_tilt = FakePanTilt(pan_config, events)
+    valve = FailingOpenValve(events)
+    service = ManualControlService(
+        pan_config,
+        control_config,
+        pan_tilt=pan_tilt,
+        valve=valve,
+        calibration_store=calibration,
+        sleep=lambda _seconds: None,
+        clock=lambda: 100.0,
+        fire_recorder=recorder,
+    )
+
+    with pytest.raises(AutomaticEngagementError) as failed:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={"event_id": "failed-pulse"},
+        )
+
+    assert failed.value.reason == "valve_failure"
+    assert failed.value.shot_attempted is True
+    assert valve.state is ValveState.CLOSED
+    assert events == ["move", "close", "open-error", "close", "move"]
+    assert pan_tilt.moves[-1] == PanTiltPosition(85, 82)
+    assert service.cooldown_remaining_seconds() == 5.0
+    assert recorder.events == []
+
+
+def test_automatic_recording_submission_failure_cannot_skip_park(tmp_path: Path) -> None:
+    recorder = FakeFireRecorder(fail=True)
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+
+    result = service.automatic_engage(
+        150,
+        150,
+        frame_width=1280,
+        frame_height=720,
+        cooldown_seconds=5.0,
+        final_safety_check=lambda: True,
+        evidence={"event_id": "recording-failure"},
+    )
+
+    assert result.recording_queued is False
+    assert valve.state is ValveState.CLOSED
+    assert pan_tilt.moves[-1] == PanTiltPosition(85, 82)
+    assert service.cooldown_remaining_seconds() == 5.0
+    assert len(recorder.events) == 1
+
+
 def test_fire_and_movement_are_serialized(tmp_path: Path) -> None:
     events: list[str] = []
     fire_started = threading.Event()
@@ -752,6 +1237,16 @@ def test_calibration_store_saves_and_replaces_one_of_nine_points(tmp_path: Path)
     records = CalibrationStore(tmp_path / "calibration.json").load()
     assert records == [replacement]
     raw = json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 2
+    assert raw["frame_width"] == 1280
+    assert raw["frame_height"] == 720
+    assert raw["frame_verified_points"] == [4]
+    assert service.status()["calibration_frame"] == {
+        "width": 1280,
+        "height": 720,
+        "verified_points": [4],
+        "complete": False,
+    }
     assert raw["points"][0] == {
         "point": 4,
         "pixel_x": 700,

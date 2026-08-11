@@ -136,6 +136,9 @@ def test_dashboard_loads_when_camera_is_unavailable(
     assert b'id="stat-temp"' in response.data
     assert b'id="stat-queue"' in response.data
     assert b'id="stat-mode"' in response.data
+    assert b'id="stat-auto-fire"' in response.data
+    assert b'id="auto-fire-value">DISABLED<' in response.data
+    assert b"Automatic firing is disabled" in response.data
     assert b'id="blob-count"' not in response.data
     assert b"squirrel-squirter-logo.png" in response.data
     assert b"console.css" in response.data and b"console.js" in response.data
@@ -146,8 +149,94 @@ def test_dashboard_loads_when_camera_is_unavailable(
     assert b"syncLiveStream" in console_script.data
     assert b"removeAttribute('src')" in console_script.data
     assert b"'?limit=' + MAX_RECENT_ITEMS" in console_script.data
+    assert b"data.auto_fire" in console_script.data
+    assert b"autoFireDecisionSummary" in console_script.data
+    assert console_script.data.count(b"setInterval(") == 3
     assert camera.start_calls == 1
     assert vision.start_calls == 1
+
+
+def test_dashboard_prominently_reports_enabled_auto_fire_from_shared_runtime(tmp_path: Path) -> None:
+    config = load_config(write_test_config(tmp_path))
+    config = replace(
+        config,
+        auto_fire=replace(config.auto_fire, enabled=True, allowed_classes=("dog", "bird")),
+    )
+    service_payload = {
+        "enabled": True,
+        "candidates_evaluated": 9,
+        "accepted": 2,
+        "rejected": 7,
+        "rejection_counts": {"night_mode": 1, "cooldown_active": 2},
+        "last_decision": {
+            "accepted": False,
+            "reason": "cooldown_active",
+            "event_id": "event-123",
+            "track_id": 4,
+            "classifier_label": "dog",
+            "classifier_confidence": 0.87,
+            "target_pixel_x": 640,
+            "target_pixel_y": 360,
+        },
+        "cooldown_remaining_seconds": 2.5,
+        "shots_in_rolling_window": 2,
+        "max_shots_per_hour": 6,
+        "engagement_pending": False,
+        "persistence": {
+            "healthy": True,
+            "path": "captures/auto-fire-rate-limit.json",
+            "error": None,
+            "records": 2,
+        },
+    }
+    expected_payload = {
+        "enabled": True,
+        "state": "COOLDOWN",
+        "candidates_evaluated": 9,
+        "accepted": 2,
+        "rejected": 7,
+        "rejection_counts": {"night_mode": 1, "cooldown_active": 2},
+        "last_decision": "rejected",
+        "last_reason": "cooldown_active",
+        "last_classification": "dog",
+        "last_confidence": 0.87,
+        "last_event_id": "event-123",
+        "last_track_id": 4,
+        "cooldown_remaining_seconds": 2.5,
+        "shots_in_rolling_window": 2,
+        "max_shots_per_hour": 6,
+        "remaining_shots_in_window": 4,
+        "rate_limit_persistent": True,
+        "rate_limit_state_error": None,
+    }
+    vision = StaticVisionService()
+    vision.auto_fire = SimpleNamespace(status=lambda: dict(service_payload))
+    app = create_app(
+        app_config=config,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        motion_service=vision,  # type: ignore[arg-type]
+        temperature_reader=lambda: 44.0,
+    )
+    app.config.update(TESTING=True)
+    client = app.test_client()
+
+    page = client.get("/")
+    status = client.get("/api/status")
+    health = client.get("/api/health")
+    console_script = client.get("/static/console.js")
+
+    assert page.status_code == status.status_code == health.status_code == 200
+    assert b'id="auto-fire-value">ENABLED<' in page.data
+    assert b"AUTO FIRE ENABLED" in page.data
+    assert b"Computer-aided physical firing is armed" in page.data
+    assert b'id="sys-auto-fire">ENABLED \xc2\xb7 COOLDOWN<' in page.data
+    assert b"REJECTED \xc2\xb7 cooldown active \xc2\xb7 dog 87%" in page.data
+    assert b'id="sys-auto-cooldown">2.5s<' in page.data
+    assert b'id="sys-auto-hourly">2 / 6 (4 remaining)<' in page.data
+    assert status.json["auto_fire"] == expected_payload
+    assert health.json["auto_fire"] == expected_payload
+    assert b"data.auto_fire" in console_script.data
+    assert console_script.data.count(b"setInterval(") == 3
 
 
 def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path: Path) -> None:
@@ -561,8 +650,14 @@ def test_status_health_and_recent_events_endpoints(
     assert status.json["application_mode"] == "shared-camera-motion-watch"
     assert status.json["camera"]["state"] == "OFFLINE"
     assert status.json["detector"]["state"] == "LEARNING"
+    assert status.json["auto_fire"]["enabled"] is False
+    assert status.json["auto_fire"]["state"] == "DISABLED"
+    assert status.json["auto_fire"]["shots_in_rolling_window"] == 0
+    assert status.json["auto_fire"]["max_shots_per_hour"] == 6
     assert health.json["camera_alive"] is False
     assert health.json["detector_alive"] is True
+    assert health.json["auto_fire"]["enabled"] is False
+    assert health.json["auto_fire"]["remaining_shots_in_window"] == 6
     assert health.json["capture_directory_writable"] is True
     assert recent.json == {"count": 0, "events": []}
 
@@ -827,6 +922,49 @@ def test_event_archive_uses_zoom_clip_as_primary_manual_fire_replay(tmp_path: Pa
     assert "manual_fire_zoom.avi" in body
     assert "manual_fire_full.avi" in body
     assert "Full-field clip" in body
+
+
+def test_event_archive_labels_auto_fire_evidence_distinctly(tmp_path: Path) -> None:
+    config_path = write_test_config(tmp_path)
+    directory = tmp_path / "captures" / "events" / "2026-08-11" / "auto-fire-test"
+    directory.mkdir(parents=True)
+    snapshot = directory / "snapshot.jpg"
+    zoom = directory / "auto_fire_zoom.avi"
+    full = directory / "auto_fire_full.avi"
+    for path in (snapshot, zoom, full):
+        path.write_bytes(b"evidence")
+    (directory / "event.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "event_id": "auto-fire-test",
+                "source_event_id": "motion-event-7",
+                "track_id": 7,
+                "capture_method": "auto_fire",
+                "start_timestamp": "2026-08-11T12:00:00-04:00",
+                "provisional_category": "auto_fire",
+                "classifier_label": "dog",
+                "classifier_confidence": 0.91,
+                "snapshot_path": str(snapshot),
+                "clip_path": str(zoom),
+                "full_frame_clip_path": str(full),
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(
+        config_path,
+        camera_service=OfflineCameraService(),  # type: ignore[arg-type]
+        vision_service=StaticVisionService(),  # type: ignore[arg-type]
+        temperature_reader=lambda: 44.0,
+    )
+    app.config.update(TESTING=True)
+
+    body = app.test_client().get("/events").get_data(as_text=True)
+
+    assert "Auto fire · Dog" in body
+    assert "auto_fire_zoom.avi" in body
+    assert "auto_fire_full.avi" in body
 
 
 def test_dashboard_logo_is_packaged_and_served(dashboard: tuple[Flask, Path, OfflineCameraService, StaticVisionService]) -> None:

@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
@@ -87,6 +87,14 @@ class ManualFireEvent:
     crop_center_x: int | None
     crop_center_y: int | None
     crop_center_source: str
+    event_type: str = "manual_fire"
+    evidence: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.event_type not in {"manual_fire", "auto_fire"}:
+            raise ValueError("event_type must be manual_fire or auto_fire")
+        if not isinstance(self.evidence, dict):
+            raise ValueError("evidence must be a dictionary")
 
 
 @dataclass(frozen=True)
@@ -141,6 +149,11 @@ class ManualFireRecordingSink(Protocol):
 def new_manual_fire_event_id(now: datetime | None = None) -> str:
     current = now or datetime.now().astimezone()
     return current.strftime("manual-fire-%Y%m%d-%H%M%S-%f")
+
+
+def new_auto_fire_event_id(now: datetime | None = None) -> str:
+    current = now or datetime.now().astimezone()
+    return current.strftime("auto-fire-%Y%m%d-%H%M%S-%f")
 
 
 def calculate_crop_bounds(
@@ -298,9 +311,15 @@ class ManualFireRecorder:
             self._active = True
         directory = self._event_directory(event)
         LOGGER.info(
-            "Manual fire event recording started: event_id=%s",
+            "%s event recording started: event_id=%s",
+            event.event_type.replace("_", " ").title(),
             event.event_id,
-            extra={"structured_data": {"event": "manual_fire_recording_started", "event_id": event.event_id}},
+            extra={
+                "structured_data": {
+                    "event": f"{event.event_type}_recording_started",
+                    "event_id": event.event_id,
+                }
+            },
         )
         try:
             directory.mkdir(parents=True, exist_ok=False)
@@ -315,10 +334,17 @@ class ManualFireRecorder:
                 self._failed += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
             LOGGER.error(
-                "Manual fire recording failed: event_id=%s error=%s",
+                "%s recording failed: event_id=%s error=%s",
+                event.event_type.replace("_", " ").title(),
                 event.event_id,
                 exc,
-                extra={"structured_data": {"event": "manual_fire_recording_failed", "event_id": event.event_id, "error": str(exc)}},
+                extra={
+                    "structured_data": {
+                        "event": f"{event.event_type}_recording_failed",
+                        "event_id": event.event_id,
+                        "error": str(exc),
+                    }
+                },
                 exc_info=True,
             )
             try:
@@ -407,17 +433,19 @@ class ManualFireRecorder:
         requested_y = min(max(requested_y, 0), frame_height - 1)
         bounds = calculate_crop_bounds(frame_width, frame_height, requested_x, requested_y, self.config.zoom_factor)
         LOGGER.info(
-            "Manual fire recording crop center: x=%d y=%d source=%s zoom=%.2f",
+            "%s recording crop center: x=%d y=%d source=%s zoom=%.2f",
+            event.event_type.replace("_", " ").title(),
             requested_x,
             requested_y,
             event.crop_center_source,
             self.config.zoom_factor,
         )
 
-        full_path = directory / "manual_fire_full.avi"
-        zoom_path = directory / "manual_fire_zoom.avi"
-        full_incomplete = directory / "manual_fire_full.incomplete.avi"
-        zoom_incomplete = directory / "manual_fire_zoom.incomplete.avi"
+        filename_prefix = event.event_type
+        full_path = directory / f"{filename_prefix}_full.avi"
+        zoom_path = directory / f"{filename_prefix}_zoom.avi"
+        full_incomplete = directory / f"{filename_prefix}_full.incomplete.avi"
+        zoom_incomplete = directory / f"{filename_prefix}_zoom.incomplete.avi"
         recording_window_seconds = max(0.001, deadline - recording_start)
         output_fps = self._output_fps(len(packets), recording_window_seconds)
         fourcc = cv2.VideoWriter_fourcc(*self.config.clip_codec)
@@ -469,6 +497,7 @@ class ManualFireRecorder:
         snapshot_path = directory / "snapshot.jpg"
         if not self._image_writer(str(snapshot_path), crop_and_zoom(snapshot_frame, bounds)):
             raise OSError(f"Could not write {snapshot_path}")
+        role_prefix = event.event_type
         metadata = self._base_metadata(event) | {
             "status": "complete",
             "recording_status": "success",
@@ -493,19 +522,19 @@ class ManualFireRecorder:
             "clip_codec": self.config.clip_codec,
             "file_format": "AVI",
             "snapshot_path": str(snapshot_path),
-            "snapshot_file_role": "manual_fire_zoom_review_frame",
+            "snapshot_file_role": f"{role_prefix}_zoom_review_frame",
             "clip_path": str(zoom_path),
-            "clip_file_role": "manual_fire_zoom_replay",
+            "clip_file_role": f"{role_prefix}_zoom_replay",
             "recording_filename": zoom_path.name,
             "recording_path": str(zoom_path),
             "full_frame_filename": full_path.name if self.config.save_full_frame_clip else None,
             "full_frame_clip_path": str(full_path) if self.config.save_full_frame_clip else None,
-            "full_frame_file_role": "manual_fire_full_frame_evidence" if self.config.save_full_frame_clip else None,
+            "full_frame_file_role": f"{role_prefix}_full_frame_evidence" if self.config.save_full_frame_clip else None,
         }
         self._write_metadata(directory / "event.json", metadata)
-        LOGGER.info("Manual fire zoom recording saved: %s", zoom_path)
+        LOGGER.info("%s zoom recording saved: %s", event.event_type.replace("_", " ").title(), zoom_path)
         if self.config.save_full_frame_clip:
-            LOGGER.info("Manual fire recording saved: %s", full_path)
+            LOGGER.info("%s recording saved: %s", event.event_type.replace("_", " ").title(), full_path)
         return frames_written, output_fps
 
     @staticmethod
@@ -527,17 +556,25 @@ class ManualFireRecorder:
 
     @staticmethod
     def _base_metadata(event: ManualFireEvent) -> dict[str, Any]:
-        return {
+        evidence = dict(event.evidence)
+        source_event_id = evidence.pop("event_id", None)
+        if source_event_id is not None:
+            evidence["source_event_id"] = source_event_id
+        core = {
             "schema_version": 1,
             "event_id": event.event_id,
-            "event_type": "manual_fire",
-            "capture_method": "manual_fire",
+            "event_type": event.event_type,
+            "capture_method": event.event_type,
             "start_timestamp": event.timestamp,
             "pan": event.pan,
             "tilt": event.tilt,
             "fire_pulse_seconds": event.fire_pulse_seconds,
-            "provisional_category": "manual_fire",
+            "provisional_category": event.event_type,
         }
+        # Hardware-authoritative facts and the recorder's own identity always
+        # win over caller-supplied evidence. A source motion ``event_id`` is
+        # retained under the unambiguous ``source_event_id`` key instead.
+        return evidence | core
 
     @staticmethod
     def _write_metadata(path: Path, payload: dict[str, Any]) -> None:

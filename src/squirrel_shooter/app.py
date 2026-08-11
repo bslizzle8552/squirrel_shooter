@@ -36,6 +36,7 @@ class ApplicationRuntime:
         *,
         camera: CameraService | None = None,
         motion: MotionProcessingService | None = None,
+        manual_control: ManualControlService | None = None,
     ) -> None:
         self.config = config
         cv2.setNumThreads(config.runtime.opencv_threads)
@@ -53,7 +54,12 @@ class ApplicationRuntime:
             ),
             frame_buffer_fps=config.manual_control.recording.target_fps,
         )
-        self.motion = motion or MotionProcessingService(self.camera, config)
+        self.manual_control = manual_control
+        self.motion = motion or MotionProcessingService(
+            self.camera,
+            config,
+            manual_control_service=manual_control,
+        )
         self._lock = threading.Lock()
         self._started = False
 
@@ -62,10 +68,11 @@ class ApplicationRuntime:
             if self._started:
                 return
             self._started = True
-        self.camera.start()
         try:
+            self.camera.start()
             self.motion.start()
         except Exception:
+            _cleanup_manual_control(self.manual_control)
             self.camera.stop(timeout=self.config.runtime.shutdown_timeout_seconds)
             with self._lock:
                 self._started = False
@@ -78,6 +85,7 @@ class ApplicationRuntime:
             self._started = False
         timeout = self.config.runtime.shutdown_timeout_seconds
         self.motion.stop(timeout=timeout)
+        _cleanup_manual_control(self.manual_control)
         self.camera.stop(timeout=timeout)
 
     def status(self) -> dict[str, Any]:
@@ -154,6 +162,49 @@ def _cleanup_manual_control(control: ManualControlService | None) -> None:
         LOGGER.exception("Manual control cleanup failed; continuing application shutdown")
 
 
+def build_application_runtime(config: AppConfig) -> ApplicationRuntime:
+    """Compose the sole camera, optional shared coordinator, and motion service."""
+
+    camera = CameraService(
+        config.camera,
+        shared_settings=config.shared_camera,
+        jpeg_quality=config.dashboard.jpeg_quality,
+        encode_jpeg=True,
+        frame_buffer_seconds=(
+            config.manual_control.recording.pre_roll_seconds
+            + config.manual_control.fire_pulse_seconds
+            + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
+            if config.manual_control.recording.enabled
+            else 0.0
+        ),
+        frame_buffer_fps=config.manual_control.recording.target_fps,
+    )
+    manual_control = None
+    if config.dashboard.enabled or config.auto_fire.enabled:
+        manual_control = build_manual_control_service(
+            config.pan_tilt,
+            config.manual_control,
+            config.valve,
+            camera_service=camera,
+            output_directory=config.camera.output_directory,
+        )
+    try:
+        motion = MotionProcessingService(
+            camera,
+            config,
+            manual_control_service=manual_control,
+        )
+    except Exception:
+        _cleanup_manual_control(manual_control)
+        raise
+    return ApplicationRuntime(
+        config,
+        camera=camera,
+        motion=motion,
+        manual_control=manual_control,
+    )
+
+
 def runtime_performance_snapshot(
     runtime: ApplicationRuntime,
     manual_control: ManualControlService | None,
@@ -163,6 +214,7 @@ def runtime_performance_snapshot(
     camera = runtime.camera.status()
     motion = runtime.motion.status()
     classifier = runtime.motion.classifier.status()
+    auto_fire = runtime.motion.auto_fire.status()
     recording: dict[str, Any] = {}
     if manual_control is not None:
         candidate = manual_control.status().get("recording")
@@ -193,6 +245,12 @@ def runtime_performance_snapshot(
         "classifier_queue_depth": classifier.queue_depth,
         "classifier_inference_fps": round(classifier.inference_fps, 4),
         "classifier_last_latency_ms": classifier.last_latency_ms,
+        "auto_fire_candidates_evaluated": int(auto_fire.get("candidates_evaluated", 0) or 0),
+        "auto_fire_accepted": int(auto_fire.get("accepted", 0) or 0),
+        "auto_fire_rejected": int(auto_fire.get("rejected", 0) or 0),
+        "auto_fire_shots_in_rolling_window": int(
+            auto_fire.get("shots_in_rolling_window", 0) or 0
+        ),
         "manual_recording_active": bool(recording.get("active", False)),
         "manual_recording_queued": int(recording.get("queued", 0) or 0),
         "manual_recording_failed": int(recording.get("failed", 0) or 0),
@@ -254,19 +312,12 @@ def run(config: AppConfig) -> int:
     """Run until Ctrl+C or local q, then shut every subsystem down in order."""
 
     configure_logging(config.logging, config.storage.max_log_files)
-    runtime = ApplicationRuntime(config)
+    runtime = build_application_runtime(config)
     server: DashboardServer | None = None
-    manual_control: ManualControlService | None = None
+    manual_control = runtime.manual_control
     runtime.start()
     try:
         if config.dashboard.enabled:
-            manual_control = build_manual_control_service(
-                config.pan_tilt,
-                config.manual_control,
-                config.valve,
-                camera_service=runtime.camera,
-                output_directory=config.camera.output_directory,
-            )
             flask_app = create_app(
                 app_config=config,
                 camera_service=runtime.camera,
@@ -281,7 +332,6 @@ def run(config: AppConfig) -> int:
         else:
             print("Dashboard disabled; motion processing is still active.")
     except Exception:
-        _cleanup_manual_control(manual_control)
         runtime.stop()
         raise
     show_preview = not config.runtime.headless and display_available()
@@ -334,7 +384,6 @@ def run(config: AppConfig) -> int:
             cv2.destroyAllWindows()
         if server is not None:
             server.stop(timeout=config.runtime.shutdown_timeout_seconds)
-        _cleanup_manual_control(manual_control)
         runtime.stop()
         LOGGER.info(
             "Combined application shutdown complete",

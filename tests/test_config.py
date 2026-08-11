@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from squirrel_shooter.auto_fire import AutoFireConfig
 from squirrel_shooter.config import ConfigError, load_config
 from squirrel_shooter.pan_tilt import PanTiltConfig
 from squirrel_shooter.manual_control import ManualControlConfig
@@ -35,6 +36,12 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.night_mode.pause_recording_and_classifier is True
     assert config.night_mode.enter_consecutive_frames == 5
     assert config.night_mode.exit_consecutive_frames == 10
+    assert config.auto_fire.enabled is False
+    assert config.auto_fire.allowed_classes == ("dog", "bird")
+    assert config.auto_fire.min_confidence == 0.75
+    assert config.auto_fire.cooldown_seconds == 5.0
+    assert config.auto_fire.max_shots_per_event == 1
+    assert config.auto_fire.max_shots_per_hour == 6
     assert config.pan_tilt.i2c_address == 0x40
     assert config.pan_tilt.pan_channel == 0
     assert config.pan_tilt.tilt_channel == 1
@@ -156,6 +163,98 @@ def test_older_config_without_manual_hardware_sections_uses_safe_defaults(tmp_pa
 
     assert config.manual_control == ManualControlConfig()
     assert config.valve == ValveConfig()
+
+
+def test_older_config_without_auto_fire_section_is_disabled_and_empty(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    del raw["auto_fire"]
+    config_path = tmp_path / "legacy.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    assert load_config(config_path).auto_fire == AutoFireConfig()
+
+
+def test_auto_fire_allows_an_explicit_empty_allowlist(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["auto_fire"]["allowed_classes"] = []
+    config_path = tmp_path / "empty-auto-fire-allowlist.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    assert load_config(config_path).auto_fire.allowed_classes == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("enabled", "yes", "enabled"),
+        ("min_confidence", 1.01, "min_confidence"),
+        ("min_confidence", 0.74, "min_confidence"),
+        ("cooldown_seconds", 0, "cooldown_seconds"),
+        ("max_shots_per_event", 0, "max_shots_per_event"),
+        ("max_shots_per_hour", 0, "max_shots_per_hour"),
+        ("classification_max_age_seconds", 0, "classification_max_age_seconds"),
+        ("target_max_age_seconds", 0, "target_max_age_seconds"),
+    ],
+)
+def test_rejects_invalid_auto_fire_scalars(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["auto_fire"][field] = value
+    config_path = tmp_path / f"bad-auto-fire-{field}.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        ["person"],
+        ["squirrel"],
+        ["dog", "dog"],
+        "dog",
+    ],
+)
+def test_rejects_unsafe_or_invalid_auto_fire_allowlists(tmp_path: Path, labels: object) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["auto_fire"]["allowed_classes"] = labels
+    config_path = tmp_path / "bad-auto-fire-labels.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="auto_fire.allowed_classes"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "section_path",
+    [
+        ("classifier", "enabled"),
+        ("night_mode", "pause_recording_and_classifier"),
+        ("manual_control", "servo_enabled"),
+        ("manual_control", "recording", "enabled"),
+        ("valve", "enabled"),
+    ],
+)
+def test_enabled_auto_fire_requires_every_safety_dependency(
+    tmp_path: Path,
+    section_path: tuple[str, ...],
+) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["auto_fire"]["enabled"] = True
+    target = raw
+    for part in section_path[:-1]:
+        target = target[part]
+    target[section_path[-1]] = False
+    config_path = tmp_path / f"unsafe-auto-fire-{'-'.join(section_path)}.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="enabled auto_fire requires"):
+        load_config(config_path)
 
 
 def test_valve_cannot_be_enabled_without_a_gpio_pin(tmp_path: Path) -> None:

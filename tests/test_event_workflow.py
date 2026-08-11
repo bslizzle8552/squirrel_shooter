@@ -15,6 +15,7 @@ from conftest import write_test_config
 from squirrel_shooter.config import load_config
 from squirrel_shooter.event_report import generate_reports
 from squirrel_shooter.event_storage import (
+    EVENT_FIELDS,
     EventLogWriter,
     EventRecorder,
     RollingFrameBuffer,
@@ -115,6 +116,7 @@ def test_event_json_csv_and_jsonl_are_completed_and_flushed(tmp_path: Path) -> N
     active = recorder.begin(7, candidate(), frame, frame, [(0.0, frame), (0.1, frame)], now=1.0, measured_fps=9.9)
     recorder.update(7, candidate(), frame, now=1.1)
     record = recorder.finish(7, now=4.2)
+    assert record["track_id"] == 7
     assert record["provisional_category"] == "small_animal_candidate"
     assert record["ir_mode_if_explicitly_detected_or_configured"] == "unknown"
     assert record["session_id"] == "session-one"
@@ -127,7 +129,9 @@ def test_event_json_csv_and_jsonl_are_completed_and_flushed(tmp_path: Path) -> N
     event = json.loads((active.directory / "event.json").read_text(encoding="utf-8"))
     assert event["status"] == "complete" and event["human_review_label"] == ""
     with logs.csv_path.open(newline="", encoding="utf-8") as handle:
-        assert list(csv.DictReader(handle))[0]["event_id"] == active.event_id
+        logged = list(csv.DictReader(handle))[0]
+        assert logged["event_id"] == active.event_id
+        assert logged["track_id"] == "7"
     assert json.loads(logs.jsonl_path.read_text(encoding="utf-8").splitlines()[0])["event_id"] == active.event_id
     assert writers[0].released
 
@@ -184,6 +188,32 @@ def test_completed_log_files_rotate_without_deleting_active_log(tmp_path: Path) 
     assert logs.csv_path.exists() and logs.jsonl_path.exists()
     assert logs.csv_path.with_name(logs.csv_path.name + ".1").exists()
     assert logs.jsonl_path.with_name(logs.jsonl_path.name + ".1").exists()
+
+
+def test_event_csv_schema_upgrade_rotates_legacy_header_before_appending(tmp_path: Path) -> None:
+    logs = EventLogWriter(configured(tmp_path))
+    legacy_fields = [field for field in EVENT_FIELDS if field != "track_id"]
+    logs.csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with logs.csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=legacy_fields)
+        writer.writeheader()
+        writer.writerow({"event_id": "legacy-event", "session_id": "legacy-session"})
+
+    logs.append_event({"event_id": "new-event", "track_id": 7, "session_id": "new-session"})
+
+    rotated = logs.csv_path.with_name(logs.csv_path.name + ".1")
+    with rotated.open(newline="", encoding="utf-8") as handle:
+        legacy_rows = list(csv.DictReader(handle))
+    with logs.csv_path.open(newline="", encoding="utf-8") as handle:
+        current_reader = csv.DictReader(handle)
+        current_rows = list(current_reader)
+
+    assert legacy_rows[0]["event_id"] == "legacy-event"
+    assert "track_id" not in legacy_rows[0]
+    assert current_reader.fieldnames == list(EVENT_FIELDS)
+    assert current_rows[0]["event_id"] == "new-event"
+    assert current_rows[0]["track_id"] == "7"
+    assert current_rows[0]["session_id"] == "new-session"
 
 
 def test_application_log_is_bounded_and_only_successful_routine_access_is_suppressed(tmp_path: Path) -> None:

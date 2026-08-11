@@ -165,6 +165,79 @@ def test_recorder_associates_full_and_zoom_clips_with_one_manual_event(tmp_path:
     assert all(frame.shape == (36, 64, 3) for frames_written in written.values() for frame in frames_written)
 
 
+def test_recorder_writes_auto_fire_files_and_protects_record_identity(tmp_path: Path) -> None:
+    frames = [
+        FramePacket(index, np.full((36, 64, 3), index * 30, dtype=np.uint8), "stamp", float(index))
+        for index in range(3)
+    ]
+    written: dict[str, list[np.ndarray]] = {}
+
+    def writer_factory(path: str, _fourcc: int, _fps: float, _size: tuple[int, int]) -> FakeWriter:
+        return FakeWriter(path, written)
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    event = replace(
+        manual_event(),
+        event_id="auto-fire-test",
+        event_type="auto_fire",
+        evidence={
+            "event_id": "motion-event-source",
+            "event_type": "unsafe-override",
+            "capture_method": "unsafe-override",
+            "pan": 999,
+            "classifier_label": "dog",
+            "classifier_confidence": 0.91,
+            "track_id": 7,
+            "target_pixel_x": 640,
+            "target_pixel_y": 360,
+            "calculated_pan": 70.0,
+            "calculated_tilt": 88.0,
+            "cooldown_seconds": 5.0,
+            "safe_bound_result": "inside_calibrated_area",
+            "interpolation_result": "success",
+        },
+    )
+    recorder = ManualFireRecorder(
+        FakeCamera(frames),
+        tmp_path,
+        ManualFireRecordingConfig(
+            pre_roll_seconds=2.0,
+            post_roll_seconds=0.01,
+            crop_center_x=32,
+            crop_center_y=18,
+        ),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: 10.0,
+    )
+
+    recorder.record(event)
+    recorder.close()
+
+    directory = tmp_path / "events" / "2026-08-09" / "auto-fire-test"
+    metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
+    assert metadata["event_id"] == "auto-fire-test"
+    assert metadata["source_event_id"] == "motion-event-source"
+    assert metadata["event_type"] == "auto_fire"
+    assert metadata["capture_method"] == "auto_fire"
+    assert metadata["provisional_category"] == "auto_fire"
+    assert metadata["pan"] == 70.0
+    assert metadata["classifier_label"] == "dog"
+    assert metadata["classifier_confidence"] == 0.91
+    assert metadata["track_id"] == 7
+    assert metadata["cooldown_seconds"] == 5.0
+    assert metadata["safe_bound_result"] == "inside_calibrated_area"
+    assert Path(metadata["clip_path"]).name == "auto_fire_zoom.avi"
+    assert Path(metadata["full_frame_clip_path"]).name == "auto_fire_full.avi"
+    assert metadata["snapshot_file_role"] == "auto_fire_zoom_review_frame"
+    assert metadata["clip_file_role"] == "auto_fire_zoom_replay"
+    assert metadata["full_frame_file_role"] == "auto_fire_full_frame_evidence"
+    assert len(written) == 2
+
+
 def test_recorder_rejects_unbounded_queue_growth(tmp_path: Path) -> None:
     recorder = ManualFireRecorder(
         FakeCamera([]),
