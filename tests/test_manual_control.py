@@ -946,6 +946,56 @@ def test_legacy_calibration_requires_all_nine_pixels_to_verify_frame_geometry(
     assert calibration.frame_geometry_status()["complete"] is True
 
 
+def test_verified_calibration_pixel_outside_declared_frame_fails_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "malformed-calibration.json"
+    points = complete_calibration_grid()
+    raw_points = [
+        {
+            "point": point.point,
+            "pixel_x": 1280 if point.point == 1 else point.pixel_x,
+            "pixel_y": point.pixel_y,
+            "pan": point.pan,
+            "tilt": point.tilt,
+        }
+        for point in points
+    ]
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "frame_width": 1280,
+                "frame_height": 720,
+                "frame_verified_points": list(range(1, 10)),
+                "points": raw_points,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calibration = CalibrationStore(path)
+    service, pan_tilt, valve = make_service(tmp_path, fire_recorder=FakeFireRecorder())
+    service._calibration = calibration
+
+    assert service.status()["calibration_error"] == (
+        "Calibration Point 1 is verified outside its native frame"
+    )
+    with pytest.raises(AutomaticEngagementError) as rejected:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            evidence={},
+        )
+
+    assert rejected.value.shot_attempted is False
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+
+
 def test_automatic_engagement_is_never_queued_behind_busy_coordinator(tmp_path: Path) -> None:
     settling_started = threading.Event()
     release_settling = threading.Event()
@@ -1254,3 +1304,34 @@ def test_calibration_store_saves_and_replaces_one_of_nine_points(tmp_path: Path)
         "pan": 82.0,
         "tilt": 90.0,
     }
+
+
+def test_failed_atomic_calibration_write_does_not_advance_in_memory_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "calibration.json"
+    calibration = CalibrationStore(path)
+    point_one = CalibrationPoint(1, 100, 100, 85.0, 85.0)
+    calibration.save(point_one, frame_width=1280, frame_height=720)
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("simulated storage failure")
+
+    monkeypatch.setattr("squirrel_shooter.manual_control.os.replace", fail_replace)
+    with pytest.raises(OSError, match="simulated storage failure"):
+        calibration.save(
+            CalibrationPoint(2, 200, 200, 80.0, 90.0),
+            frame_width=1280,
+            frame_height=720,
+        )
+
+    assert calibration.frame_geometry_status() == {
+        "width": 1280,
+        "height": 720,
+        "verified_points": [1],
+        "complete": False,
+    }
+    assert calibration.load() == [point_one]
+    assert CalibrationStore(path).frame_geometry_status()["verified_points"] == [1]
+    assert not path.with_name(f".{path.name}.tmp").exists()

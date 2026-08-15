@@ -66,15 +66,18 @@
 .fire-button { width: 100%; min-height: 88px; margin-top: 16px; border: 2px solid #ff625a; border-radius: 16px; background: #b4231c; color: white; font-size: 2rem; font-weight: 950; letter-spacing: .1em; touch-action: manipulation; }
 .fire-button:disabled { border-color: var(--border); background: var(--inset); color: var(--muted); opacity: .72; }
 .hardware-note { padding: 9px 11px; border-radius: 9px; background: rgba(248, 81, 73, .09); color: #ff8c86 !important; }
+.calibration-progress-group { display: flex; align-items: flex-end; flex-direction: column; gap: 3px; }
 .calibration-progress { color: var(--text); font-variant-numeric: tabular-nums; }
 .calibration-complete { padding: 10px 12px; border: 1px solid rgba(62, 207, 130, .5); border-radius: 10px; background: rgba(62, 207, 130, .12); color: var(--ok) !important; font-weight: 750; }
+.calibration-frame-status { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin-top: 12px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--inset); font-size: .82rem; font-variant-numeric: tabular-nums; }
 .calibration-grid { display: grid; grid-template-columns: repeat(3, minmax(78px, 1fr)); gap: 9px; margin-top: 16px; }
 .calibration-point-button { min-height: 76px; padding: 9px; border: 2px solid var(--border); border-radius: 12px; background: var(--inset); color: var(--muted); touch-action: manipulation; }
 .calibration-point-button.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); color: var(--text); }
 .calibration-point-button.pixel-selected { border-color: rgba(245, 165, 36, .75); background: rgba(245, 165, 36, .12); color: #ffd28a; }
 .calibration-point-button.aim-saved { border-color: rgba(105, 155, 255, .7); background: rgba(105, 155, 255, .12); color: #b8d2ff; }
-.calibration-point-button.saved { border-color: rgba(62, 207, 130, .65); background: rgba(62, 207, 130, .15); color: var(--ok); }
-.calibration-point-button.saved.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), inset 0 0 0 1px var(--ok); }
+.calibration-point-button.saved { border-color: rgba(105, 155, 255, .7); background: rgba(105, 155, 255, .12); color: #b8d2ff; }
+.calibration-point-button.frame-verified { border-color: rgba(62, 207, 130, .65); background: rgba(62, 207, 130, .15); color: var(--ok); }
+.calibration-point-button.frame-verified.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), inset 0 0 0 1px var(--ok); }
 .calibration-point-number { display: block; font-size: 1.55rem; font-weight: 900; line-height: 1; }
 .calibration-point-state { display: block; margin-top: 7px; font-size: .69rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
 .calibration-actions { display: block; margin-top: 16px; }
@@ -110,6 +113,8 @@ button:focus-visible, select:focus-visible { outline: 3px solid var(--accent); o
   .dpad { grid-template-columns: repeat(3, minmax(76px, 1fr)); }
   .dpad-button { min-height: 96px; }
   .calibration-details dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .calibration-frame-status { grid-template-columns: 1fr; }
+  .calibration-progress-group { align-items: flex-start; }
 }
 @media (max-width: 520px) {
   .manual-heading, .card-heading.aim-heading { align-items: stretch; flex-direction: column; }

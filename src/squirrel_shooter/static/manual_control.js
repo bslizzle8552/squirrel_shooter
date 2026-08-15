@@ -45,7 +45,12 @@
     saveAction: document.getElementById('save-aim-action'),
     savePoint: document.getElementById('save-aim-point'),
     savedCount: document.getElementById('saved-count'),
+    verifiedCount: document.getElementById('verified-count'),
     calibrationComplete: document.getElementById('calibration-complete'),
+    liveFrameSize: document.getElementById('live-frame-size'),
+    calibrationFrameSize: document.getElementById('calibration-frame-size'),
+    verifiedPoints: document.getElementById('verified-points'),
+    verificationComplete: document.getElementById('verification-complete'),
     calibrationButtons: document.querySelectorAll('[data-calibration-point]'),
     calibrationConfirmation: document.getElementById('calibration-confirmation'),
     calibrationConfirmationTitle: document.getElementById('calibration-confirmation-title'),
@@ -214,23 +219,34 @@
   function renderCalibration(next) {
     selectedCalibrationPoint = next.active_calibration_point;
     var savedCount = next.completed_calibration_count;
+    var frame = next.calibration_frame;
+    var verifiedPoints = frame.verified_points;
     var selected = calibrationRecord(next, selectedCalibrationPoint);
     els.activePoint.textContent = selectedCalibrationPoint;
-    els.savedCount.textContent = 'Calibration: ' + savedCount + ' / 9';
-    els.calibrationComplete.hidden = !next.targeting.enabled;
+    els.savedCount.textContent = 'Aim records: ' + savedCount + ' / 9';
+    els.verifiedCount.textContent = 'Native verification: ' + verifiedPoints.length + ' / 9';
+    els.calibrationComplete.hidden = !frame.complete;
+    els.liveFrameSize.textContent = next.camera_frame_width + ' x ' + next.camera_frame_height;
+    els.calibrationFrameSize.textContent = frame.width && frame.height ? frame.width + ' x ' + frame.height : 'Not recorded';
+    els.verifiedPoints.textContent = verifiedPoints.length ? verifiedPoints.join(', ') : 'None';
+    els.verificationComplete.textContent = String(frame.complete);
     els.calibrationButtons.forEach(function (button) {
       var point = Number(button.dataset.calibrationPoint);
       var record = calibrationRecord(next, point);
       var saved = Boolean(record && record.complete);
+      var frameVerified = verifiedPoints.indexOf(point) !== -1;
       var pixelSelected = Boolean(record && record.pixel_selected && !record.complete);
       var aimSaved = Boolean(record && record.aim_saved && !record.complete);
       var active = point === selectedCalibrationPoint;
       button.classList.toggle('saved', saved);
+      button.classList.toggle('frame-verified', frameVerified);
       button.classList.toggle('pixel-selected', pixelSelected);
       button.classList.toggle('aim-saved', aimSaved);
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', String(active));
-      button.querySelector('.calibration-point-state').textContent = saved ? 'Calibrated' : (pixelSelected ? 'Pixel set' : (aimSaved ? 'Aim saved' : 'Not started'));
+      button.querySelector('.calibration-point-state').textContent = frameVerified && saved
+        ? 'Verified'
+        : (frameVerified ? 'Pixel verified; aim missing' : (saved ? 'Aim saved; verify pixel' : (pixelSelected ? 'Pixel set' : (aimSaved ? 'Aim saved' : 'Not started'))));
     });
     els.point.value = selectedCalibrationPoint;
     var updatingAim = Boolean(selected && selected.aim_saved);

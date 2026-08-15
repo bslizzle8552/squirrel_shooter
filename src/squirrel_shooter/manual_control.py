@@ -520,6 +520,8 @@ class CalibrationStore:
         with self._lock:
             points = {item.point: item for item in self._points_unlocked()}
             previous = points.get(point.point)
+            next_frame_size = self._frame_size
+            next_verified_points = set(self._frame_verified_points)
             if (frame_width is None) != (frame_height is None):
                 raise ValueError("frame_width and frame_height must be provided together")
             if frame_width is not None and frame_height is not None:
@@ -533,17 +535,17 @@ class CalibrationStore:
                 ):
                     raise ValueError("Calibration frame dimensions must be positive integers")
                 requested_size = (frame_width, frame_height)
-                if self._frame_size is not None and requested_size != self._frame_size:
+                if next_frame_size is not None and requested_size != next_frame_size:
                     raise ValueError(
                         "Calibration frame dimensions changed; start a new calibration file "
                         "instead of mixing pixel geometries"
                     )
-                self._frame_size = requested_size
-                self._frame_verified_points.add(point.point)
+                next_frame_size = requested_size
+                next_verified_points.add(point.point)
             elif previous is not None and (
                 previous.pixel_x != point.pixel_x or previous.pixel_y != point.pixel_y
             ):
-                self._frame_verified_points.discard(point.point)
+                next_verified_points.discard(point.point)
             points[point.point] = point
             ordered = [points[index] for index in sorted(points)]
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -552,17 +554,23 @@ class CalibrationStore:
                 "schema_version": 2,
                 "points": [asdict(item) for item in ordered],
             }
-            if self._frame_size is not None:
+            if next_frame_size is not None:
                 payload.update(
-                    frame_width=self._frame_size[0],
-                    frame_height=self._frame_size[1],
-                    frame_verified_points=sorted(self._frame_verified_points),
+                    frame_width=next_frame_size[0],
+                    frame_height=next_frame_size[1],
+                    frame_verified_points=sorted(next_verified_points),
                 )
-            temporary.write_text(
-                json.dumps(payload, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, self.path)
+            try:
+                temporary.write_text(
+                    json.dumps(payload, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temporary, self.path)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+            self._frame_size = next_frame_size
+            self._frame_verified_points = next_verified_points
             self._cache = ordered
             return list(ordered)
 
@@ -575,7 +583,9 @@ class CalibrationStore:
         if not self.path.exists():
             return []
         raw = json.loads(self.path.read_text(encoding="utf-8"))
-        records = raw.get("points") if isinstance(raw, dict) else None
+        if not isinstance(raw, dict):
+            raise ValueError("Calibration file must contain a JSON object")
+        records = raw.get("points")
         if not isinstance(records, list):
             raise ValueError("Calibration file must contain a points list")
         frame_width = raw.get("frame_width")
@@ -593,8 +603,8 @@ class CalibrationStore:
         if frame_width is None and frame_height is None:
             if raw_verified_points:
                 raise ValueError("Calibration file cannot verify frame points without dimensions")
-            self._frame_size = None
-            self._frame_verified_points = set()
+            loaded_frame_size = None
+            loaded_verified_points: set[int] = set()
         elif (
             isinstance(frame_width, bool)
             or not isinstance(frame_width, int)
@@ -605,13 +615,29 @@ class CalibrationStore:
         ):
             raise ValueError("Calibration file frame dimensions must be positive integers")
         else:
-            self._frame_size = (frame_width, frame_height)
-            self._frame_verified_points = set(raw_verified_points)
+            loaded_frame_size = (frame_width, frame_height)
+            loaded_verified_points = set(raw_verified_points)
         points = [CalibrationPoint(**record) for record in records]
         if len({point.point for point in points}) != len(points):
             raise ValueError("Calibration file contains duplicate point numbers")
-        if not self._frame_verified_points.issubset({point.point for point in points}):
+        points_by_number = {point.point: point for point in points}
+        if not loaded_verified_points.issubset(points_by_number):
             raise ValueError("Calibration file verifies frame geometry for a missing point")
+        if loaded_frame_size is not None:
+            for point_number in loaded_verified_points:
+                point = points_by_number[point_number]
+                pixel_x, pixel_y = point.pixel_x, point.pixel_y
+                if (
+                    pixel_x is None
+                    or pixel_y is None
+                    or pixel_x >= loaded_frame_size[0]
+                    or pixel_y >= loaded_frame_size[1]
+                ):
+                    raise ValueError(
+                        f"Calibration Point {point_number} is verified outside its native frame"
+                    )
+        self._frame_size = loaded_frame_size
+        self._frame_verified_points = loaded_verified_points
         return sorted(points, key=lambda point: point.point)
 
 

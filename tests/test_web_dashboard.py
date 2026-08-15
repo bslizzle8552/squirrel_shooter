@@ -287,7 +287,12 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="fire-status">READY<' in page.data
     assert b"Commanded positions only" in page.data
     assert b"startup reference" in page.data
-    assert b"Calibration: 0 / 9" in page.data
+    assert b"Aim records: 0 / 9" in page.data
+    assert b"Native verification: 0 / 9" in page.data
+    assert b'id="live-frame-size">1280 x 720<' in page.data
+    assert b'id="calibration-frame-size">Not recorded<' in page.data
+    assert b'id="verified-points">None<' in page.data
+    assert b'id="verification-complete">false<' in page.data
     assert b'id="active-calibration-point">1<' in page.data
     assert b'id="calibration-image"' in page.data
     assert b'id="calibration-marker"' in page.data
@@ -362,9 +367,12 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert pixel_selected.json["control"]["camera_frame_width"] == 1280
     assert pixel_selected.json["control"]["camera_frame_height"] == 720
     partial_page = client.get("/manual-control")
-    assert b"Calibration: 0 / 9" in partial_page.data
-    assert b'class="calibration-point-button active pixel-selected"' in partial_page.data
-    assert b'class="calibration-point-button active saved"' not in partial_page.data
+    assert b"Aim records: 0 / 9" in partial_page.data
+    assert b"Native verification: 1 / 9" in partial_page.data
+    assert b'class="calibration-point-button active frame-verified pixel-selected"' in partial_page.data
+    assert b'id="calibration-frame-size">1280 x 720<' in partial_page.data
+    assert b'id="verified-points">1<' in partial_page.data
+    assert b'id="verification-complete">false<' in partial_page.data
     assert b'id="calibration-detail-pixel-x">640<' in partial_page.data
     assert b'id="calibration-detail-pixel-y">360<' in partial_page.data
     assert b'id="calibration-detail-pan">Not saved<' in partial_page.data
@@ -412,8 +420,9 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         "tilt": 82.0,
     }
     saved_page = client.get("/manual-control")
-    assert b"Calibration: 1 / 9" in saved_page.data
-    assert b'class="calibration-point-button active saved"' in saved_page.data
+    assert b"Aim records: 1 / 9" in saved_page.data
+    assert b"Native verification: 1 / 9" in saved_page.data
+    assert b'class="calibration-point-button active saved frame-verified"' in saved_page.data
     assert b'id="calibration-detail-point">1<' in saved_page.data
     assert b'id="calibration-detail-pixel-x">640<' in saved_page.data
     assert 'id="calibration-detail-pan">79.0°<'.encode("utf-8") in saved_page.data
@@ -451,9 +460,11 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         )
         assert response.status_code == 200
     complete_page = client.get("/manual-control")
-    assert b"Calibration: 9 / 9" in complete_page.data
-    assert b"All nine blocks have camera pixels and saved aim" in complete_page.data
-    assert b"Desktop AIM TARGET mode is ready" in complete_page.data
+    assert b"Aim records: 9 / 9" in complete_page.data
+    assert b"Native verification: 9 / 9" in complete_page.data
+    assert b"Native calibration verification is complete for all nine points" in complete_page.data
+    assert b'id="verified-points">1, 2, 3, 4, 5, 6, 7, 8, 9<' in complete_page.data
+    assert b'id="verification-complete">true<' in complete_page.data
 
     now[0] = 110.0
     before_aim = json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8"))
@@ -529,6 +540,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"ArrowLeft: 'left'" in manual_script.data
     assert b"ArrowRight: 'right'" in manual_script.data
     assert b"display_width: rect.width" in manual_script.data
+    assert b"Native verification: " in manual_script.data
+    assert b"verifiedPoints.indexOf(point)" in manual_script.data
     assert b"renderPixelMarker" in manual_script.data
     assert b"renderTargetMarker" in manual_script.data
     assert b"cameraMode === 'aim'" in manual_script.data
