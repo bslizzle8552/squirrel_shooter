@@ -458,7 +458,7 @@ def test_manual_fire_closes_valve_then_parks_without_changing_calibration(tmp_pa
     delays.clear()
     pan_tilt.moves.clear()
 
-    service.fire()
+    assert service.fire() is False
 
     assert events == ["close", "open", "pulse", "close", "move", "settle"]
     assert delays == [0.40, 0.15]
@@ -502,6 +502,126 @@ def test_active_calibration_point_is_shared_service_state(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="integer from 1 to 9"):
         service.select_calibration_point(10)
+
+
+def test_edit_selection_moves_to_exact_saved_aim_and_holds_without_firing(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    def recording_sleep(seconds: float) -> None:
+        assert seconds == 0.15
+        events.append("settle")
+
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        sleep=recording_sleep,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+    )
+
+    position = service.select_calibration_point_for_edit(4)
+
+    assert position == PanTiltPosition(150, 110)
+    assert pan_tilt.moves == [PanTiltPosition(150, 110)]
+    assert events == ["move", "settle"]
+    assert valve.state is ValveState.CLOSED
+    assert "open" not in valve.events
+    assert service.status()["active_calibration_point"] == 4
+    assert service.status()["calibration_edit_active"] is True
+    assert service.status()["targeting"]["status"] == "POINT 4 SAVED AIM READY"
+
+
+def test_edit_selection_with_no_saved_aim_reports_and_does_not_move(tmp_path: Path) -> None:
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        calibration_points=[CalibrationPoint(2, 100, 100, None, None)],
+    )
+
+    assert service.select_calibration_point_for_edit(2) is None
+
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+    assert service.status()["active_calibration_point"] == 2
+    assert service.status()["calibration_edit_active"] is True
+    assert service.status()["targeting"]["status"] == "POINT 2 SELECTED"
+    assert "no saved Pan/Tilt aim" in str(service.status()["targeting"]["error"])
+
+
+def test_edit_selection_rejects_saved_aim_outside_servo_limits(tmp_path: Path) -> None:
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        calibration_points=[CalibrationPoint(1, 100, 100, 151.0, 110.0)],
+    )
+
+    with pytest.raises(ControlError, match="outside configured servo limits"):
+        service.select_calibration_point_for_edit(1)
+
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+    assert "open" not in valve.events
+
+
+def test_calibration_manual_fire_pulses_and_holds_exact_aim(tmp_path: Path) -> None:
+    events: list[str] = []
+    delays: list[float] = []
+
+    def recording_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        events.append("pulse" if seconds == 0.40 else "settle")
+
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        sleep=recording_sleep,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+    )
+    service.select_calibration_point_for_edit(5)
+    events.clear()
+    delays.clear()
+    pan_tilt.moves.clear()
+
+    assert service.fire() is True
+
+    assert events == ["close", "open", "pulse", "close"]
+    assert delays == [0.40]
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+    assert service.status()["pan"] == 90
+    assert service.status()["tilt"] == 110
+    assert service.status()["targeting"]["status"] == "POINT 5 CALIBRATION HOLD"
+    assert service.status()["calibration_edit_active"] is True
+    assert service.status()["cooldown_remaining_seconds"] == 10.0
+    with pytest.raises(FireCooldownError):
+        service.fire()
+    assert service.move("up", 1) == PanTiltPosition(90, 111)
+
+
+def test_calibration_manual_fire_failure_closes_valve_without_parking(tmp_path: Path) -> None:
+    pan_config = PanTiltConfig(settling_delay_seconds=0.15)
+    valve = FailingOpenValve()
+    pan_tilt = FakePanTilt(pan_config)
+    store = CalibrationStore(tmp_path / "calibration.json")
+    for point in complete_calibration_grid():
+        store.save(point, frame_width=1280, frame_height=720)
+    service = ManualControlService(
+        pan_config,
+        ManualControlConfig(calibration_file=tmp_path / "calibration.json"),
+        pan_tilt=pan_tilt,
+        valve=valve,
+        calibration_store=store,
+        sleep=lambda _seconds: None,
+        clock=lambda: 100.0,
+    )
+    service.select_calibration_point_for_edit(5)
+    pan_tilt.moves.clear()
+
+    with pytest.raises(OSError, match="GPIO open failed"):
+        service.fire()
+
+    assert valve.state is ValveState.CLOSED
+    assert pan_tilt.moves == []
+    assert service.status()["pan"] == 90
+    assert service.status()["tilt"] == 110
+    assert service.status()["cooldown_remaining_seconds"] == 10.0
 
 
 def test_save_active_point_uses_current_backend_commanded_position(tmp_path: Path) -> None:
@@ -655,6 +775,9 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
         calibration_points=complete_calibration_grid(),
         fire_recorder=recorder,
     )
+    service.select_calibration_point_for_edit(5)
+    events.clear()
+    pan_tilt.moves.clear()
     guard_calls: list[str] = []
 
     def final_guard() -> bool:

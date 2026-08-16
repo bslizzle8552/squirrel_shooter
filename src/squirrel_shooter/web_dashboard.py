@@ -604,14 +604,32 @@ def create_app(
             return manual_control_error(exc)
         return jsonify(target=asdict(aim), control=manual_control_status())
 
+    @app.post("/api/manual-control/calibration/edit/start")
+    def api_manual_control_calibration_edit_start() -> Any:
+        require_manual_control_token()
+        try:
+            manual_control.enter_calibration_edit_mode()
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(control=manual_control_status())
+
+    @app.post("/api/manual-control/calibration/edit/stop")
+    def api_manual_control_calibration_edit_stop() -> Any:
+        require_manual_control_token()
+        try:
+            manual_control.exit_calibration_edit_mode()
+        except Exception as exc:
+            return manual_control_error(exc)
+        return jsonify(control=manual_control_status())
+
     @app.post("/api/manual-control/fire")
     def api_manual_control_fire() -> Any:
         require_manual_control_token()
         try:
-            manual_control.fire()
+            held_position = manual_control.fire()
         except Exception as exc:
             return manual_control_error(exc)
-        return jsonify(control=manual_control_status())
+        return jsonify(held_position=held_position, control=manual_control_status())
 
     @app.post("/api/manual-control/park")
     def api_manual_control_park() -> Any:
@@ -641,10 +659,14 @@ def create_app(
         if not isinstance(payload, dict):
             return jsonify(error="A JSON request body is required", control=manual_control_status()), 400
         try:
-            manual_control.select_calibration_point(payload.get("point"))
+            position = manual_control.select_calibration_point_for_edit(payload.get("point"))
         except Exception as exc:
             return manual_control_error(exc)
-        return jsonify(control=manual_control_status())
+        return jsonify(
+            moved_to_saved_aim=position is not None,
+            commanded_position=None if position is None else asdict(position),
+            control=manual_control_status(),
+        )
 
     @app.post("/api/manual-control/calibration/pixel")
     def api_manual_control_calibration_pixel() -> Any:

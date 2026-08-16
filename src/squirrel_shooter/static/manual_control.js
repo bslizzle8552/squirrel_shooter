@@ -5,7 +5,7 @@
 
   var selectedStep = cfg.initial.default_step;
   var selectedCalibrationPoint = cfg.initial.active_calibration_point;
-  var cameraMode = cfg.initial.targeting.enabled ? 'aim' : 'calibration';
+  var cameraMode = cfg.initial.calibration_edit_active ? 'calibration' : (cfg.initial.targeting.enabled ? 'aim' : 'calibration');
   var requestPending = false;
   var refreshPending = false;
   var stateRevision = 0;
@@ -200,7 +200,7 @@
     });
     els.cameraModeNote.textContent = cameraMode === 'aim'
       ? 'AIM TARGET: click inside the calibrated garden region to move and settle. Clicking never fires.'
-      : 'EDIT CALIBRATION: select a point, then click the center of its physical block.';
+      : 'EDIT CALIBRATION: selecting a saved point moves to its exact saved aim. Adjust, test FIRE if needed, select its new pixel, then UPDATE AIM. Calibration FIRE holds position.';
     els.pixelStatus.hidden = cameraMode !== 'calibration';
     els.targetingStatus.textContent = next.targeting.status;
     els.targetPixelX.textContent = next.targeting.pixel_x === null ? '--' : next.targeting.pixel_x;
@@ -244,6 +244,7 @@
       button.classList.toggle('aim-saved', aimSaved);
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', String(active));
+      button.disabled = requestPending || cameraMode !== 'calibration';
       button.querySelector('.calibration-point-state').textContent = frameVerified && saved
         ? 'Verified'
         : (frameVerified ? 'Pixel verified; aim missing' : (saved ? 'Aim saved; verify pixel' : (pixelSelected ? 'Pixel set' : (aimSaved ? 'Aim saved' : 'Not started'))));
@@ -253,7 +254,7 @@
     els.saveAction.textContent = updatingAim ? 'UPDATE AIM' : 'SAVE AIM';
     els.savePoint.textContent = 'Point ' + selectedCalibrationPoint + ' · current Pan/Tilt';
     els.save.setAttribute('aria-label', (updatingAim ? 'Update' : 'Save') + ' current backend aim for Point ' + selectedCalibrationPoint);
-    els.save.disabled = requestPending || !next.servo_available || !next.position_commanded || !selected || !selected.pixel_selected;
+    els.save.disabled = requestPending || cameraMode !== 'calibration' || !next.servo_available || !next.position_commanded || !selected || !selected.pixel_selected;
     els.detailPoint.textContent = selectedCalibrationPoint;
     els.detailPixelX.textContent = selected ? storedPixel(selected.pixel_x) : 'Not recorded (null)';
     els.detailPixelY.textContent = selected ? storedPixel(selected.pixel_y) : 'Not recorded (null)';
@@ -271,6 +272,11 @@
 
   function render(next) {
     control = next;
+    if (next.calibration_edit_active) {
+      cameraMode = 'calibration';
+    } else if (next.targeting.enabled) {
+      cameraMode = 'aim';
+    }
     els.pan.textContent = next.pan;
     els.tilt.textContent = next.tilt;
     els.state.textContent = next.state;
@@ -336,15 +342,25 @@
     button.addEventListener('click', async function () {
       if (requestPending) { return; }
       els.calibrationConfirmation.hidden = true;
-      try { await requestJson(cfg.urls.activeCalibration, {point: Number(button.dataset.calibrationPoint)}); }
+      try {
+        var selectedPayload = await requestJson(cfg.urls.activeCalibration, {point: Number(button.dataset.calibrationPoint)});
+        if (selectedPayload.moved_to_saved_aim) {
+          showToast('Point ' + selectedPayload.control.active_calibration_point + ' moved to saved aim — pan ' + selectedPayload.commanded_position.pan + '°, tilt ' + selectedPayload.commanded_position.tilt + '° — and is holding.');
+        } else {
+          showToast('Point ' + selectedPayload.control.active_calibration_point + ' has no saved Pan/Tilt aim. Selected with no movement.');
+        }
+      }
       catch (error) { showToast(error.message); }
     });
   });
   els.cameraModeButtons.forEach(function (button) {
-    button.addEventListener('click', function () {
+    button.addEventListener('click', async function () {
       if (requestPending || button.disabled) { return; }
-      cameraMode = button.dataset.cameraMode;
-      render(control);
+      try {
+        var requestedMode = button.dataset.cameraMode;
+        await requestJson(requestedMode === 'calibration' ? cfg.urls.enterCalibrationEdit : cfg.urls.exitCalibrationEdit, {});
+        showToast(requestedMode === 'calibration' ? 'EDIT CALIBRATION active. Manual FIRE will hold aim.' : 'AIM TARGET active. Manual FIRE will PARK normally.');
+      } catch (error) { showToast(error.message); }
     });
   });
   els.image.addEventListener('click', async function (event) {
@@ -361,14 +377,20 @@
         var aimPayload = await requestJson(cfg.urls.aim, click);
         showToast('AIM READY: X ' + aimPayload.target.pixel_x + ', Y ' + aimPayload.target.pixel_y + '; pan ' + aimPayload.target.pan + ', tilt ' + aimPayload.target.tilt + '. FIRE remains manual.');
       } else {
+        if (!control.calibration_edit_active) { await requestJson(cfg.urls.enterCalibrationEdit, {}); }
         var payload = await requestJson(cfg.urls.calibrationPixel, click);
-      showToast('Point ' + payload.calibration_point.point + ' pixel selected — X ' + payload.calibration_point.pixel_x + ', Y ' + payload.calibration_point.pixel_y + '.');
+        showToast('Point ' + payload.calibration_point.point + ' pixel selected — X ' + payload.calibration_point.pixel_x + ', Y ' + payload.calibration_point.pixel_y + '.');
       }
     } catch (error) { showToast(error.message); }
   });
   els.fire.addEventListener('click', async function () {
     if (requestPending || els.fire.disabled) { return; }
-    try { await requestJson(cfg.urls.fire, {}); showToast('Valve pulse complete, valve OFF, PARK complete. Cooldown active.'); }
+    try {
+      var firePayload = await requestJson(cfg.urls.fire, {});
+      showToast(firePayload.held_position
+        ? 'Valve pulse complete, valve OFF, calibration aim held. Cooldown active.'
+        : 'Valve pulse complete, valve OFF, PARK complete. Cooldown active.');
+    }
     catch (error) { showToast(error.message); }
   });
   els.save.addEventListener('click', async function () {

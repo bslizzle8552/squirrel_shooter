@@ -688,6 +688,7 @@ class ManualControlService:
         self._tilt = float(pan_tilt_config.tilt_center)
         self._position_commanded = False
         self._active_calibration_point = 1
+        self._calibration_edit_active = False
         self._last_fire_completed_at: float | None = None
         self._last_fire_cooldown_seconds = float(control_config.fire_cooldown_seconds)
         self._target_pixel: tuple[int, int] | None = None
@@ -763,6 +764,7 @@ class ManualControlService:
             "cooldown_remaining_seconds": round(remaining, 3),
             "fire_pulse_seconds": self.config.fire_pulse_seconds,
             "active_calibration_point": self._active_calibration_point,
+            "calibration_edit_active": self._calibration_edit_active,
             "calibration_points": points,
             "calibration_frame": calibration_frame,
             "completed_calibration_count": sum(bool(point["complete"]) for point in points),
@@ -808,6 +810,7 @@ class ManualControlService:
         if self._pan_tilt is None:
             raise ControlUnavailableError(self._servo_error or "Servo control is disabled")
         with self._lock:
+            self._calibration_edit_active = False
             self._target_pixel = (pixel_x, pixel_y)
             self._target_aim = None
             self._target_in_range = None
@@ -850,14 +853,22 @@ class ManualControlService:
             LOGGER.info("Target movement and settling complete; AIM READY")
             return aim
 
-    def fire(self) -> None:
+    def fire(self) -> bool:
+        """Pulse manually, parking unless backend calibration edit mode is active.
+
+        Return ``True`` only when calibration mode deliberately held the current
+        commanded position after the valve was confirmed closed.
+        """
+
         if not self.valve_available:
             raise ControlUnavailableError(self._valve_error or "Valve control is disabled until a GPIO pin is configured")
         if not self._lock.acquire(blocking=False):
             busy = self._transient_state.value if self._transient_state is not None else "another control action"
             raise ControlError(f"FIRE rejected while {busy} is active; wait for movement and settling to finish")
         try:
-            self._fire_and_park_locked()
+            hold_position = self._calibration_edit_active
+            self._fire_and_park_locked(park_after_fire=not hold_position)
+            return hold_position
         finally:
             self._lock.release()
 
@@ -1136,6 +1147,68 @@ class ManualControlService:
             self._active_calibration_point = point
             return point
 
+    def enter_calibration_edit_mode(self) -> None:
+        """Enable the backend policy used by authenticated calibration actions."""
+
+        with self._lock:
+            self._calibration_edit_active = True
+            self._targeting_status = "EDIT CALIBRATION"
+            self._targeting_error = None
+
+    def exit_calibration_edit_mode(self) -> None:
+        """Restore normal manual-fire PARK behavior."""
+
+        with self._lock:
+            self._calibration_edit_active = False
+            self._targeting_status = None
+            self._targeting_error = None
+
+    def select_calibration_point_for_edit(self, point: int) -> PanTiltPosition | None:
+        """Select a point and command its saved aim without interpolation or firing."""
+
+        if isinstance(point, bool) or not isinstance(point, int) or not 1 <= point <= 9:
+            raise ValueError("Calibration point must be an integer from 1 to 9")
+        with self._lock:
+            self._calibration_edit_active = True
+            self._active_calibration_point = point
+            self._target_pixel = None
+            self._target_aim = None
+            self._target_in_range = None
+            existing = next(
+                (record for record in self._calibration.load() if record.point == point),
+                None,
+            )
+            if existing is None or not existing.aim_saved:
+                self._targeting_status = f"POINT {point} SELECTED"
+                self._targeting_error = f"Point {point} has no saved Pan/Tilt aim; no movement was commanded"
+                return None
+            if self._pan_tilt is None:
+                raise ControlUnavailableError(self._servo_error or "Servo control is disabled")
+            pan, tilt = float(existing.pan), float(existing.tilt)
+            if not self.pan_tilt_config.pan_min <= pan <= self.pan_tilt_config.pan_max:
+                raise ControlError(
+                    f"Point {point} saved pan {pan:g} is outside configured servo limits "
+                    f"{self.pan_tilt_config.pan_min:g}-{self.pan_tilt_config.pan_max:g}"
+                )
+            if not self.pan_tilt_config.tilt_min <= tilt <= self.pan_tilt_config.tilt_max:
+                raise ControlError(
+                    f"Point {point} saved tilt {tilt:g} is outside configured servo limits "
+                    f"{self.pan_tilt_config.tilt_min:g}-{self.pan_tilt_config.tilt_max:g}"
+                )
+            self._targeting_status = f"MOVING TO POINT {point} SAVED AIM"
+            self._targeting_error = None
+            try:
+                position = self._move_locked(
+                    PanTiltPosition(pan, tilt),
+                    action="calibration",
+                )
+            except Exception as exc:
+                self._targeting_status = f"POINT {point} MOVE ERROR"
+                self._targeting_error = str(exc)
+                raise
+            self._targeting_status = f"POINT {point} SAVED AIM READY"
+            return position
+
     def set_active_calibration_pixel(
         self,
         pixel_x: int,
@@ -1245,8 +1318,17 @@ class ManualControlService:
         finally:
             self._transient_state = None
 
-    def _fire_and_park_locked(self) -> None:
+    def _fire_and_park_locked(self, *, park_after_fire: bool = True) -> None:
         self._fire_locked()
+        if not park_after_fire:
+            self._targeting_status = f"POINT {self._active_calibration_point} CALIBRATION HOLD"
+            self._targeting_error = None
+            LOGGER.info(
+                "Calibration-mode manual fire complete; holding pan=%.2f tilt=%.2f",
+                self._pan,
+                self._tilt,
+            )
+            return
         if self._pan_tilt is None:
             self._targeting_status = "PARK UNAVAILABLE"
             LOGGER.warning("Valve pulse completed but PARK is unavailable because servo control is disabled")

@@ -315,7 +315,15 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b'id="calibration-confirmation"' in page.data
     assert client.post("/api/manual-control/fire", json={}).status_code == 403
     assert client.post("/api/manual-control/park", json={}).status_code == 403
+    assert client.post("/api/manual-control/calibration/edit/start", json={}).status_code == 403
+    assert client.post("/api/manual-control/calibration/edit/stop", json={}).status_code == 403
     assert recordings == []
+    edit_started = client.post("/api/manual-control/calibration/edit/start", json={}, headers=headers)
+    assert edit_started.status_code == 200
+    assert edit_started.json["control"]["calibration_edit_active"] is True
+    edit_stopped = client.post("/api/manual-control/calibration/edit/stop", json={}, headers=headers)
+    assert edit_stopped.status_code == 200
+    assert edit_stopped.json["control"]["calibration_edit_active"] is False
     parked = client.post("/api/manual-control/park", json={}, headers=headers)
     assert parked.status_code == 200
     assert parked.json["control"]["pan"] == 85
@@ -436,6 +444,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         )
         assert selected.status_code == 200
         assert selected.json["control"]["active_calibration_point"] == point
+        assert selected.json["moved_to_saved_aim"] is False
+        assert selected.json["commanded_position"] is None
         if point == 2:
             missing_pixel = client.post("/api/manual-control/calibration", json={}, headers=headers)
             assert missing_pixel.status_code == 400
@@ -508,6 +518,8 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
         headers=headers,
     )
     assert selected_first.status_code == 200
+    assert selected_first.json["moved_to_saved_aim"] is True
+    assert selected_first.json["commanded_position"] == {"pan": 79.0, "tilt": 82.0}
     reclicked = client.post(
         "/api/manual-control/calibration/pixel",
         json={"display_x": 500, "display_y": 225, "display_width": 800, "display_height": 450},
@@ -524,7 +536,7 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert updated.status_code == 200
     assert updated.json["calibration_point"]["pixel_x"] == 800
     assert updated.json["calibration_point"]["pixel_y"] == 360
-    assert updated.json["calibration_point"]["tilt"] == 85.0
+    assert updated.json["calibration_point"]["tilt"] == 82.0
     assert len(updated.json["control"]["calibration_points"]) == 9
     assert [record["point"] for record in updated.json["control"]["calibration_points"]].count(1) == 1
 
@@ -548,6 +560,10 @@ def test_manual_control_page_and_api_enforce_token_limits_and_cooldown(tmp_path:
     assert b"cfg.urls.aim" in manual_script.data
     assert b"cfg.urls.park" in manual_script.data
     assert b"cfg.urls.calibrationPixel" in manual_script.data
+    assert b"cfg.urls.enterCalibrationEdit" in manual_script.data
+    assert b"cfg.urls.exitCalibrationEdit" in manual_script.data
+    assert b"firePayload.held_position" in manual_script.data
+    assert b"calibration aim held" in manual_script.data
     assert b"document.hidden" in manual_script.data
     assert b"AbortController" in manual_script.data
     assert b"syncStreamVisibility" in manual_script.data
