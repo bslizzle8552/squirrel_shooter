@@ -332,7 +332,7 @@ class AutoFireService:
             return self._reject("classification_unknown", **decision_fields)
         if top.label not in _MODEL_LABELS:
             return self._reject("classification_invalid", **decision_fields)
-        if top.confidence < self.config.min_confidence:
+        if top.confidence <= self.config.min_confidence:
             return self._reject("below_confidence", **decision_fields)
         if top.label not in self.config.allowed_classes:
             return self._reject("class_not_allowlisted", **decision_fields)

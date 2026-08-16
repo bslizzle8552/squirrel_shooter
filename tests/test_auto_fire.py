@@ -282,6 +282,31 @@ def test_allowlisted_fresh_target_engages_atomically_and_persists(tmp_path: Path
 
 
 @pytest.mark.parametrize(
+    ("label", "confidence", "accepted", "reason"),
+    [
+        ("dog", 0.75, False, "below_confidence"),
+        ("bird", 0.75, False, "below_confidence"),
+        ("dog", 0.7501, True, "accepted"),
+        ("bird", 0.7501, True, "accepted"),
+    ],
+)
+def test_allowlisted_confidence_must_be_strictly_greater_than_75_percent(
+    tmp_path: Path,
+    label: str,
+    confidence: float,
+    accepted: bool,
+    reason: str,
+) -> None:
+    auto, _, _, _, hardware = service(tmp_path)
+
+    decision = classify(auto, detections=(AutoFireDetection(label, confidence),))
+
+    assert decision.accepted is accepted
+    assert decision.reason == reason
+    assert len(hardware.calls) == int(accepted)
+
+
+@pytest.mark.parametrize(
     ("detections", "error", "reason"),
     [
         (None, None, "classification_missing"),
