@@ -66,15 +66,16 @@ classifier:
   audit_log_filename: classifier.jsonl
   worker_queue_capacity: 1
 
-# Computer-aided firing is inert until this explicit feature flag is changed on
-# the field Pi. It reuses one already-qualified motion event, the existing
+# Computer-aided firing is explicitly armed here for the supervised field test.
+# It reuses one already-qualified motion event, the existing
 # classifier worker, calibrated pixel interpolation, and the shared physical
 # coordinator. Only actual MobileNet-SSD VOC labels may be allowlisted.
 auto_fire:
-  enabled: false
-  min_confidence: 0.75
+  enabled: true
+  min_confidence: 0.70
   allowed_classes:
     - dog
+    - cat
     - bird
   cooldown_seconds: 5.0
   max_shots_per_event: 1

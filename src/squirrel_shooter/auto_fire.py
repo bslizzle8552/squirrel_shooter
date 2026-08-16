@@ -89,7 +89,7 @@ class AutoFireConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be true or false")
-        _finite_number(self.min_confidence, "min_confidence", minimum=0.75, maximum=1.0)
+        _finite_number(self.min_confidence, "min_confidence", minimum=0.70, maximum=1.0)
         if not isinstance(self.allowed_classes, tuple):
             raise ValueError("allowed_classes must be a tuple")
         if len(set(self.allowed_classes)) != len(self.allowed_classes):

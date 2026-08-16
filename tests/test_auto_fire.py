@@ -207,7 +207,7 @@ def test_config_defaults_are_disabled_and_validation_is_strict(tmp_path: Path) -
     with pytest.raises(ValueError, match="min_confidence"):
         config(tmp_path, min_confidence=1.1)
     with pytest.raises(ValueError, match="min_confidence"):
-        config(tmp_path, min_confidence=0.74)
+        config(tmp_path, min_confidence=0.69)
     with pytest.raises(ValueError, match="positive integer"):
         config(tmp_path, max_shots_per_hour=True)
 
@@ -284,20 +284,28 @@ def test_allowlisted_fresh_target_engages_atomically_and_persists(tmp_path: Path
 @pytest.mark.parametrize(
     ("label", "confidence", "accepted", "reason"),
     [
-        ("dog", 0.75, False, "below_confidence"),
-        ("bird", 0.75, False, "below_confidence"),
-        ("dog", 0.7501, True, "accepted"),
-        ("bird", 0.7501, True, "accepted"),
+        ("dog", 0.70, False, "below_confidence"),
+        ("cat", 0.70, False, "below_confidence"),
+        ("bird", 0.70, False, "below_confidence"),
+        ("dog", 0.7001, True, "accepted"),
+        ("cat", 0.7001, True, "accepted"),
+        ("bird", 0.7001, True, "accepted"),
     ],
 )
-def test_allowlisted_confidence_must_be_strictly_greater_than_75_percent(
+def test_allowlisted_confidence_must_be_strictly_greater_than_70_percent(
     tmp_path: Path,
     label: str,
     confidence: float,
     accepted: bool,
     reason: str,
 ) -> None:
-    auto, _, _, _, hardware = service(tmp_path)
+    auto, _, _, _, hardware = service(
+        tmp_path,
+        config_changes={
+            "min_confidence": 0.70,
+            "allowed_classes": ("dog", "cat", "bird"),
+        },
+    )
 
     decision = classify(auto, detections=(AutoFireDetection(label, confidence),))
 
@@ -312,7 +320,7 @@ def test_allowlisted_confidence_must_be_strictly_greater_than_75_percent(
         (None, None, "classification_missing"),
         ((), None, "classification_unknown"),
         ((AutoFireDetection("unknown", 0.95),), None, "classification_unknown"),
-        ((AutoFireDetection("dog", 0.74),), None, "below_confidence"),
+        ((AutoFireDetection("dog", 0.69),), None, "below_confidence"),
         ((AutoFireDetection("cat", 0.95),), None, "class_not_allowlisted"),
         ((AutoFireDetection("squirrel", 0.95),), None, "classification_invalid"),
         ((object(),), None, "classification_invalid"),

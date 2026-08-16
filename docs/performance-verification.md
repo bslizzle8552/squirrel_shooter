@@ -12,7 +12,7 @@ Expensive consumers run at independent rates:
 - sampled raw manual-fire pre-roll and replay: 12 FPS
 - one shared live MJPEG representation: at most 8 FPS, only with a viewer
 - classifier: one task per qualified event through the existing classifier
-  worker, never per camera frame. With `auto_fire.enabled: false` (the default),
+  worker, never per camera frame. With `auto_fire.enabled: false`,
   the task is submitted after event completion using the selected best event
   frame. With auto-fire enabled, one live task is submitted when the event
   qualifies so the result can pass the freshness gates.
@@ -181,7 +181,7 @@ Use deltas between stages, not one instantaneous number:
   global lighting measurements, blur/morphology, mask, and contour work;
 - annotation time should be near zero in quiet, zero-viewer headless operation;
 - dashboard encode time and estimated egress should rise only with a viewer;
-- with default-disabled auto-fire, classifier queue/inference should change
+- with auto-fire disabled, classifier queue/inference should change
   only after a completed qualified event; with auto-fire enabled, it should
   change once when the event first qualifies, with no continuous classifier
   traffic or additional auto-fire worker;

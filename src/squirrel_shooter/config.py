@@ -379,7 +379,7 @@ def _auto_fire_config(raw: dict[str, Any]) -> AutoFireConfig:
             min_confidence=_number(
                 raw.get("min_confidence", defaults.min_confidence),
                 "auto_fire.min_confidence",
-                minimum=0.75,
+                minimum=0.70,
                 maximum=1.0,
             ),
             allowed_classes=allowed_classes,

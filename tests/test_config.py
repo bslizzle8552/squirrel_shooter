@@ -36,9 +36,9 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.night_mode.pause_recording_and_classifier is True
     assert config.night_mode.enter_consecutive_frames == 5
     assert config.night_mode.exit_consecutive_frames == 10
-    assert config.auto_fire.enabled is False
-    assert config.auto_fire.allowed_classes == ("dog", "bird")
-    assert config.auto_fire.min_confidence == 0.75
+    assert config.auto_fire.enabled is True
+    assert config.auto_fire.allowed_classes == ("dog", "cat", "bird")
+    assert config.auto_fire.min_confidence == 0.70
     assert config.auto_fire.cooldown_seconds == 5.0
     assert config.auto_fire.max_shots_per_event == 1
     assert config.auto_fire.max_shots_per_hour == 6
@@ -154,6 +154,7 @@ def test_older_config_without_pan_tilt_section_uses_safe_defaults(tmp_path: Path
 
 def test_older_config_without_manual_hardware_sections_uses_safe_defaults(tmp_path: Path) -> None:
     raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["auto_fire"]["enabled"] = False
     del raw["manual_control"]
     del raw["valve"]
     config_path = tmp_path / "legacy.yaml"
@@ -176,6 +177,7 @@ def test_older_config_without_auto_fire_section_is_disabled_and_empty(tmp_path: 
 
 def test_auto_fire_allows_an_explicit_empty_allowlist(tmp_path: Path) -> None:
     raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["auto_fire"]["enabled"] = False
     raw["auto_fire"]["allowed_classes"] = []
     config_path = tmp_path / "empty-auto-fire-allowlist.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
@@ -188,7 +190,7 @@ def test_auto_fire_allows_an_explicit_empty_allowlist(tmp_path: Path) -> None:
     [
         ("enabled", "yes", "enabled"),
         ("min_confidence", 1.01, "min_confidence"),
-        ("min_confidence", 0.74, "min_confidence"),
+        ("min_confidence", 0.69, "min_confidence"),
         ("cooldown_seconds", 0, "cooldown_seconds"),
         ("max_shots_per_event", 0, "max_shots_per_event"),
         ("max_shots_per_hour", 0, "max_shots_per_hour"),
