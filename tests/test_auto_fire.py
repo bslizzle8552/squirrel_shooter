@@ -13,6 +13,7 @@ from squirrel_shooter.auto_fire import (
     AutoFireConfig,
     AutoFireDetection,
     AutoFireService,
+    AutoFireTargetAssociation,
     AutoFireTargetSnapshot,
 )
 from squirrel_shooter.classifier_labels import VOC_LABELS
@@ -36,6 +37,21 @@ class TargetSource:
 
     def __call__(self, _event_id: str, _track_id: int) -> AutoFireTargetSnapshot | None:
         return self.target
+
+
+class AssociationSource:
+    def __init__(
+        self,
+        state: AutoFireTargetSnapshot | AutoFireTargetAssociation | None,
+    ) -> None:
+        self.state = state
+
+    def __call__(
+        self,
+        _event_id: str,
+        _track_id: int,
+    ) -> AutoFireTargetSnapshot | AutoFireTargetAssociation | None:
+        return self.state
 
 
 @dataclass
@@ -195,6 +211,9 @@ def test_config_defaults_are_disabled_and_validation_is_strict(tmp_path: Path) -
     assert defaults.max_shots_per_hour == 6
     assert defaults.classification_max_age_seconds == 3.0
     assert defaults.target_max_age_seconds == 0.75
+    assert defaults.track_loss_grace_seconds == 0.9
+    assert defaults.reacquisition_max_centroid_distance_pixels == 100.0
+    assert defaults.reacquisition_max_area_ratio == 2.5
 
     with pytest.raises(ValueError, match="requires at least one"):
         AutoFireConfig(enabled=True, rate_limit_state_file=tmp_path / "state.json")
@@ -210,6 +229,163 @@ def test_config_defaults_are_disabled_and_validation_is_strict(tmp_path: Path) -
         config(tmp_path, min_confidence=0.69)
     with pytest.raises(ValueError, match="positive integer"):
         config(tmp_path, max_shots_per_hour=True)
+    with pytest.raises(ValueError, match="track_loss_grace_seconds"):
+        config(tmp_path, track_loss_grace_seconds=3.1)
+    with pytest.raises(ValueError, match="reacquisition_max_area_ratio"):
+        config(tmp_path, reacquisition_max_area_ratio=0.99)
+
+
+def test_brief_dropout_holds_classification_then_uses_reacquired_position(tmp_path: Path) -> None:
+    clocks = Clocks()
+    source = AssociationSource(AutoFireTargetAssociation("coasting", 100.9))
+    hardware = FakeCoordinator()
+    auto = AutoFireService(
+        config(tmp_path),
+        hardware,
+        source,
+        lambda: False,
+        monotonic_clock=clocks.monotonic_now,
+        wall_clock=clocks.wall_now,
+    )
+    decisions: list[object] = []
+    worker = threading.Thread(target=lambda: decisions.append(classify(auto)))
+    worker.start()
+
+    for _ in range(100):
+        if auto.status()["classifications_held_for_reacquisition"] == 1:
+            break
+        worker.join(0.005)
+    assert hardware.calls == []
+    source.state = target(observed=100.2, pixel=(82, 61), box=(70, 50, 30, 24))
+    clocks.monotonic = 100.2
+    auto.notify_target_state_changed()
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert decisions[0].accepted is True  # type: ignore[union-attr]
+    assert hardware.calls[0]["pixel"] == (82, 61)
+    assert auto.status()["candidates_evaluated"] == 1
+
+
+def test_classifier_result_while_coasting_does_not_fire_before_reacquisition(tmp_path: Path) -> None:
+    clocks = Clocks()
+    source = AssociationSource(AutoFireTargetAssociation("coasting", 100.9))
+    hardware = FakeCoordinator()
+    auto = AutoFireService(
+        config(tmp_path), hardware, source, lambda: False,
+        monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
+    )
+    worker = threading.Thread(target=lambda: classify(auto))
+    worker.start()
+    for _ in range(100):
+        if auto.status()["classifications_held_for_reacquisition"] == 1:
+            break
+        worker.join(0.005)
+
+    assert worker.is_alive()
+    assert hardware.calls == []
+    source.state = AutoFireTargetAssociation("reacquisition_timeout")
+    auto.notify_target_state_changed()
+    worker.join(1.0)
+    assert not worker.is_alive() and hardware.calls == []
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        ("reacquisition_timeout", "target_reacquisition_timeout"),
+        ("reacquisition_incompatible", "target_reacquisition_incompatible"),
+        ("reacquisition_ambiguous", "target_reacquisition_ambiguous"),
+    ],
+)
+def test_terminal_reacquisition_state_fails_closed(
+    tmp_path: Path,
+    state: str,
+    reason: str,
+) -> None:
+    clocks = Clocks()
+    source = AssociationSource(AutoFireTargetAssociation("coasting", 100.9))
+    hardware = FakeCoordinator()
+    auto = AutoFireService(
+        config(tmp_path), hardware, source, lambda: False,
+        monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
+    )
+    decisions: list[object] = []
+    worker = threading.Thread(target=lambda: decisions.append(classify(auto)))
+    worker.start()
+    for _ in range(100):
+        if auto.status()["classifications_held_for_reacquisition"] == 1:
+            break
+        worker.join(0.005)
+    source.state = AutoFireTargetAssociation(state)
+    auto.notify_target_state_changed()
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert decisions[0].reason == reason  # type: ignore[union-attr]
+    assert hardware.calls == []
+
+
+def test_reacquisition_does_not_revive_stale_classification_or_target(tmp_path: Path) -> None:
+    clocks = Clocks()
+    source = AssociationSource(AutoFireTargetAssociation("coasting", 100.9))
+    hardware = FakeCoordinator()
+    auto = AutoFireService(
+        config(tmp_path), hardware, source, lambda: False,
+        monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
+    )
+    decisions: list[object] = []
+    worker = threading.Thread(target=lambda: decisions.append(classify(auto, observed=97.2)))
+    worker.start()
+    for _ in range(100):
+        if auto.status()["classifications_held_for_reacquisition"] == 1:
+            break
+        worker.join(0.005)
+    clocks.monotonic = 100.7
+    source.state = target(observed=100.7)
+    auto.notify_target_state_changed()
+    worker.join(1.0)
+    assert decisions[0].reason == "stale_classification"  # type: ignore[union-attr]
+
+    clocks.monotonic = 200.0
+    clocks.wall = 10_100.0
+    source.state = AutoFireTargetAssociation("coasting", 200.9)
+    second: list[object] = []
+    worker = threading.Thread(target=lambda: second.append(classify(auto, event_id="event-two", track_id=8, observed=200.0)))
+    worker.start()
+    for _ in range(100):
+        if auto.status()["classifications_held_for_reacquisition"] == 1:
+            break
+        worker.join(0.005)
+    clocks.monotonic = 200.2
+    source.state = target(event_id="event-two", track_id=8, observed=199.0)
+    auto.notify_target_state_changed()
+    worker.join(1.0)
+    assert second[0].reason == "stale_target"  # type: ignore[union-attr]
+    assert hardware.calls == []
+
+
+def test_person_veto_cancels_classification_held_during_dropout(tmp_path: Path) -> None:
+    clocks = Clocks()
+    source = AssociationSource(AutoFireTargetAssociation("coasting", 100.9))
+    hardware = FakeCoordinator()
+    auto = AutoFireService(
+        config(tmp_path), hardware, source, lambda: False,
+        monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
+    )
+    decisions: list[object] = []
+    worker = threading.Thread(target=lambda: decisions.append(classify(auto)))
+    worker.start()
+    for _ in range(100):
+        if auto.status()["classifications_held_for_reacquisition"] == 1:
+            break
+        worker.join(0.005)
+
+    veto = classify(auto, detections=(AutoFireDetection("person", 0.99),))
+    worker.join(1.0)
+    assert veto.reason == "human_detected"
+    assert decisions[0].reason == "human_detected"  # type: ignore[union-attr]
+    assert hardware.calls == []
 
 
 def test_disabled_service_never_calls_coordinator(tmp_path: Path) -> None:

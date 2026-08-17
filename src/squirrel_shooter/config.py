@@ -412,6 +412,24 @@ def _auto_fire_config(raw: dict[str, Any]) -> AutoFireConfig:
                 "auto_fire.target_max_age_seconds",
                 exclusive=True,
             ),
+            track_loss_grace_seconds=_number(
+                raw.get("track_loss_grace_seconds", defaults.track_loss_grace_seconds),
+                "auto_fire.track_loss_grace_seconds",
+                exclusive=True,
+            ),
+            reacquisition_max_centroid_distance_pixels=_number(
+                raw.get(
+                    "reacquisition_max_centroid_distance_pixels",
+                    defaults.reacquisition_max_centroid_distance_pixels,
+                ),
+                "auto_fire.reacquisition_max_centroid_distance_pixels",
+                exclusive=True,
+            ),
+            reacquisition_max_area_ratio=_number(
+                raw.get("reacquisition_max_area_ratio", defaults.reacquisition_max_area_ratio),
+                "auto_fire.reacquisition_max_area_ratio",
+                minimum=1.0,
+            ),
             rate_limit_state_file=_path(
                 raw.get("rate_limit_state_file", str(defaults.rate_limit_state_file)),
                 "auto_fire.rate_limit_state_file",
@@ -859,6 +877,14 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         if missing:
             raise ConfigError(
                 "enabled auto_fire requires these safety dependencies: " + ", ".join(missing)
+            )
+        if (
+            auto_fire_config.track_loss_grace_seconds
+            > motion_config.persistence.maximum_gap_seconds
+        ):
+            raise ConfigError(
+                "auto_fire.track_loss_grace_seconds must not exceed "
+                "motion.persistence.maximum_gap_seconds"
             )
 
     return AppConfig(

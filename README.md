@@ -501,7 +501,7 @@ motion:
     minimum_frames: 60
   persistence:
     frames: 5
-    maximum_gap_seconds: 0.7
+    maximum_gap_seconds: 0.9
     cooldown_seconds: 8.0
 ```
 

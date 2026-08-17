@@ -84,6 +84,9 @@ class AutoFireConfig:
     max_shots_per_hour: int = 6
     classification_max_age_seconds: float = 3.0
     target_max_age_seconds: float = 0.75
+    track_loss_grace_seconds: float = 0.9
+    reacquisition_max_centroid_distance_pixels: float = 100.0
+    reacquisition_max_area_ratio: float = 2.5
     rate_limit_state_file: Path = Path("captures/auto-fire-rate-limit.json")
 
     def __post_init__(self) -> None:
@@ -123,6 +126,27 @@ class AutoFireConfig:
             minimum=0.0,
             exclusive_minimum=True,
         )
+        _finite_number(
+            self.track_loss_grace_seconds,
+            "track_loss_grace_seconds",
+            minimum=0.0,
+            exclusive_minimum=True,
+        )
+        _finite_number(
+            self.reacquisition_max_centroid_distance_pixels,
+            "reacquisition_max_centroid_distance_pixels",
+            minimum=0.0,
+            exclusive_minimum=True,
+        )
+        _finite_number(
+            self.reacquisition_max_area_ratio,
+            "reacquisition_max_area_ratio",
+            minimum=1.0,
+        )
+        if self.track_loss_grace_seconds > self.classification_max_age_seconds:
+            raise ValueError(
+                "track_loss_grace_seconds must not exceed classification_max_age_seconds"
+            )
         if not isinstance(self.rate_limit_state_file, Path) or not self.rate_limit_state_file.name:
             raise ValueError("rate_limit_state_file must be a file path")
 
@@ -169,6 +193,31 @@ class AutoFireTargetSnapshot:
             raise ValueError("confirmed and event_eligible must be booleans")
         if not isinstance(self.provisional_category, str) or not self.provisional_category:
             raise ValueError("provisional_category must be a non-empty string")
+
+
+@dataclass(frozen=True)
+class AutoFireTargetAssociation:
+    """Non-fireable lifecycle state for an event/track target association."""
+
+    state: str
+    expires_monotonic: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.state not in {
+            "coasting",
+            "reacquisition_ambiguous",
+            "reacquisition_incompatible",
+            "reacquisition_timeout",
+        }:
+            raise ValueError("unsupported auto-fire target association state")
+        if self.state == "coasting":
+            _finite_number(
+                self.expires_monotonic,
+                "expires_monotonic",
+                minimum=0.0,
+            )
+        elif self.expires_monotonic is not None:
+            raise ValueError("only a coasting association may have an expiry")
 
 
 @dataclass(frozen=True)
@@ -222,7 +271,19 @@ class _ShotRecord:
         return asdict(self)
 
 
-TargetProvider = Callable[[str, int], AutoFireTargetSnapshot | None]
+@dataclass(frozen=True)
+class _HeldClassification:
+    event_id: str
+    track_id: int
+    classified_observation_monotonic: float
+    detections: tuple[AutoFireDetection, ...]
+    error: str | None
+
+
+TargetProvider = Callable[
+    [str, int],
+    AutoFireTargetSnapshot | AutoFireTargetAssociation | None,
+]
 NightModeProvider = Callable[[], bool]
 
 
@@ -252,6 +313,8 @@ class AutoFireService:
         self._monotonic_clock = monotonic_clock
         self._wall_clock = wall_clock
         self._lock = threading.RLock()
+        self._reacquisition_condition = threading.Condition(self._lock)
+        self._target_state_generation = 0
         self._shots: list[_ShotRecord] = []
         self._state_error: str | None = None
         self._rate_clock_wall = self._read_clock(self._wall_clock)
@@ -259,6 +322,7 @@ class AutoFireService:
         self._rate_clock_boot_id = self._system_boot_id()
         self._persisted_rate_clock: tuple[float, float, str | None] | None = None
         self._human_denied_events: dict[str, float] = {}
+        self._held_classifications: dict[tuple[str, int], _HeldClassification] = {}
         self._pending: tuple[str, int] | None = None
         self._shutting_down = False
         self._candidates_evaluated = 0
@@ -281,6 +345,15 @@ class AutoFireService:
 
         with self._lock:
             self._shutting_down = True
+            self._target_state_generation += 1
+            self._reacquisition_condition.notify_all()
+
+    def notify_target_state_changed(self) -> None:
+        """Wake a classifier callback waiting for bounded live-target reacquisition."""
+
+        with self._lock:
+            self._target_state_generation += 1
+            self._reacquisition_condition.notify_all()
 
     def handle_classification(
         self,
@@ -293,8 +366,30 @@ class AutoFireService:
     ) -> AutoFireDecision:
         """Evaluate one asynchronous classification and synchronously request one safe engagement."""
 
-        with self._lock:
-            self._candidates_evaluated += 1
+        return self._evaluate_classification(
+            event_id=event_id,
+            track_id=track_id,
+            classified_observation_monotonic=classified_observation_monotonic,
+            detections=detections,
+            error=error,
+            count_candidate=True,
+        )
+
+    def _evaluate_classification(
+        self,
+        *,
+        event_id: str,
+        track_id: int,
+        classified_observation_monotonic: float,
+        detections: Iterable[AutoFireDetection] | None,
+        error: str | None,
+        count_candidate: bool,
+    ) -> AutoFireDecision:
+        """Evaluate new or safely resumed classifier evidence."""
+
+        if count_candidate:
+            with self._lock:
+                self._candidates_evaluated += 1
 
         if not self._valid_event_and_track(event_id, track_id):
             return self._reject("target_association_invalid")
@@ -352,6 +447,34 @@ class AutoFireService:
 
         target, target_reason = self._current_target(event_id, track_id, now_monotonic)
         if target is None:
+            if target_reason == "target_reacquisition_pending":
+                held = _HeldClassification(
+                    event_id,
+                    track_id,
+                    float(classified_observation_monotonic),
+                    tuple(parsed),
+                    error,
+                )
+                with self._lock:
+                    self._held_classifications[(event_id, track_id)] = held
+                LOGGER.info(
+                    "AUTO_FIRE classification held for target reacquisition event=%s track=%s class=%s confidence=%.3f",
+                    event_id,
+                    track_id,
+                    top.label,
+                    top.confidence,
+                    extra={
+                        "structured_data": {
+                            "event": "auto_fire_classification_held",
+                            **decision_fields,
+                            "classified_observation_monotonic": classified_observation_monotonic,
+                        }
+                    },
+                )
+                return self._wait_for_target_reacquisition(
+                    held,
+                    decision_fields,
+                )
             return self._reject(target_reason, **decision_fields)
 
         cooldown = self._coordinator_cooldown()
@@ -537,6 +660,75 @@ class AutoFireService:
         )
         return decision
 
+    def _wait_for_target_reacquisition(
+        self,
+        held: _HeldClassification,
+        decision_fields: dict[str, object],
+    ) -> AutoFireDecision:
+        key = (held.event_id, held.track_id)
+        while True:
+            with self._lock:
+                target_state_generation = self._target_state_generation
+                if self._shutting_down:
+                    self._held_classifications.pop(key, None)
+                    return self._reject_locked("service_stopping", **decision_fields)
+                if held.event_id in self._human_denied_events:
+                    self._held_classifications.pop(key, None)
+                    return self._reject_locked("human_detected", **decision_fields)
+            night = self._night_mode()
+            if night is None:
+                with self._lock:
+                    self._held_classifications.pop(key, None)
+                return self._reject("safety_state_invalid", **decision_fields)
+            if night:
+                with self._lock:
+                    self._held_classifications.pop(key, None)
+                return self._reject("night_mode", **decision_fields)
+            try:
+                association = self._target_provider(held.event_id, held.track_id)
+            except Exception:
+                LOGGER.exception("AUTO_FIRE target provider failed while awaiting reacquisition")
+                association = None
+            if isinstance(association, AutoFireTargetSnapshot):
+                with self._lock:
+                    self._held_classifications.pop(key, None)
+                return self._evaluate_classification(
+                    event_id=held.event_id,
+                    track_id=held.track_id,
+                    classified_observation_monotonic=held.classified_observation_monotonic,
+                    detections=held.detections,
+                    error=held.error,
+                    count_candidate=False,
+                )
+            if isinstance(association, AutoFireTargetAssociation) and association.state != "coasting":
+                reason = {
+                    "reacquisition_ambiguous": "target_reacquisition_ambiguous",
+                    "reacquisition_incompatible": "target_reacquisition_incompatible",
+                    "reacquisition_timeout": "target_reacquisition_timeout",
+                }[association.state]
+                with self._lock:
+                    self._held_classifications.pop(key, None)
+                return self._reject(reason, **decision_fields)
+            now = self._read_clock(self._monotonic_clock)
+            expiry = (
+                association.expires_monotonic
+                if isinstance(association, AutoFireTargetAssociation)
+                else None
+            )
+            if now is None or expiry is None:
+                with self._lock:
+                    self._held_classifications.pop(key, None)
+                return self._reject("target_association_invalid", **decision_fields)
+            remaining = expiry - now
+            if remaining <= 0:
+                with self._lock:
+                    self._held_classifications.pop(key, None)
+                return self._reject("target_reacquisition_timeout", **decision_fields)
+            with self._reacquisition_condition:
+                if target_state_generation != self._target_state_generation:
+                    continue
+                self._reacquisition_condition.wait(timeout=remaining)
+
     def status(self) -> dict[str, object]:
         now_wall = self._rate_wall_now()
         cooldown = self._coordinator_cooldown(log_errors=False)
@@ -560,6 +752,7 @@ class AutoFireService:
                 "max_shots_per_hour": self.config.max_shots_per_hour,
                 "cooldown_remaining_seconds": None if cooldown is None else round(cooldown, 3),
                 "engagement_pending": self._pending is not None,
+                "classifications_held_for_reacquisition": len(self._held_classifications),
                 "shutting_down": self._shutting_down,
                 "persistence": {
                     "healthy": self._state_error is None,
@@ -602,6 +795,8 @@ class AutoFireService:
             if len(self._human_denied_events) > 4096:
                 ordered = sorted(self._human_denied_events.items(), key=lambda item: item[1])
                 self._human_denied_events = dict(ordered[-4096:])
+            self._target_state_generation += 1
+            self._reacquisition_condition.notify_all()
 
     def _is_human_latched(self, event_id: str) -> bool:
         with self._lock:
@@ -626,6 +821,14 @@ class AutoFireService:
         except Exception:
             LOGGER.exception("AUTO_FIRE target provider failed")
             return None, "target_association_invalid"
+        if isinstance(target, AutoFireTargetAssociation):
+            reason = {
+                "coasting": "target_reacquisition_pending",
+                "reacquisition_ambiguous": "target_reacquisition_ambiguous",
+                "reacquisition_incompatible": "target_reacquisition_incompatible",
+                "reacquisition_timeout": "target_reacquisition_timeout",
+            }[target.state]
+            return None, reason
         if target is None:
             return None, "target_association_invalid"
         if not isinstance(target, AutoFireTargetSnapshot):

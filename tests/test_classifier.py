@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from conftest import write_test_config
+from squirrel_shooter.auto_fire import AutoFireTargetAssociation, AutoFireTargetSnapshot
 from squirrel_shooter.camera_service import CameraStatus
 from squirrel_shooter.classifier import (
     ClassifierDetection,
@@ -875,6 +876,101 @@ def test_auto_fire_uses_one_live_qualified_task_with_track_and_freshness_context
         "target_confirmed": True,
         "target_event_eligible": True,
     }
+
+
+def _auto_target(event_id: str = "event-live", track_id: int = 7) -> AutoFireTargetSnapshot:
+    return AutoFireTargetSnapshot(
+        event_id,
+        track_id,
+        10.0,
+        35,
+        31,
+        (20, 20, 30, 20),
+        120,
+        80,
+        True,
+        True,
+        "small_animal_candidate",
+    )
+
+
+def _motion_group(
+    *,
+    track_id: int = 7,
+    centroid: tuple[float, float] = (42.0, 34.0),
+    bounding_box: tuple[int, int, int, int] = (27, 24, 30, 20),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        track_id=track_id,
+        centroid=centroid,
+        bounding_box=bounding_box,
+        confirmed=True,
+        event_eligible=True,
+        provisional_category="small_animal_candidate",
+    )
+
+
+def _auto_motion(tmp_path: Path) -> MotionProcessingService:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config = classifier_config(
+        tmp_path,
+        auto_fire__enabled=True,
+        manual_control__servo_enabled=True,
+    )
+    return MotionProcessingService(SimpleNamespace(), config)  # type: ignore[arg-type]
+
+
+def test_runtime_coasts_on_brief_loss_and_restores_only_reacquired_live_coordinate(tmp_path: Path) -> None:
+    motion = _auto_motion(tmp_path)
+    key = ("event-live", 7)
+    motion._live_auto_targets[key] = _auto_target()
+
+    motion._handle_missing_auto_target("event-live", 7, (), 10.1)
+    association = motion._auto_fire_target("event-live", 7)
+    assert isinstance(association, AutoFireTargetAssociation)
+    assert association.state == "coasting"
+    assert key not in motion._live_auto_targets
+
+    reacquired = _motion_group(centroid=(68.0, 49.0), bounding_box=(53, 39, 30, 20))
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    motion._update_live_auto_target("event-live", reacquired, (reacquired,), frame, 10.5)
+
+    current = motion._auto_fire_target("event-live", 7)
+    assert isinstance(current, AutoFireTargetSnapshot)
+    assert (current.pixel_x, current.pixel_y) == (68, 49)
+    assert current.observed_monotonic == 10.5
+
+
+def test_runtime_expires_track_after_grace_period(tmp_path: Path) -> None:
+    motion = _auto_motion(tmp_path)
+    motion._live_auto_targets[("event-live", 7)] = _auto_target()
+    motion._handle_missing_auto_target("event-live", 7, (), 10.1)
+    motion._handle_missing_auto_target("event-live", 7, (), 11.01)
+
+    association = motion._auto_fire_target("event-live", 7)
+    assert isinstance(association, AutoFireTargetAssociation)
+    assert association.state == "reacquisition_timeout"
+
+
+def test_runtime_rejects_wrong_identity_and_ambiguous_reacquisition(tmp_path: Path) -> None:
+    wrong = _auto_motion(tmp_path / "wrong")
+    wrong._live_auto_targets[("event-live", 7)] = _auto_target()
+    wrong._handle_missing_auto_target("event-live", 7, (), 10.1)
+    other = _motion_group(track_id=8, centroid=(40.0, 33.0))
+    wrong._handle_missing_auto_target("event-live", 7, (other,), 10.2)
+    wrong_state = wrong._auto_fire_target("event-live", 7)
+    assert isinstance(wrong_state, AutoFireTargetAssociation)
+    assert wrong_state.state == "reacquisition_incompatible"
+
+    ambiguous = _auto_motion(tmp_path / "ambiguous")
+    ambiguous._live_auto_targets[("event-live", 7)] = _auto_target()
+    ambiguous._handle_missing_auto_target("event-live", 7, (), 10.1)
+    first = _motion_group(track_id=7, centroid=(40.0, 33.0))
+    second = _motion_group(track_id=8, centroid=(55.0, 40.0))
+    ambiguous._handle_missing_auto_target("event-live", 7, (first, second), 10.2)
+    ambiguous_state = ambiguous._auto_fire_target("event-live", 7)
+    assert isinstance(ambiguous_state, AutoFireTargetAssociation)
+    assert ambiguous_state.state == "reacquisition_ambiguous"
 
 
 def test_classifier_rejects_new_work_while_night_mode_is_paused(tmp_path: Path) -> None:

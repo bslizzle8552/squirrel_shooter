@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass, field
@@ -14,7 +15,12 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
-from .auto_fire import AutoFireDetection, AutoFireService, AutoFireTargetSnapshot
+from .auto_fire import (
+    AutoFireDetection,
+    AutoFireService,
+    AutoFireTargetAssociation,
+    AutoFireTargetSnapshot,
+)
 from .camera_service import CameraService, FramePacket
 from .classifier import ClassifierDetection, ClassifierEvidenceStore, ClassifierTask, EventClassifier
 from .config import AppConfig
@@ -90,6 +96,12 @@ class _BufferedDetection:
     measured_fps: float
 
 
+@dataclass(frozen=True)
+class _CoastingAutoTarget:
+    last_snapshot: AutoFireTargetSnapshot
+    lost_at_monotonic: float
+
+
 class _DetectionFrameBuffer:
     """Retain raw event lead-in frames and render overlays only if an event begins."""
 
@@ -142,6 +154,8 @@ class MotionProcessingService:
         self._image_writer = image_writer
         self._condition = threading.Condition()
         self._live_auto_targets: dict[tuple[str, int], AutoFireTargetSnapshot] = {}
+        self._coasting_auto_targets: dict[tuple[str, int], _CoastingAutoTarget] = {}
+        self._expired_auto_targets: dict[tuple[str, int], AutoFireTargetAssociation] = {}
         self.manual_control = manual_control_service
         coordinator = manual_control_service or _UnavailableAutoFireCoordinator()
         self.auto_fire = auto_fire_service or AutoFireService(
@@ -302,9 +316,24 @@ class MotionProcessingService:
         with self._condition:
             return [dict(event) for event in reversed(self._recent_events)]
 
-    def _auto_fire_target(self, event_id: str, track_id: int) -> AutoFireTargetSnapshot | None:
+    def _auto_fire_target(
+        self,
+        event_id: str,
+        track_id: int,
+    ) -> AutoFireTargetSnapshot | AutoFireTargetAssociation | None:
+        key = (event_id, track_id)
         with self._condition:
-            return self._live_auto_targets.get((event_id, track_id))
+            target = self._live_auto_targets.get(key)
+            if target is not None:
+                return target
+            coasting = self._coasting_auto_targets.get(key)
+            if coasting is not None:
+                return AutoFireTargetAssociation(
+                    "coasting",
+                    coasting.lost_at_monotonic
+                    + self.config.auto_fire.track_loss_grace_seconds,
+                )
+            return self._expired_auto_targets.get(key)
 
     def _auto_fire_night_mode(self) -> bool:
         with self._condition:
@@ -533,6 +562,9 @@ class MotionProcessingService:
                 self._active_events = 0
                 self._force_event_requested = False
                 self._live_auto_targets.clear()
+                self._coasting_auto_targets.clear()
+                self._expired_auto_targets.clear()
+            self.auto_fire.notify_target_state_changed()
             LOGGER.info(
                 "Night vision detected; event recording and classifier paused",
                 extra={"structured_data": {"event": "night_mode_paused", "evidence": self._night_mode_evidence}},
@@ -689,7 +721,13 @@ class MotionProcessingService:
                     self._session.increment("confirmed_events")
                 if self.config.classifier.enabled:
                     if self.config.auto_fire.enabled:
-                        self._update_live_auto_target(event.event_id, group, packet.frame, now)
+                        self._update_live_auto_target(
+                            event.event_id,
+                            group,
+                            result.groups,
+                            packet.frame,
+                            now,
+                        )
                         self._submit_live_auto_fire_classification(event, group, packet, now)
                     else:
                         selector = BestEventFrameSelector(
@@ -704,14 +742,25 @@ class MotionProcessingService:
                 self._recorder.update(group.track_id, group, get_annotated(), now=now)
                 event = self._recorder.active[group.track_id]
                 if self.config.auto_fire.enabled:
-                    self._update_live_auto_target(event.event_id, group, packet.frame, now)
+                    self._update_live_auto_target(
+                        event.event_id,
+                        group,
+                        result.groups,
+                        packet.frame,
+                        now,
+                    )
                 selector = self._classifier_selectors.get(event.event_id)
                 if selector is not None:
                     self._consider_classifier_frame(selector, group, packet.frame)
         for track_id, event in list(self._recorder.active.items()):
             if track_id not in groups_by_track:
-                with self._condition:
-                    self._live_auto_targets.pop((event.event_id, track_id), None)
+                if self.config.auto_fire.enabled:
+                    self._handle_missing_auto_target(
+                        event.event_id,
+                        track_id,
+                        result.groups,
+                        now,
+                    )
                 self._recorder.update(track_id, None, get_annotated(), now=now)
                 selector = self._classifier_selectors.get(event.event_id)
                 if selector is not None:
@@ -720,6 +769,9 @@ class MotionProcessingService:
                 self._record_completed_event(self._recorder.finish(track_id, now=now))
                 with self._condition:
                     self._live_auto_targets.pop((event.event_id, track_id), None)
+                    self._coasting_auto_targets.pop((event.event_id, track_id), None)
+                    self._expired_auto_targets.pop((event.event_id, track_id), None)
+                self.auto_fire.notify_target_state_changed()
                 active = {item.directory for item in self._recorder.active.values()}
                 actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention, active_directories=active)
                 if self._session is not None:
@@ -731,6 +783,7 @@ class MotionProcessingService:
         self,
         event_id: str,
         group: Any,
+        groups: tuple[Any, ...] | list[Any],
         frame: np.ndarray,
         observed_monotonic: float,
     ) -> None:
@@ -749,8 +802,155 @@ class MotionProcessingService:
             event_eligible=bool(group.event_eligible),
             provisional_category=str(group.provisional_category),
         )
+        key = (snapshot.event_id, snapshot.track_id)
         with self._condition:
-            self._live_auto_targets[(snapshot.event_id, snapshot.track_id)] = snapshot
+            coasting = self._coasting_auto_targets.get(key)
+        if coasting is None:
+            with self._condition:
+                self._live_auto_targets[key] = snapshot
+                self._expired_auto_targets.pop(key, None)
+            return
+
+        elapsed = observed_monotonic - coasting.lost_at_monotonic
+        if elapsed > self.config.auto_fire.track_loss_grace_seconds:
+            self._expire_auto_target(key, coasting, "reacquisition_timeout", observed_monotonic)
+            return
+        compatible = self._compatible_reacquisition_groups(coasting.last_snapshot, groups)
+        if len(compatible) > 1:
+            self._expire_auto_target(key, coasting, "reacquisition_ambiguous", observed_monotonic)
+            return
+        if len(compatible) != 1 or int(compatible[0].track_id) != snapshot.track_id:
+            self._expire_auto_target(key, coasting, "reacquisition_incompatible", observed_monotonic)
+            return
+
+        with self._condition:
+            self._coasting_auto_targets.pop(key, None)
+            self._expired_auto_targets.pop(key, None)
+            self._live_auto_targets[key] = snapshot
+        LOGGER.info(
+            "AUTO_FIRE target reacquired event=%s track=%s after=%.3fs old=(%d,%d) new=(%d,%d)",
+            snapshot.event_id,
+            snapshot.track_id,
+            elapsed,
+            coasting.last_snapshot.pixel_x,
+            coasting.last_snapshot.pixel_y,
+            snapshot.pixel_x,
+            snapshot.pixel_y,
+            extra={
+                "structured_data": {
+                    "event": "auto_fire_target_reacquired",
+                    "event_id": snapshot.event_id,
+                    "track_id": snapshot.track_id,
+                    "reacquisition_seconds": elapsed,
+                    "old_centroid": {
+                        "x": coasting.last_snapshot.pixel_x,
+                        "y": coasting.last_snapshot.pixel_y,
+                    },
+                    "new_centroid": {"x": snapshot.pixel_x, "y": snapshot.pixel_y},
+                }
+            },
+        )
+        self.auto_fire.notify_target_state_changed()
+
+    def _handle_missing_auto_target(
+        self,
+        event_id: str,
+        track_id: int,
+        groups: tuple[Any, ...] | list[Any],
+        observed_monotonic: float,
+    ) -> None:
+        key = (event_id, track_id)
+        with self._condition:
+            live = self._live_auto_targets.pop(key, None)
+            coasting = self._coasting_auto_targets.get(key)
+            expired = key in self._expired_auto_targets
+            if live is not None:
+                coasting = _CoastingAutoTarget(live, observed_monotonic)
+                self._coasting_auto_targets[key] = coasting
+        if live is not None:
+            LOGGER.info(
+                "AUTO_FIRE target entered bounded coasting event=%s track=%s grace=%.3fs last=(%d,%d)",
+                event_id,
+                track_id,
+                self.config.auto_fire.track_loss_grace_seconds,
+                live.pixel_x,
+                live.pixel_y,
+                extra={
+                    "structured_data": {
+                        "event": "auto_fire_target_coasting",
+                        "event_id": event_id,
+                        "track_id": track_id,
+                        "target_last_seen_monotonic": live.observed_monotonic,
+                        "coasting_started_monotonic": observed_monotonic,
+                        "grace_seconds": self.config.auto_fire.track_loss_grace_seconds,
+                        "last_centroid": {"x": live.pixel_x, "y": live.pixel_y},
+                    }
+                },
+            )
+            self.auto_fire.notify_target_state_changed()
+        if coasting is None or expired:
+            return
+        compatible = self._compatible_reacquisition_groups(coasting.last_snapshot, groups)
+        if len(compatible) > 1:
+            self._expire_auto_target(key, coasting, "reacquisition_ambiguous", observed_monotonic)
+            return
+        if len(compatible) == 1 and int(compatible[0].track_id) != track_id:
+            self._expire_auto_target(key, coasting, "reacquisition_incompatible", observed_monotonic)
+            return
+        if observed_monotonic - coasting.lost_at_monotonic > self.config.auto_fire.track_loss_grace_seconds:
+            self._expire_auto_target(key, coasting, "reacquisition_timeout", observed_monotonic)
+
+    def _compatible_reacquisition_groups(
+        self,
+        previous: AutoFireTargetSnapshot,
+        groups: tuple[Any, ...] | list[Any],
+    ) -> list[Any]:
+        previous_area = previous.bounding_box[2] * previous.bounding_box[3]
+        compatible: list[Any] = []
+        for group in groups:
+            centroid = tuple(float(value) for value in group.centroid)
+            if math.dist((previous.pixel_x, previous.pixel_y), centroid) > (
+                self.config.auto_fire.reacquisition_max_centroid_distance_pixels
+            ):
+                continue
+            box = tuple(int(value) for value in group.bounding_box)
+            area = box[2] * box[3]
+            area_ratio = max(previous_area, area) / max(1, min(previous_area, area))
+            if area_ratio <= self.config.auto_fire.reacquisition_max_area_ratio:
+                compatible.append(group)
+        return compatible
+
+    def _expire_auto_target(
+        self,
+        key: tuple[str, int],
+        coasting: _CoastingAutoTarget,
+        state: str,
+        observed_monotonic: float,
+    ) -> None:
+        association = AutoFireTargetAssociation(state)
+        with self._condition:
+            self._live_auto_targets.pop(key, None)
+            self._coasting_auto_targets.pop(key, None)
+            self._expired_auto_targets[key] = association
+        LOGGER.info(
+            "AUTO_FIRE target reacquisition failed reason=%s event=%s track=%s elapsed=%.3fs",
+            state,
+            key[0],
+            key[1],
+            observed_monotonic - coasting.lost_at_monotonic,
+            extra={
+                "structured_data": {
+                    "event": "auto_fire_target_reacquisition_failed",
+                    "reason": f"target_{state}",
+                    "event_id": key[0],
+                    "track_id": key[1],
+                    "target_last_seen_monotonic": coasting.last_snapshot.observed_monotonic,
+                    "coasting_started_monotonic": coasting.lost_at_monotonic,
+                    "failed_at_monotonic": observed_monotonic,
+                }
+            },
+        )
+        self.auto_fire.notify_target_state_changed()
 
     def _submit_live_auto_fire_classification(
         self,
@@ -975,6 +1175,9 @@ class MotionProcessingService:
         with self._condition:
             self._active_events = 0
             self._live_auto_targets.clear()
+            self._coasting_auto_targets.clear()
+            self._expired_auto_targets.clear()
+        self.auto_fire.notify_target_state_changed()
         actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention)
         self._flush_suppressed_errors("Motion processor stopped", save_session=False)
         if self._session is not None:

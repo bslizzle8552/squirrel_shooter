@@ -42,6 +42,9 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.auto_fire.cooldown_seconds == 5.0
     assert config.auto_fire.max_shots_per_event == 1
     assert config.auto_fire.max_shots_per_hour == 6
+    assert config.auto_fire.track_loss_grace_seconds == 0.9
+    assert config.auto_fire.reacquisition_max_centroid_distance_pixels == 100.0
+    assert config.auto_fire.reacquisition_max_area_ratio == 2.5
     assert config.pan_tilt.i2c_address == 0x40
     assert config.pan_tilt.pan_channel == 0
     assert config.pan_tilt.tilt_channel == 1
@@ -81,6 +84,7 @@ def test_loads_camera_config(tmp_path: Path) -> None:
         (0.0, 1.0),
     )
     assert config.motion.persistence.frames == 5
+    assert config.motion.persistence.maximum_gap_seconds == 0.9
     assert config.motion.candidate_filter.require_coherent_small_motion is True
     assert config.motion.candidate_filter.ignore_localized_lighting_changes is True
     assert config.motion.candidate_filter.localized_lighting_minimum_luminance_delta == 8.0
@@ -196,6 +200,13 @@ def test_auto_fire_allows_an_explicit_empty_allowlist(tmp_path: Path) -> None:
         ("max_shots_per_hour", 0, "max_shots_per_hour"),
         ("classification_max_age_seconds", 0, "classification_max_age_seconds"),
         ("target_max_age_seconds", 0, "target_max_age_seconds"),
+        ("track_loss_grace_seconds", 0, "track_loss_grace_seconds"),
+        (
+            "reacquisition_max_centroid_distance_pixels",
+            0,
+            "reacquisition_max_centroid_distance_pixels",
+        ),
+        ("reacquisition_max_area_ratio", 0.9, "reacquisition_max_area_ratio"),
     ],
 )
 def test_rejects_invalid_auto_fire_scalars(
@@ -210,6 +221,17 @@ def test_rejects_invalid_auto_fire_scalars(
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     with pytest.raises(ConfigError, match=message):
+        load_config(config_path)
+
+
+def test_auto_fire_grace_cannot_exceed_tracker_identity_gap(tmp_path: Path) -> None:
+    raw = yaml.safe_load((PROJECT_ROOT / "config/default.yaml").read_text(encoding="utf-8"))
+    raw["auto_fire"]["track_loss_grace_seconds"] = 1.0
+    raw["motion"]["persistence"]["maximum_gap_seconds"] = 0.9
+    config_path = tmp_path / "bad-track-grace.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="must not exceed motion.persistence.maximum_gap_seconds"):
         load_config(config_path)
 
 

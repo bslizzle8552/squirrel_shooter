@@ -386,6 +386,11 @@ class ClassifierEvidenceStore:
                     "total_event_frames_considered": task.total_event_frames_considered,
                     "classifier_result": record["top_label"] or record["outcome"],
                     "classifier_confidence": record["top_confidence"],
+                    "classification_context": task.context,
+                    "track_id": task.track_id,
+                    "classifier_submitted_at": record["submitted_at"],
+                    "classifier_completed_at": record["classifier_timestamp"],
+                    "classifier_latency_ms": record["latency_ms"],
                 }
             },
         )

@@ -85,6 +85,12 @@ auto_fire:
   # track must still have a current detector observation before valve opening.
   classification_max_age_seconds: 3.0
   target_max_age_seconds: 0.75
+  # Brief detector dropouts retain identity but never expose a stale aim point.
+  # A held qualifying result may resume only after a unique compatible live
+  # observation restores this same event/track association.
+  track_loss_grace_seconds: 0.9
+  reacquisition_max_centroid_distance_pixels: 100
+  reacquisition_max_area_ratio: 2.5
   # The retained shot ledger and rolling one-hour limit survive service restarts.
   # Corrupt/unreadable state or suspicious rate-limit clock evidence fails closed.
   rate_limit_state_file: captures/auto-fire-rate-limit.json
@@ -185,7 +191,8 @@ motion:
   persistence:
     frames: 5
     max_centroid_distance_pixels: 100
-    maximum_gap_seconds: 0.7
+    # Must span the bounded auto-fire reacquisition grace above.
+    maximum_gap_seconds: 0.9
     cooldown_seconds: 8.0
 
   # Keep weak motion visible for tuning, but do not turn it into a saved event.
