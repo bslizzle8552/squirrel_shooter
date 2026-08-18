@@ -829,6 +829,98 @@ def test_runtime_forward_wall_clock_jump_fails_closed_without_a_second_call(tmp_
     ]
 
 
+def test_runtime_forward_time_sync_rebases_when_shot_history_is_empty(tmp_path: Path) -> None:
+    clocks = Clocks()
+    auto, source, _, _, hardware = service(tmp_path, clocks=clocks)
+
+    clocks.monotonic = 101.0
+    clocks.wall = 13_100.0
+    source.target = target(observed=101.0)
+    decision = classify(auto, observed=101.0)
+
+    assert decision.accepted is True
+    assert len(hardware.calls) == 1
+    assert auto.status()["persistence"]["healthy"] is True  # type: ignore[index]
+    persisted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert persisted["clock"]["monotonic_seconds"] == 101.0
+    assert persisted["clock"]["wall_epoch_seconds"] == 13_100.0
+    assert persisted["shots"] == [
+        {"accepted_at_epoch_seconds": 13_100.0, "event_id": "event-one", "track_id": 7}
+    ]
+
+
+def test_same_boot_restart_rebases_empty_history_after_forward_time_sync(tmp_path: Path) -> None:
+    clocks = Clocks()
+    service(tmp_path, clocks=clocks)
+
+    clocks.monotonic = 101.0
+    clocks.wall = 13_100.0
+    restarted, source, _, _, hardware = service(tmp_path, clocks=clocks)
+    source.target = target(observed=101.0)
+    decision = classify(restarted, observed=101.0)
+
+    assert decision.accepted is True
+    assert len(hardware.calls) == 1
+    assert restarted.status()["persistence"]["healthy"] is True  # type: ignore[index]
+
+
+def test_new_boot_rebases_empty_history_before_time_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boot_id = ["boot-one"]
+    monkeypatch.setattr(
+        AutoFireService,
+        "_system_boot_id",
+        staticmethod(lambda: boot_id[0]),
+    )
+    clocks = Clocks()
+    service(tmp_path, clocks=clocks)
+
+    boot_id[0] = "boot-two"
+    clocks.monotonic = 1.0
+    clocks.wall = 9_900.0
+    restarted, source, _, _, hardware = service(tmp_path, clocks=clocks)
+    source.target = target(observed=1.0)
+    decision = classify(restarted, observed=1.0)
+
+    assert decision.accepted is True
+    assert len(hardware.calls) == 1
+    persisted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert persisted["clock"]["boot_id"] == "boot-two"
+    assert persisted["clock"]["monotonic_seconds"] == 1.0
+    assert persisted["clock"]["wall_epoch_seconds"] == 9_900.0
+
+
+def test_runtime_backward_time_sync_rebases_when_shot_history_is_empty(tmp_path: Path) -> None:
+    clocks = Clocks()
+    auto, source, _, _, hardware = service(tmp_path, clocks=clocks)
+
+    clocks.monotonic = 101.0
+    clocks.wall = 9_900.0
+    source.target = target(observed=101.0)
+    decision = classify(auto, observed=101.0)
+
+    assert decision.accepted is True
+    assert len(hardware.calls) == 1
+    assert auto.status()["persistence"]["healthy"] is True  # type: ignore[index]
+
+
+def test_runtime_backward_clock_jump_still_blocks_with_shot_history(tmp_path: Path) -> None:
+    clocks = Clocks()
+    auto, source, _, _, hardware = service(tmp_path, clocks=clocks)
+    assert classify(auto).accepted is True
+
+    clocks.monotonic = 101.0
+    clocks.wall = 9_900.0
+    source.target = target(event_id="event-two", track_id=8, observed=101.0)
+    decision = classify(auto, event_id="event-two", track_id=8, observed=101.0)
+
+    assert decision.reason == "safety_state_invalid"
+    assert len(hardware.calls) == 1
+    assert auto.status()["persistence"]["healthy"] is False  # type: ignore[index]
+
+
 def test_corrupt_or_unreadable_rate_state_disables_engagement(tmp_path: Path) -> None:
     state_path = tmp_path / "auto-fire-state.json"
     state_path.write_text("not json", encoding="utf-8")

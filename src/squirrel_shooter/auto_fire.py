@@ -1108,6 +1108,13 @@ class AutoFireService:
             )
             if boot_changed:
                 if self._rate_clock_wall < persisted_wall - _WALL_CLOCK_JUMP_TOLERANCE_SECONDS:
+                    correction = self._rate_clock_wall - persisted_wall
+                    if self._rebaseline_empty_history_clock_locked(
+                        "backward",
+                        correction,
+                        "system restart",
+                    ):
+                        return
                     self._latch_clock_error_locked(
                         "wall clock moved backward across a system restart"
                     )
@@ -1170,10 +1177,37 @@ class AutoFireService:
         wall_error = wall - expected_wall
         if abs(wall_error) > _WALL_CLOCK_JUMP_TOLERANCE_SECONDS:
             direction = "forward" if wall_error > 0 else "backward"
+            if self._rebaseline_empty_history_clock_locked(direction, wall_error, context):
+                return True
             self._latch_clock_error_locked(
                 f"wall clock jumped {direction} during {context}"
             )
             return False
+        return True
+
+    def _rebaseline_empty_history_clock_locked(
+        self,
+        direction: str,
+        correction_seconds: float,
+        context: str,
+    ) -> bool:
+        if self._shots:
+            return False
+        LOGGER.warning(
+            "AUTO_FIRE rate-limit clock rebased after empty-history %s correction: %.3fs during %s",
+            direction,
+            correction_seconds,
+            context,
+            extra={
+                "structured_data": {
+                    "event": "auto_fire_rate_limit_clock_rebased",
+                    "direction": direction,
+                    "correction_seconds": round(correction_seconds, 3),
+                    "context": context,
+                    "shot_history_count": 0,
+                }
+            },
+        )
         return True
 
     def _latch_clock_error_locked(self, detail: str) -> None:
