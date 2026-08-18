@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import threading
+import time
 from logging.handlers import RotatingFileHandler
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -134,6 +136,66 @@ def test_event_json_csv_and_jsonl_are_completed_and_flushed(tmp_path: Path) -> N
         assert logged["track_id"] == "7"
     assert json.loads(logs.jsonl_path.read_text(encoding="utf-8").splitlines()[0])["event_id"] == active.event_id
     assert writers[0].released
+
+
+def test_event_prebuffer_encoding_does_not_block_motion_processing(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FakeWriter(path),
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    rendering_started = threading.Event()
+    release_rendering = threading.Event()
+
+    def slow_prebuffer():
+        rendering_started.set()
+        release_rendering.wait(timeout=2.0)
+        yield 0.0, frame
+
+    started = time.monotonic()
+    active = recorder.begin(
+        7,
+        candidate(),
+        frame,
+        frame,
+        slow_prebuffer(),
+        now=1.0,
+        measured_fps=9.9,
+    )
+    elapsed = time.monotonic() - started
+
+    assert rendering_started.wait(timeout=0.5)
+    assert elapsed < 0.25
+    recorder.update(7, candidate(), frame, now=1.1)
+    release_rendering.set()
+    record = recorder.finish(7, now=4.2)
+    assert record["frames_written"] == 3
+    assert active.clip_path.exists()
+
+
+def test_event_reacquisition_diagnostics_are_bounded(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FakeWriter(path),
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    active = recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=9.9)
+
+    for sequence in range(15):
+        recorder.record_reacquisition_diagnostic(7, {"sequence": sequence})
+
+    record = recorder.finish(7, now=4.2)
+    assert [item["sequence"] for item in record["reacquisition_diagnostics"]] == list(range(3, 15))
+    persisted = json.loads((active.directory / "event.json").read_text(encoding="utf-8"))
+    assert persisted["reacquisition_diagnostics"] == record["reacquisition_diagnostics"]
 
 
 def test_rejection_and_session_logs_capture_required_counters(tmp_path: Path) -> None:

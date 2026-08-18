@@ -177,6 +177,32 @@ def test_coherent_motion_persistence_and_time_cooldown(tmp_path: Path) -> None:
     assert after_cooldown.confirmed
 
 
+def test_fast_left_moving_track_survives_one_brief_segmentation_gap(tmp_path: Path) -> None:
+    masks = [
+        box_mask(),
+        box_mask((78, 35, 12, 12)),
+        box_mask((58, 35, 12, 12)),
+        box_mask(),
+        box_mask((25, 35, 12, 12)),
+    ]
+    detector = MotionWatcherDetector(
+        watch_config(tmp_path, persistence_frames=2),
+        subtractor=MaskSubtractor(masks),
+    )
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    detector.process(frame, now=0.0)
+    first = detector.process(frame, now=0.1).groups[0]
+    confirmed = detector.process(frame, now=0.2).groups[0]
+    detector.process(frame, now=0.3)
+    reacquired = detector.process(frame, now=0.4).groups[0]
+
+    assert confirmed.confirmed
+    assert reacquired.track_id == first.track_id == confirmed.track_id
+    assert reacquired.confirmed
+    assert reacquired.centroid[0] < confirmed.centroid[0]
+
+
 def test_inclusion_zone_rejects_outside_motion(tmp_path: Path) -> None:
     config = watch_config(tmp_path)
     zone = replace(config.inclusion_zone, enabled=True, polygon=((0.5, 0), (1, 0), (1, 1), (0.5, 1)))

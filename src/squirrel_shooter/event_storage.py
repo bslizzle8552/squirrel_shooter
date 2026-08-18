@@ -5,12 +5,15 @@ from __future__ import annotations
 import csv
 import json
 import os
+import queue
 import secrets
 import shutil
 import subprocess
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import chain
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -36,6 +39,65 @@ EVENT_FIELDS = (
 )
 
 SESSION_DETAIL_LIMIT = 100
+REACQUISITION_DIAGNOSTIC_LIMIT = 12
+EVENT_CLIP_QUEUE_LIMIT = 32
+
+
+class _AsyncClipWriter:
+    """Serialize clip frames without blocking the motion detector on encoding."""
+
+    _STOP = object()
+
+    def __init__(self, writer: Any, initial_frames: Iterable[np.ndarray]) -> None:
+        self._writer = writer
+        self._initial_frames = initial_frames
+        self._queue: queue.Queue[np.ndarray | object] = queue.Queue(maxsize=EVENT_CLIP_QUEUE_LIMIT)
+        self._error: Exception | None = None
+        self._finished = False
+        self.frames_written = 0
+        self._thread = threading.Thread(target=self._run, name="event-clip-writer", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            for frame in self._initial_frames:
+                self._writer.write(frame)
+                self.frames_written += 1
+            while True:
+                item = self._queue.get()
+                if item is self._STOP:
+                    break
+                self._writer.write(item)
+                self.frames_written += 1
+        except Exception as exc:
+            self._error = exc
+        finally:
+            self._writer.release()
+
+    def write(self, frame: np.ndarray) -> None:
+        if self._finished:
+            raise OSError("event clip writer is already finished")
+        self._put(frame)
+
+    def _put(self, item: np.ndarray | object) -> None:
+        while True:
+            if self._error is not None:
+                raise OSError("event clip writer failed") from self._error
+            try:
+                self._queue.put(item, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def release(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        if self._error is None:
+            self._put(self._STOP)
+        self._thread.join()
+        if self._error is not None:
+            raise OSError("event clip writer failed") from self._error
 
 
 def new_event_id(when: datetime | None = None) -> str:
@@ -268,6 +330,7 @@ class ActiveEvent:
     last_motion_at: float
     writer: Any
     group_samples: list[dict[str, Any]] = field(default_factory=list)
+    reacquisition_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     frames_written: int = 0
     latest_snapshot: np.ndarray | None = None
 
@@ -314,20 +377,20 @@ class EventRecorder:
         reported_fps = float(self.camera_metadata.get("camera_reported_fps", 0) or 0)
         output_fps = measured_fps if measured_fps > 0 else (reported_fps if reported_fps > 0 else 1.0)
         fourcc = cv2.VideoWriter_fourcc(*self.config.motion.event_lifecycle.clip_codec)
-        writer = self._video_writer_factory(str(clip_incomplete), fourcc, output_fps, (width, height))
-        if hasattr(writer, "isOpened") and not writer.isOpened():
+        raw_writer = self._video_writer_factory(str(clip_incomplete), fourcc, output_fps, (width, height))
+        if hasattr(raw_writer, "isOpened") and not raw_writer.isOpened():
             marker.unlink(missing_ok=True)
             raise OSError(f"OpenCV could not open event clip {clip_incomplete}")
         event = ActiveEvent(
             event_id, track_id, directory, marker, directory / "snapshot.jpg", clip_incomplete, directory / "clip.avi",
-            now, datetime.now().astimezone().isoformat(timespec="milliseconds"), now, writer,
+            now, datetime.now().astimezone().isoformat(timespec="milliseconds"), now, raw_writer,
         )
-        for _, buffered in pre_event_frames:
-            writer.write(self._with_event_id(buffered, event_id))
-            event.frames_written += 1
         event_frame = self._with_event_id(annotated, event_id)
-        writer.write(event_frame)
-        event.frames_written += 1
+        initial_frames = (
+            self._with_event_id(buffered, event_id)
+            for _, buffered in pre_event_frames
+        )
+        event.writer = _AsyncClipWriter(raw_writer, chain(initial_frames, (event_frame,)))
         event.latest_snapshot = event_frame.copy()
         event.group_samples.append(group.as_dict())
         self.active[track_id] = event
@@ -343,6 +406,13 @@ class EventRecorder:
             event.group_samples.append(group.as_dict())
             event.latest_snapshot = event_frame.copy()
 
+    def record_reacquisition_diagnostic(self, track_id: int, diagnostic: dict[str, Any]) -> None:
+        event = self.active.get(track_id)
+        if event is None:
+            return
+        event.reacquisition_diagnostics.append(diagnostic)
+        del event.reacquisition_diagnostics[:-REACQUISITION_DIAGNOSTIC_LIMIT]
+
     def should_finish(self, event: ActiveEvent, now: float) -> bool:
         lifecycle = self.config.motion.event_lifecycle
         return now - event.last_motion_at >= lifecycle.post_event_seconds or now - event.start_monotonic >= lifecycle.maximum_event_seconds
@@ -350,6 +420,7 @@ class EventRecorder:
     def finish(self, track_id: int, *, now: float, notes: str = "") -> dict[str, Any]:
         event = self.active.pop(track_id)
         event.writer.release()
+        event.frames_written = event.writer.frames_written
         if event.clip_incomplete_path.exists():
             os.replace(event.clip_incomplete_path, event.clip_path)
         if event.latest_snapshot is None or not self._image_writer(str(event.snapshot_path), event.latest_snapshot):
@@ -430,6 +501,7 @@ class EventRecorder:
             "notes": notes,
             "human_review_label": "",
             "human_review_notes": "",
+            "reacquisition_diagnostics": event.reacquisition_diagnostics,
         }
         return record
 

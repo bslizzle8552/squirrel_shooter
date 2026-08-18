@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from time import monotonic, perf_counter
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import cv2
 import numpy as np
@@ -117,11 +117,15 @@ class _DetectionFrameBuffer:
         while self._frames and self._frames[0].timestamp < cutoff:
             self._frames.popleft()
 
-    def rendered_frames(self, render: Callable[[np.ndarray, WatchDetectionResult, float], np.ndarray]) -> list[tuple[float, np.ndarray]]:
-        return [
+    def rendered_frames(
+        self,
+        render: Callable[[np.ndarray, WatchDetectionResult, float], np.ndarray],
+    ) -> Iterable[tuple[float, np.ndarray]]:
+        frames = tuple(self._frames)
+        return (
             (item.timestamp, render(item.frame, item.result, item.measured_fps))
-            for item in self._frames
-        ]
+            for item in frames
+        )
 
     def clear(self) -> None:
         self._frames.clear()
@@ -697,6 +701,7 @@ class MotionProcessingService:
         for group in result.groups:
             should_begin = group.newly_confirmed or group.track_id == forced_track
             if should_begin and group.track_id not in self._recorder.active:
+                pre_event_frame_count = len(self._prebuffer)
                 pre_event_frames = self._prebuffer.rendered_frames(self._render_annotation)
                 event = self._recorder.begin(
                     group.track_id,
@@ -736,7 +741,7 @@ class MotionProcessingService:
                             selection_mode=self.config.classifier.frame_selection,
                         )
                         self._classifier_selectors[event.event_id] = selector
-                        self._classifier_clip_offsets[event.event_id] = len(pre_event_frames)
+                        self._classifier_clip_offsets[event.event_id] = pre_event_frame_count
                         self._consider_classifier_frame(selector, group, packet.frame)
             elif group.track_id in self._recorder.active:
                 self._recorder.update(group.track_id, group, get_annotated(), now=now)
@@ -813,15 +818,44 @@ class MotionProcessingService:
 
         elapsed = observed_monotonic - coasting.lost_at_monotonic
         if elapsed > self.config.auto_fire.track_loss_grace_seconds:
+            self._record_reacquisition_diagnostic(
+                snapshot.track_id,
+                coasting,
+                groups,
+                observed_monotonic,
+                "timeout",
+            )
             self._expire_auto_target(key, coasting, "reacquisition_timeout", observed_monotonic)
             return
         compatible = self._compatible_reacquisition_groups(coasting.last_snapshot, groups)
         if len(compatible) > 1:
+            self._record_reacquisition_diagnostic(
+                snapshot.track_id,
+                coasting,
+                groups,
+                observed_monotonic,
+                "ambiguous",
+            )
             self._expire_auto_target(key, coasting, "reacquisition_ambiguous", observed_monotonic)
             return
         if len(compatible) != 1 or int(compatible[0].track_id) != snapshot.track_id:
+            self._record_reacquisition_diagnostic(
+                snapshot.track_id,
+                coasting,
+                groups,
+                observed_monotonic,
+                "incompatible",
+            )
             self._expire_auto_target(key, coasting, "reacquisition_incompatible", observed_monotonic)
             return
+
+        self._record_reacquisition_diagnostic(
+            snapshot.track_id,
+            coasting,
+            groups,
+            observed_monotonic,
+            "reacquired",
+        )
 
         with self._condition:
             self._coasting_auto_targets.pop(key, None)
@@ -892,13 +926,42 @@ class MotionProcessingService:
             return
         compatible = self._compatible_reacquisition_groups(coasting.last_snapshot, groups)
         if len(compatible) > 1:
+            self._record_reacquisition_diagnostic(
+                track_id,
+                coasting,
+                groups,
+                observed_monotonic,
+                "ambiguous",
+            )
             self._expire_auto_target(key, coasting, "reacquisition_ambiguous", observed_monotonic)
             return
         if len(compatible) == 1 and int(compatible[0].track_id) != track_id:
+            self._record_reacquisition_diagnostic(
+                track_id,
+                coasting,
+                groups,
+                observed_monotonic,
+                "different_tracker_id",
+            )
             self._expire_auto_target(key, coasting, "reacquisition_incompatible", observed_monotonic)
             return
         if observed_monotonic - coasting.lost_at_monotonic > self.config.auto_fire.track_loss_grace_seconds:
+            self._record_reacquisition_diagnostic(
+                track_id,
+                coasting,
+                groups,
+                observed_monotonic,
+                "timeout",
+            )
             self._expire_auto_target(key, coasting, "reacquisition_timeout", observed_monotonic)
+            return
+        self._record_reacquisition_diagnostic(
+            track_id,
+            coasting,
+            groups,
+            observed_monotonic,
+            "coasting",
+        )
 
     def _compatible_reacquisition_groups(
         self,
@@ -919,6 +982,67 @@ class MotionProcessingService:
             if area_ratio <= self.config.auto_fire.reacquisition_max_area_ratio:
                 compatible.append(group)
         return compatible
+
+    def _record_reacquisition_diagnostic(
+        self,
+        track_id: int,
+        coasting: _CoastingAutoTarget,
+        groups: tuple[Any, ...] | list[Any],
+        observed_monotonic: float,
+        decision: str,
+    ) -> None:
+        if self._recorder is None:
+            return
+        previous = coasting.last_snapshot
+        previous_area = previous.bounding_box[2] * previous.bounding_box[3]
+        candidates: list[dict[str, Any]] = []
+        for group in groups:
+            centroid = tuple(float(value) for value in group.centroid)
+            distance = math.dist((previous.pixel_x, previous.pixel_y), centroid)
+            box = tuple(int(value) for value in group.bounding_box)
+            area = box[2] * box[3]
+            area_ratio = max(previous_area, area) / max(1, min(previous_area, area))
+            distance_compatible = distance <= self.config.auto_fire.reacquisition_max_centroid_distance_pixels
+            area_compatible = area_ratio <= self.config.auto_fire.reacquisition_max_area_ratio
+            candidates.append(
+                {
+                    "track_id": int(group.track_id),
+                    "centroid": {"x": round(centroid[0], 2), "y": round(centroid[1], 2)},
+                    "bounding_box": {"x": box[0], "y": box[1], "width": box[2], "height": box[3]},
+                    "bounding_box_area": area,
+                    "distance_from_last_centroid_pixels": round(distance, 2),
+                    "area_ratio": round(area_ratio, 3),
+                    "distance_compatible": distance_compatible,
+                    "area_compatible": area_compatible,
+                    "compatible": distance_compatible and area_compatible,
+                    "rejection_reason": (
+                        None
+                        if distance_compatible and area_compatible
+                        else "centroid_distance"
+                        if not distance_compatible
+                        else "bounding_box_area_ratio"
+                    ),
+                    "persistence_count": int(getattr(group, "persistence_count", 0)),
+                    "confirmed": bool(getattr(group, "confirmed", False)),
+                    "event_eligible": bool(getattr(group, "event_eligible", False)),
+                    "provisional_category": str(getattr(group, "provisional_category", "unknown")),
+                }
+            )
+        self._recorder.record_reacquisition_diagnostic(
+            track_id,
+            {
+                "observed_monotonic": observed_monotonic,
+                "seconds_since_coasting_started": round(observed_monotonic - coasting.lost_at_monotonic, 3),
+                "reference_mode": "last_observed_centroid",
+                "reference_centroid": {"x": previous.pixel_x, "y": previous.pixel_y},
+                "reference_bounding_box_area": previous_area,
+                "max_centroid_distance_pixels": self.config.auto_fire.reacquisition_max_centroid_distance_pixels,
+                "max_bounding_box_area_ratio": self.config.auto_fire.reacquisition_max_area_ratio,
+                "candidate_count": len(candidates),
+                "decision": decision,
+                "candidates": candidates,
+            },
+        )
 
     def _expire_auto_target(
         self,

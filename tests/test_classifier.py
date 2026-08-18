@@ -973,6 +973,33 @@ def test_runtime_rejects_wrong_identity_and_ambiguous_reacquisition(tmp_path: Pa
     assert ambiguous_state.state == "reacquisition_ambiguous"
 
 
+def test_runtime_records_numeric_reacquisition_gate_diagnostics(tmp_path: Path) -> None:
+    motion = _auto_motion(tmp_path)
+    recorded: list[tuple[int, dict[str, object]]] = []
+    motion._recorder = SimpleNamespace(
+        record_reacquisition_diagnostic=lambda track_id, diagnostic: recorded.append((track_id, diagnostic))
+    )
+    motion._live_auto_targets[("event-live", 7)] = _auto_target()
+    far = _motion_group(
+        track_id=8,
+        centroid=(155.0, 31.0),
+        bounding_box=(140, 21, 30, 20),
+    )
+
+    motion._handle_missing_auto_target("event-live", 7, (far,), 10.1)
+
+    assert len(recorded) == 1
+    track_id, diagnostic = recorded[0]
+    assert track_id == 7
+    assert diagnostic["reference_mode"] == "last_observed_centroid"
+    assert diagnostic["decision"] == "coasting"
+    candidate_diagnostic = diagnostic["candidates"][0]  # type: ignore[index]
+    assert candidate_diagnostic["track_id"] == 8
+    assert candidate_diagnostic["distance_from_last_centroid_pixels"] == 120.0
+    assert candidate_diagnostic["area_ratio"] == 1.0
+    assert candidate_diagnostic["rejection_reason"] == "centroid_distance"
+
+
 def test_classifier_rejects_new_work_while_night_mode_is_paused(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     classifier = EventClassifier(config.classifier, ClassifierEvidenceStore(config))
