@@ -1,7 +1,9 @@
 # Squirrel Squirter — Auto-Fire Clock Recovery Fix and Live Verification
 
-**Date:** 2026-08-18  
-**Branch:** `manual-control`  
+**Date:** 2026-08-18
+
+**Branch:** `manual-control`
+
 **Fix commit:** `b81168012ea3a5733dba951d4e2cfcfb2a70ae0b` (`Recover empty auto-fire history after clock sync`)
 
 ## Result
