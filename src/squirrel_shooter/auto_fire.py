@@ -469,7 +469,8 @@ class AutoFireService:
 
         parsed, parse_reason = self._parse_detections(detections)
         top = max(parsed, key=lambda item: item.confidence) if parsed else None
-        human_detected = any(item.label in HUMAN_DENY_LABELS for item in parsed)
+        # Supervised V1 class policy uses only the top detection for the event person latch.
+        human_detected = top is not None and top.label in HUMAN_DENY_LABELS
         if human_detected:
             self._latch_human(event_id)
 
