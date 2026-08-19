@@ -786,6 +786,11 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
         assert valve.state is ValveState.CLOSED
         return True
 
+    def reserve_actuation() -> str:
+        events.append("reserve")
+        assert valve.state is ValveState.CLOSED
+        return "reservation-test"
+
     result = service.automatic_engage(
         150,
         150,
@@ -793,6 +798,7 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
         frame_height=720,
         cooldown_seconds=5.0,
         final_safety_check=final_guard,
+        reserve_actuation=reserve_actuation,
         evidence={
             "source_event_id": "motion-event-7",
             "track_id": 7,
@@ -804,10 +810,22 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
     assert isinstance(result, AutomaticEngagementResult)
     assert result.aim == InterpolatedAim(150, 150, 120.0, 90.0, (1, 2, 4, 5))
     assert result.event_id.startswith("auto-fire-")
+    assert result.reservation_id == "reservation-test"
     assert result.cooldown_seconds == 5.0
     assert result.recording_queued is True
     assert guard_calls == ["guard"]
-    assert events == ["move", "settle", "guard", "close", "open", "pulse", "close", "move", "settle"]
+    assert events == [
+        "move",
+        "settle",
+        "guard",
+        "reserve",
+        "close",
+        "open",
+        "pulse",
+        "close",
+        "move",
+        "settle",
+    ]
     assert pan_tilt.moves == [PanTiltPosition(120, 90), PanTiltPosition(85, 82)]
     assert valve.state is ValveState.CLOSED
     assert service.cooldown_remaining_seconds() == 5.0
@@ -826,6 +844,7 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
     assert recorded.evidence["calculated_pan"] == 120.0
     assert recorded.evidence["cooldown_seconds"] == 5.0
     assert recorded.evidence["safe_bound_result"] == "inside_calibrated_area"
+    assert recorded.evidence["actuation_reservation_id"] == "reservation-test"
 
     with pytest.raises(FireCooldownError):
         service.fire()
@@ -859,6 +878,7 @@ def test_automatic_final_guard_rejection_parks_without_firing(tmp_path: Path) ->
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=reject,
+            reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
 
@@ -870,6 +890,43 @@ def test_automatic_final_guard_rejection_parks_without_firing(tmp_path: Path) ->
     assert valve.state is ValveState.CLOSED
     assert "open" not in valve.events
     assert service.cooldown_remaining_seconds() == 0
+    assert recorder.events == []
+
+
+def test_automatic_reservation_failure_parks_without_touching_valve(tmp_path: Path) -> None:
+    events: list[str] = []
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    events.clear()
+    pan_tilt.moves.clear()
+
+    def fail_reservation() -> str:
+        events.append("reservation-failed")
+        raise OSError("disk unavailable")
+
+    with pytest.raises(AutomaticEngagementError) as rejected:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=lambda: True,
+            reserve_actuation=fail_reservation,
+            evidence={},
+        )
+
+    assert rejected.value.reason == "safety_state_invalid"
+    assert rejected.value.shot_attempted is False
+    assert events == ["move", "reservation-failed", "move"]
+    assert pan_tilt.moves == [PanTiltPosition(120, 90), PanTiltPosition(85, 82)]
+    assert valve.state is ValveState.CLOSED
+    assert "open" not in valve.events
     assert recorder.events == []
 
 
@@ -925,6 +982,7 @@ def test_automatic_engagement_rejects_changed_interpolation_before_final_guard(t
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=guard,
+            reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
 
@@ -950,6 +1008,7 @@ def test_automatic_engagement_requires_recording_and_exact_safe_interpolation(tm
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
     assert unavailable.value.reason == "recording_unavailable"
@@ -970,6 +1029,7 @@ def test_automatic_engagement_requires_recording_and_exact_safe_interpolation(tm
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
     assert outside.value.reason == "outside_safe_bounds"
@@ -997,6 +1057,7 @@ def test_automatic_engagement_rejects_camera_geometry_mismatch_before_movement(
             frame_height=480,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
 
@@ -1038,6 +1099,7 @@ def test_legacy_calibration_without_frame_geometry_cannot_automatically_engage(
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
 
@@ -1111,6 +1173,7 @@ def test_verified_calibration_pixel_outside_declared_frame_fails_closed(
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
 
@@ -1146,6 +1209,7 @@ def test_automatic_engagement_is_never_queued_behind_busy_coordinator(tmp_path: 
                 frame_height=720,
                 cooldown_seconds=5.0,
                 final_safety_check=lambda: True,
+                reserve_actuation=lambda: "reservation-test",
                 evidence={"event_id": "first"},
             )
         except Exception as exc:
@@ -1163,6 +1227,7 @@ def test_automatic_engagement_is_never_queued_behind_busy_coordinator(tmp_path: 
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={"event_id": "second"},
         )
     assert busy.value.reason == "coordinator_busy"
@@ -1200,6 +1265,7 @@ def test_cleanup_waits_for_in_flight_automatic_engagement(tmp_path: Path) -> Non
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={"source_event_id": "event-one"},
         )
     )
@@ -1258,6 +1324,7 @@ def test_automatic_valve_failure_closes_then_parks_and_sets_auto_cooldown(tmp_pa
             frame_height=720,
             cooldown_seconds=5.0,
             final_safety_check=lambda: True,
+            reserve_actuation=lambda: "reservation-test",
             evidence={"event_id": "failed-pulse"},
         )
 
@@ -1285,6 +1352,7 @@ def test_automatic_recording_submission_failure_cannot_skip_park(tmp_path: Path)
         frame_height=720,
         cooldown_seconds=5.0,
         final_safety_check=lambda: True,
+        reserve_actuation=lambda: "reservation-test",
         evidence={"event_id": "recording-failure"},
     )
 

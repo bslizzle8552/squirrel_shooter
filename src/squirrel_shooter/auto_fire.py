@@ -9,7 +9,8 @@ import os
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass
+import uuid
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
@@ -21,7 +22,8 @@ HUMAN_DENY_LABELS = frozenset({"person"})
 _MODEL_LABELS = frozenset(VOC_LABELS[1:])
 _UNKNOWN_LABELS = frozenset({"background", "unknown", "unclassified", "no-result", "no_result"})
 _SAFE_EVENT_ID = re.compile(r"[A-Za-z0-9_-]+")
-_RATE_LIMIT_SCHEMA_VERSION = 2
+_RATE_LIMIT_SCHEMA_VERSION = 3
+_PREVIOUS_RATE_LIMIT_SCHEMA_VERSION = 2
 _LEGACY_RATE_LIMIT_SCHEMA_VERSION = 1
 _ROLLING_WINDOW_SECONDS = 3600.0
 _WALL_CLOCK_JUMP_TOLERANCE_SECONDS = 5.0
@@ -44,6 +46,14 @@ _KNOWN_COORDINATOR_REASONS = frozenset(
         "valve_failure",
     }
 )
+
+
+class _ActuationReservationError(RuntimeError):
+    """Fail-closed durable-reservation rejection exposed through the coordinator seam."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 def _finite_number(
@@ -241,6 +251,7 @@ class AutoFireCoordinator(Protocol):
         frame_height: int,
         cooldown_seconds: float,
         final_safety_check: Callable[[], bool],
+        reserve_actuation: Callable[[], str],
         evidence: dict[str, Any],
     ) -> object:
         ...
@@ -262,10 +273,19 @@ class AutoFireDecision:
 
 
 @dataclass(frozen=True)
-class _ShotRecord:
+class _ShotAttempt:
+    reservation_id: str
     event_id: str
     track_id: int
-    accepted_at_epoch_seconds: float
+    reserved_at_epoch_seconds: float
+    reserved_at_monotonic_seconds: float | None
+    reserved_boot_id: str | None
+    state: str
+    outcome: str | None = None
+    finalized_at_epoch_seconds: float | None = None
+    shot_attempted: bool | None = None
+    physical_event_id: str | None = None
+    recording_queued: bool | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -315,12 +335,14 @@ class AutoFireService:
         self._lock = threading.RLock()
         self._reacquisition_condition = threading.Condition(self._lock)
         self._target_state_generation = 0
-        self._shots: list[_ShotRecord] = []
+        self._attempts: list[_ShotAttempt] = []
         self._state_error: str | None = None
+        self._state_io_lock = threading.Lock()
         self._rate_clock_wall = self._read_clock(self._wall_clock)
         self._rate_clock_monotonic = self._read_clock(self._monotonic_clock)
         self._rate_clock_boot_id = self._system_boot_id()
         self._persisted_rate_clock: tuple[float, float, str | None] | None = None
+        self._restart_interlock_until_monotonic: float | None = None
         self._human_denied_events: dict[str, float] = {}
         self._held_classifications: dict[tuple[str, int], _HeldClassification] = {}
         self._pending: tuple[str, int] | None = None
@@ -332,6 +354,7 @@ class AutoFireService:
         self._last_decision: AutoFireDecision | None = None
         self._load_rate_limit_state()
         self._validate_initial_rate_clock()
+        self._recover_unresolved_reservations()
         self._preflight_rate_limit_state()
 
     def start_accepting(self) -> None:
@@ -529,6 +552,7 @@ class AutoFireService:
 
         final_check_called = False
         final_rejection_reason: str | None = None
+        reservation_id: str | None = None
 
         def final_safety_check() -> bool:
             nonlocal final_check_called, final_rejection_reason
@@ -542,6 +566,23 @@ class AutoFireService:
             )
             return final_rejection_reason is None
 
+        def reserve_actuation() -> str:
+            nonlocal final_rejection_reason, reservation_id
+            if reservation_id is not None:
+                return reservation_id
+            if not final_check_called or final_rejection_reason is not None:
+                final_rejection_reason = final_rejection_reason or "safety_state_invalid"
+                raise _ActuationReservationError(
+                    final_rejection_reason,
+                    "Durable actuation reservation requested before final safety approval",
+                )
+            try:
+                reservation_id = self._reserve_actuation_attempt(event_id, track_id)
+            except _ActuationReservationError as exc:
+                final_rejection_reason = exc.reason
+                raise
+            return reservation_id
+
         try:
             result = self.coordinator.automatic_engage(
                 target.pixel_x,
@@ -550,22 +591,25 @@ class AutoFireService:
                 frame_height=target.frame_height,
                 cooldown_seconds=self.config.cooldown_seconds,
                 final_safety_check=final_safety_check,
+                reserve_actuation=reserve_actuation,
                 evidence=evidence,
             )
         except Exception as exc:
             shot_attempted = getattr(exc, "shot_attempted", False) is True
             persistence_error: str | None = None
+            if reservation_id is not None:
+                try:
+                    self._finalize_actuation_attempt(
+                        reservation_id,
+                        state="failed" if shot_attempted else "cancelled",
+                        outcome=self._coordinator_exception_reason(exc),
+                        shot_attempted=shot_attempted,
+                    )
+                except Exception as persist_exc:
+                    persistence_error = f"{type(persist_exc).__name__}: {persist_exc}"
             with self._lock:
                 self._pending = None
                 if shot_attempted:
-                    attempted_at = self._rate_wall_now()
-                    if attempted_at is None:
-                        attempted_at = now_wall
-                    self._shots.append(_ShotRecord(event_id, track_id, attempted_at))
-                    try:
-                        self._persist_rate_limit_state_locked()
-                    except Exception as persist_exc:
-                        persistence_error = f"{type(persist_exc).__name__}: {persist_exc}"
                     failure = f"{type(exc).__name__}: {exc}"
                     self._state_error = (
                         "Automatic engagement failed after a valve actuation was attempted: "
@@ -583,8 +627,10 @@ class AutoFireService:
                         "structured_data": {
                             "event": "auto_fire_actuation_attempt_failed",
                             **evidence,
+                            "reservation_id": reservation_id,
                             "error": f"{type(exc).__name__}: {exc}",
-                            "rate_limit_persisted": persistence_error is None,
+                            "reservation_finalized": reservation_id is not None
+                            and persistence_error is None,
                         }
                     },
                 )
@@ -601,10 +647,68 @@ class AutoFireService:
                 target_pixel_x=target.pixel_x,
                 target_pixel_y=target.pixel_y,
             )
-        unsuccessful_reason = self._unsuccessful_result_reason(result)
-        if final_rejection_reason is not None or unsuccessful_reason is not None:
+        if final_rejection_reason is not None:
             with self._lock:
                 self._pending = None
+            return self._reject(
+                final_rejection_reason,
+                **decision_fields,
+                target_pixel_x=target.pixel_x,
+                target_pixel_y=target.pixel_y,
+            )
+        if reservation_id is None:
+            with self._lock:
+                self._pending = None
+                self._state_error = "Coordinator returned without a durable actuation reservation"
+            return self._reject(
+                "safety_state_invalid",
+                **decision_fields,
+                target_pixel_x=target.pixel_x,
+                target_pixel_y=target.pixel_y,
+            )
+        returned_reservation_id = getattr(result, "reservation_id", None)
+        if returned_reservation_id != reservation_id:
+            persistence_error: str | None = None
+            try:
+                self._finalize_actuation_attempt(
+                    reservation_id,
+                    state="failed",
+                    outcome="coordinator_reservation_mismatch",
+                    shot_attempted=True,
+                )
+            except Exception as persist_exc:
+                persistence_error = f"{type(persist_exc).__name__}: {persist_exc}"
+            with self._lock:
+                self._pending = None
+                self._state_error = "Coordinator returned an invalid actuation reservation identifier"
+                if persistence_error is not None:
+                    self._state_error += f"; reservation finalization failed: {persistence_error}"
+            return self._reject(
+                "safety_state_invalid",
+                **decision_fields,
+                target_pixel_x=target.pixel_x,
+                target_pixel_y=target.pixel_y,
+            )
+        unsuccessful_reason = self._unsuccessful_result_reason(result)
+        if final_rejection_reason is not None or unsuccessful_reason is not None:
+            shot_attempted = getattr(result, "shot_attempted", False) is True
+            persistence_error: str | None = None
+            try:
+                self._finalize_actuation_attempt(
+                    reservation_id,
+                    state="failed" if shot_attempted else "cancelled",
+                    outcome=final_rejection_reason or unsuccessful_reason or "safety_state_invalid",
+                    shot_attempted=shot_attempted,
+                )
+            except Exception as persist_exc:
+                persistence_error = f"{type(persist_exc).__name__}: {persist_exc}"
+            with self._lock:
+                self._pending = None
+                if persistence_error is not None:
+                    self._state_error = (
+                        "Could not finalize rejected automatic engagement reservation: "
+                        f"{persistence_error}"
+                    )
             return self._reject(
                 final_rejection_reason or unsuccessful_reason or "safety_state_invalid",
                 **decision_fields,
@@ -616,20 +720,31 @@ class AutoFireService:
         recording_failed = recording_queued is False
         accepted_at = self._rate_wall_now()
         persistence_error: str | None = None
+        safety_errors: list[str] = []
+        if accepted_at is None:
+            accepted_at = now_wall
+            safety_errors.append("Wall clock failed after an automatic engagement")
+        physical_event_id = getattr(result, "event_id", None)
+        if not isinstance(physical_event_id, str) or _SAFE_EVENT_ID.fullmatch(physical_event_id) is None:
+            physical_event_id = None
+            safety_errors.append("Coordinator returned an invalid physical event identifier")
+        try:
+            self._finalize_actuation_attempt(
+                reservation_id,
+                state="completed",
+                outcome="accepted_recording_failed" if recording_failed else "accepted",
+                shot_attempted=True,
+                finalized_at_epoch_seconds=accepted_at,
+                physical_event_id=physical_event_id,
+                recording_queued=recording_queued if isinstance(recording_queued, bool) else None,
+            )
+        except Exception as exc:
+            persistence_error = f"{type(exc).__name__}: {exc}"
+            safety_errors.append(
+                f"Could not finalize accepted automatic engagement reservation: {persistence_error}"
+            )
         with self._lock:
             self._pending = None
-            safety_errors: list[str] = []
-            if accepted_at is None:
-                accepted_at = now_wall
-                safety_errors.append("Wall clock failed after an automatic engagement")
-            self._shots.append(_ShotRecord(event_id, track_id, accepted_at))
-            try:
-                self._persist_rate_limit_state_locked()
-            except Exception as exc:
-                persistence_error = f"{type(exc).__name__}: {exc}"
-                safety_errors.append(
-                    f"Could not persist accepted automatic engagement: {persistence_error}"
-                )
             if recording_failed:
                 safety_errors.append(
                     "Accepted automatic engagement could not queue its evidence recording"
@@ -653,8 +768,10 @@ class AutoFireService:
                 "structured_data": {
                     "event": "auto_fire_completed",
                     **evidence,
+                    "reservation_id": reservation_id,
+                    "physical_event_id": physical_event_id,
                     "recording_queued": recording_queued,
-                    "rate_limit_persisted": persistence_error is None,
+                    "reservation_finalized": persistence_error is None,
                 }
             },
         )
@@ -731,15 +848,25 @@ class AutoFireService:
 
     def status(self) -> dict[str, object]:
         now_wall = self._rate_wall_now()
+        now_monotonic = self._read_clock(self._monotonic_clock)
         cooldown = self._coordinator_cooldown(log_errors=False)
         with self._lock:
             shots_in_window = (
                 0
                 if now_wall is None
                 else sum(
-                    shot.accepted_at_epoch_seconds >= now_wall - _ROLLING_WINDOW_SECONDS
-                    for shot in self._shots
+                    attempt.reserved_at_epoch_seconds >= now_wall - _ROLLING_WINDOW_SECONDS
+                    for attempt in self._attempts
                 )
+            )
+            interlock_remaining = (
+                None
+                if self._restart_interlock_until_monotonic is None or now_monotonic is None
+                else max(0.0, self._restart_interlock_until_monotonic - now_monotonic)
+            )
+            unresolved = sum(
+                attempt.state in {"reserved", "recovered_uncertain"}
+                for attempt in self._attempts
             )
             return {
                 "enabled": self.config.enabled,
@@ -749,16 +876,21 @@ class AutoFireService:
                 "rejection_counts": dict(sorted(self._rejection_counts.items())),
                 "last_decision": None if self._last_decision is None else asdict(self._last_decision),
                 "shots_in_rolling_window": shots_in_window,
+                "counted_attempts_in_rolling_window": shots_in_window,
                 "max_shots_per_hour": self.config.max_shots_per_hour,
                 "cooldown_remaining_seconds": None if cooldown is None else round(cooldown, 3),
                 "engagement_pending": self._pending is not None,
                 "classifications_held_for_reacquisition": len(self._held_classifications),
                 "shutting_down": self._shutting_down,
+                "unresolved_actuation_reservations": unresolved,
+                "restart_interlock_remaining_seconds": (
+                    None if interlock_remaining is None else round(interlock_remaining, 3)
+                ),
                 "persistence": {
                     "healthy": self._state_error is None,
                     "path": str(self.config.rate_limit_state_file),
                     "error": None if self._state_error is None else self._state_error[:256],
-                    "records": len(self._shots),
+                    "records": len(self._attempts),
                 },
             }
 
@@ -910,29 +1042,220 @@ class AutoFireService:
                 LOGGER.exception("AUTO_FIRE coordinator cooldown read failed")
             return None
 
+    def _reserve_actuation_attempt(self, event_id: str, track_id: int) -> str:
+        """Durably count one authorization before the coordinator may touch the valve."""
+
+        with self._state_io_lock:
+            now_wall = self._rate_wall_now()
+            now_monotonic = self._read_clock(self._monotonic_clock)
+            with self._lock:
+                if self._shutting_down:
+                    raise _ActuationReservationError(
+                        "service_stopping",
+                        "Automatic engagement stopped before durable reservation",
+                    )
+                if self._state_error is not None or now_wall is None or now_monotonic is None:
+                    raise _ActuationReservationError(
+                        "safety_state_invalid",
+                        "Automatic rate-limit state is unsafe before durable reservation",
+                    )
+                if self._pending != (event_id, track_id):
+                    raise _ActuationReservationError(
+                        "target_association_invalid",
+                        "Pending automatic target changed before durable reservation",
+                    )
+                rate_reason = self._rate_limit_reason_locked(event_id, track_id, now_wall)
+                if rate_reason is not None:
+                    raise _ActuationReservationError(
+                        rate_reason,
+                        f"Automatic rate limit changed before durable reservation: {rate_reason}",
+                    )
+                reservation_id = uuid.uuid4().hex
+                attempt = _ShotAttempt(
+                    reservation_id=reservation_id,
+                    event_id=event_id,
+                    track_id=track_id,
+                    reserved_at_epoch_seconds=now_wall,
+                    reserved_at_monotonic_seconds=now_monotonic,
+                    reserved_boot_id=self._rate_clock_boot_id,
+                    state="reserved",
+                )
+                self._attempts.append(attempt)
+                payload = self._rate_limit_payload_locked()
+            try:
+                self._write_rate_limit_payload(payload)
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                with self._lock:
+                    self._state_error = (
+                        "Could not durably reserve automatic engagement before actuation: "
+                        f"{detail}"
+                    )
+                LOGGER.error(
+                    "AUTO_FIRE durable actuation reservation failed event=%s track=%s error=%s",
+                    event_id,
+                    track_id,
+                    detail,
+                    extra={
+                        "structured_data": {
+                            "event": "auto_fire_actuation_reservation_failed",
+                            "event_id": event_id,
+                            "track_id": track_id,
+                            "reservation_id": reservation_id,
+                            "error": detail,
+                        }
+                    },
+                )
+                raise _ActuationReservationError(
+                    "safety_state_invalid",
+                    "Durable automatic actuation reservation failed",
+                ) from exc
+            with self._lock:
+                if self._shutting_down:
+                    raise _ActuationReservationError(
+                        "service_stopping",
+                        "Automatic engagement stopped after durable reservation",
+                    )
+                if self._state_error is not None:
+                    raise _ActuationReservationError(
+                        "safety_state_invalid",
+                        "Automatic safety state changed during durable reservation",
+                    )
+                if event_id in self._human_denied_events:
+                    raise _ActuationReservationError(
+                        "human_detected",
+                        "Human veto arrived during durable reservation",
+                    )
+        LOGGER.info(
+            "AUTO_FIRE actuation durably reserved event=%s track=%s reservation=%s",
+            event_id,
+            track_id,
+            reservation_id,
+            extra={
+                "structured_data": {
+                    "event": "auto_fire_actuation_reserved",
+                    "event_id": event_id,
+                    "track_id": track_id,
+                    "reservation_id": reservation_id,
+                    "reserved_at_epoch_seconds": now_wall,
+                }
+            },
+        )
+        return reservation_id
+
+    def _finalize_actuation_attempt(
+        self,
+        reservation_id: str,
+        *,
+        state: str,
+        outcome: str,
+        shot_attempted: bool,
+        finalized_at_epoch_seconds: float | None = None,
+        physical_event_id: str | None = None,
+        recording_queued: bool | None = None,
+    ) -> None:
+        """Persist the terminal outcome without ever removing the counted reservation."""
+
+        if state not in {"completed", "failed", "cancelled"}:
+            raise ValueError("terminal actuation state is invalid")
+        if not isinstance(outcome, str) or not outcome:
+            raise ValueError("terminal actuation outcome is required")
+        with self._state_io_lock:
+            finalized_at = finalized_at_epoch_seconds
+            if finalized_at is None:
+                finalized_at = self._rate_wall_now()
+            with self._lock:
+                matches = [
+                    index
+                    for index, attempt in enumerate(self._attempts)
+                    if attempt.reservation_id == reservation_id
+                ]
+                if len(matches) != 1:
+                    raise ValueError("actuation reservation is missing or duplicated")
+                index = matches[0]
+                attempt = self._attempts[index]
+                if attempt.state != "reserved":
+                    if (
+                        attempt.state == state
+                        and attempt.outcome == outcome
+                        and attempt.shot_attempted is shot_attempted
+                    ):
+                        return
+                    raise ValueError("actuation reservation is already terminal")
+                if finalized_at is None:
+                    finalized_at = attempt.reserved_at_epoch_seconds
+                finalized_at = _finite_number(
+                    finalized_at,
+                    "finalized_at_epoch_seconds",
+                    minimum=0.0,
+                )
+                finalized_at = max(finalized_at, attempt.reserved_at_epoch_seconds)
+                self._attempts[index] = replace(
+                    attempt,
+                    state=state,
+                    outcome=outcome,
+                    finalized_at_epoch_seconds=finalized_at,
+                    shot_attempted=shot_attempted,
+                    physical_event_id=physical_event_id,
+                    recording_queued=recording_queued,
+                )
+                payload = self._rate_limit_payload_locked()
+            try:
+                self._write_rate_limit_payload(payload)
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                with self._lock:
+                    self._state_error = (
+                        "Could not durably finalize automatic actuation reservation: "
+                        f"{detail}"
+                    )
+                raise
+        LOGGER.info(
+            "AUTO_FIRE actuation reservation finalized reservation=%s state=%s outcome=%s",
+            reservation_id,
+            state,
+            outcome,
+            extra={
+                "structured_data": {
+                    "event": "auto_fire_actuation_reservation_finalized",
+                    "reservation_id": reservation_id,
+                    "state": state,
+                    "outcome": outcome,
+                    "shot_attempted": shot_attempted,
+                    "physical_event_id": physical_event_id,
+                    "recording_queued": recording_queued,
+                }
+            },
+        )
+
     def _rate_limit_reason_locked(
         self,
         event_id: str,
         track_id: int,
         now_wall: float,
     ) -> str | None:
-        event_shots = [shot for shot in self._shots if shot.event_id == event_id]
-        if len(event_shots) >= self.config.max_shots_per_event:
+        if self._restart_interlock_until_monotonic is not None:
+            now_monotonic = self._read_clock(self._monotonic_clock)
+            if now_monotonic is None or now_monotonic < self._restart_interlock_until_monotonic:
+                return "unresolved_actuation"
+            self._restart_interlock_until_monotonic = None
+        event_attempts = [attempt for attempt in self._attempts if attempt.event_id == event_id]
+        if len(event_attempts) >= self.config.max_shots_per_event:
             return "target_already_engaged"
-        same_target_shots = [
-            shot
-            for shot in self._shots
-            if shot.event_id == event_id or shot.track_id == track_id
+        same_target_attempts = [
+            attempt
+            for attempt in self._attempts
+            if attempt.event_id == event_id or attempt.track_id == track_id
         ]
-        if same_target_shots:
+        if same_target_attempts:
             elapsed = now_wall - max(
-                shot.accepted_at_epoch_seconds for shot in same_target_shots
+                attempt.reserved_at_epoch_seconds for attempt in same_target_attempts
             )
             if elapsed < self.config.minimum_reengagement_seconds:
                 return "minimum_reengagement_delay"
         rolling = sum(
-            shot.accepted_at_epoch_seconds >= now_wall - _ROLLING_WINDOW_SECONDS
-            for shot in self._shots
+            attempt.reserved_at_epoch_seconds >= now_wall - _ROLLING_WINDOW_SECONDS
+            for attempt in self._attempts
         )
         if rolling >= self.config.max_shots_per_hour:
             return "global_rate_limit"
@@ -1000,29 +1323,65 @@ class AutoFireService:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict) or payload.get("schema_version") not in {
                 _LEGACY_RATE_LIMIT_SCHEMA_VERSION,
+                _PREVIOUS_RATE_LIMIT_SCHEMA_VERSION,
                 _RATE_LIMIT_SCHEMA_VERSION,
             }:
                 raise ValueError("unsupported rate-limit state schema")
-            raw_shots = payload.get("shots")
-            if not isinstance(raw_shots, list):
-                raise ValueError("rate-limit state shots must be a list")
-            shots: list[_ShotRecord] = []
-            for raw in raw_shots:
-                if not isinstance(raw, dict) or set(raw) != {
-                    "event_id",
-                    "track_id",
-                    "accepted_at_epoch_seconds",
-                }:
-                    raise ValueError("rate-limit state contains a malformed shot")
-                event_id = raw["event_id"]
-                track_id = raw["track_id"]
-                accepted_at = raw["accepted_at_epoch_seconds"]
-                if not self._valid_event_and_track(event_id, track_id):
-                    raise ValueError("rate-limit state contains an invalid event association")
-                timestamp = _finite_number(accepted_at, "accepted_at_epoch_seconds", minimum=0.0)
-                shots.append(_ShotRecord(event_id, track_id, timestamp))
-            self._shots = shots
-            if payload["schema_version"] == _RATE_LIMIT_SCHEMA_VERSION:
+            schema_version = payload["schema_version"]
+            if schema_version in {
+                _LEGACY_RATE_LIMIT_SCHEMA_VERSION,
+                _PREVIOUS_RATE_LIMIT_SCHEMA_VERSION,
+            }:
+                raw_shots = payload.get("shots")
+                if not isinstance(raw_shots, list):
+                    raise ValueError("rate-limit state shots must be a list")
+                attempts: list[_ShotAttempt] = []
+                for index, raw in enumerate(raw_shots):
+                    if not isinstance(raw, dict) or set(raw) != {
+                        "event_id",
+                        "track_id",
+                        "accepted_at_epoch_seconds",
+                    }:
+                        raise ValueError("rate-limit state contains a malformed shot")
+                    event_id = raw["event_id"]
+                    track_id = raw["track_id"]
+                    if not self._valid_event_and_track(event_id, track_id):
+                        raise ValueError("rate-limit state contains an invalid event association")
+                    timestamp = _finite_number(
+                        raw["accepted_at_epoch_seconds"],
+                        "accepted_at_epoch_seconds",
+                        minimum=0.0,
+                    )
+                    attempts.append(
+                        _ShotAttempt(
+                            reservation_id=f"legacy-{index + 1}",
+                            event_id=event_id,
+                            track_id=track_id,
+                            reserved_at_epoch_seconds=timestamp,
+                            reserved_at_monotonic_seconds=None,
+                            reserved_boot_id=None,
+                            state="legacy_completed",
+                            outcome="legacy_shot_record",
+                            finalized_at_epoch_seconds=timestamp,
+                            shot_attempted=True,
+                        )
+                    )
+                self._attempts = attempts
+            else:
+                if set(payload) != {"schema_version", "clock", "attempts"}:
+                    raise ValueError("rate-limit state contains unexpected schema-3 fields")
+                raw_attempts = payload.get("attempts")
+                if not isinstance(raw_attempts, list):
+                    raise ValueError("rate-limit state attempts must be a list")
+                attempts = [self._parse_persisted_attempt(raw) for raw in raw_attempts]
+                reservation_ids = [attempt.reservation_id for attempt in attempts]
+                if len(set(reservation_ids)) != len(reservation_ids):
+                    raise ValueError("rate-limit state contains duplicate reservation identifiers")
+                self._attempts = attempts
+            if schema_version in {
+                _PREVIOUS_RATE_LIMIT_SCHEMA_VERSION,
+                _RATE_LIMIT_SCHEMA_VERSION,
+            }:
                 raw_clock = payload.get("clock")
                 if not isinstance(raw_clock, dict) or set(raw_clock) != {
                     "boot_id",
@@ -1059,29 +1418,178 @@ class AutoFireService:
                 },
             )
 
+    def _parse_persisted_attempt(self, raw: object) -> _ShotAttempt:
+        expected = {
+            "reservation_id",
+            "event_id",
+            "track_id",
+            "reserved_at_epoch_seconds",
+            "reserved_at_monotonic_seconds",
+            "reserved_boot_id",
+            "state",
+            "outcome",
+            "finalized_at_epoch_seconds",
+            "shot_attempted",
+            "physical_event_id",
+            "recording_queued",
+        }
+        if not isinstance(raw, dict) or set(raw) != expected:
+            raise ValueError("rate-limit state contains a malformed actuation attempt")
+        reservation_id = raw["reservation_id"]
+        event_id = raw["event_id"]
+        track_id = raw["track_id"]
+        if (
+            not isinstance(reservation_id, str)
+            or _SAFE_EVENT_ID.fullmatch(reservation_id) is None
+        ):
+            raise ValueError("rate-limit state contains an invalid reservation identifier")
+        if not self._valid_event_and_track(event_id, track_id):
+            raise ValueError("rate-limit state contains an invalid event association")
+        reserved_at = _finite_number(
+            raw["reserved_at_epoch_seconds"],
+            "reserved_at_epoch_seconds",
+            minimum=0.0,
+        )
+        reserved_monotonic = raw["reserved_at_monotonic_seconds"]
+        if reserved_monotonic is not None:
+            reserved_monotonic = _finite_number(
+                reserved_monotonic,
+                "reserved_at_monotonic_seconds",
+                minimum=0.0,
+            )
+        reserved_boot_id = raw["reserved_boot_id"]
+        if reserved_boot_id is not None and (
+            not isinstance(reserved_boot_id, str) or not reserved_boot_id
+        ):
+            raise ValueError("rate-limit state contains an invalid reservation boot identifier")
+        state = raw["state"]
+        if state not in {
+            "reserved",
+            "recovered_uncertain",
+            "completed",
+            "failed",
+            "cancelled",
+            "legacy_completed",
+        }:
+            raise ValueError("rate-limit state contains an invalid actuation state")
+        outcome = raw["outcome"]
+        if outcome is not None and (not isinstance(outcome, str) or not outcome):
+            raise ValueError("rate-limit state contains an invalid actuation outcome")
+        finalized_at = raw["finalized_at_epoch_seconds"]
+        if finalized_at is not None:
+            finalized_at = _finite_number(
+                finalized_at,
+                "finalized_at_epoch_seconds",
+                minimum=reserved_at,
+            )
+        shot_attempted = raw["shot_attempted"]
+        if shot_attempted is not None and not isinstance(shot_attempted, bool):
+            raise ValueError("rate-limit state contains invalid shot-attempt evidence")
+        physical_event_id = raw["physical_event_id"]
+        if physical_event_id is not None and (
+            not isinstance(physical_event_id, str)
+            or _SAFE_EVENT_ID.fullmatch(physical_event_id) is None
+        ):
+            raise ValueError("rate-limit state contains an invalid physical event identifier")
+        recording_queued = raw["recording_queued"]
+        if recording_queued is not None and not isinstance(recording_queued, bool):
+            raise ValueError("rate-limit state contains invalid recording evidence")
+        terminal = state in {"completed", "failed", "cancelled", "legacy_completed"}
+        if state == "reserved" and any(
+            value is not None
+            for value in (outcome, finalized_at, shot_attempted, physical_event_id, recording_queued)
+        ):
+            raise ValueError("reserved actuation contains terminal fields")
+        if state == "recovered_uncertain" and (
+            outcome != "process_restart"
+            or any(
+                value is not None
+                for value in (finalized_at, shot_attempted, physical_event_id, recording_queued)
+            )
+        ):
+            raise ValueError("recovered actuation contains invalid uncertainty fields")
+        if terminal and (outcome is None or finalized_at is None or shot_attempted is None):
+            raise ValueError("terminal actuation is missing required fields")
+        if state in {"completed", "failed", "legacy_completed"} and shot_attempted is not True:
+            raise ValueError("attempted actuation must remain conservatively counted")
+        if state == "cancelled" and shot_attempted is not False:
+            raise ValueError("cancelled actuation must record no physical attempt")
+        if state == "completed" and physical_event_id is None:
+            raise ValueError("completed actuation is missing its physical event identifier")
+        return _ShotAttempt(
+            reservation_id=reservation_id,
+            event_id=event_id,
+            track_id=track_id,
+            reserved_at_epoch_seconds=reserved_at,
+            reserved_at_monotonic_seconds=reserved_monotonic,
+            reserved_boot_id=reserved_boot_id,
+            state=state,
+            outcome=outcome,
+            finalized_at_epoch_seconds=finalized_at,
+            shot_attempted=shot_attempted,
+            physical_event_id=physical_event_id,
+            recording_queued=recording_queued,
+        )
+
+    def _recover_unresolved_reservations(self) -> None:
+        if self._state_error is not None:
+            return
+        unresolved = [
+            index
+            for index, attempt in enumerate(self._attempts)
+            if attempt.state in {"reserved", "recovered_uncertain"}
+        ]
+        if not unresolved:
+            return
+        now_monotonic = self._read_clock(self._monotonic_clock)
+        if now_monotonic is None:
+            self._state_error = "Could not establish a restart interlock for unresolved actuation"
+            return
+        with self._lock:
+            for index in unresolved:
+                attempt = self._attempts[index]
+                if attempt.state == "reserved":
+                    self._attempts[index] = replace(
+                        attempt,
+                        state="recovered_uncertain",
+                        outcome="process_restart",
+                    )
+            self._restart_interlock_until_monotonic = now_monotonic + _ROLLING_WINDOW_SECONDS
+        LOGGER.error(
+            "AUTO_FIRE recovered %d unresolved durable actuation reservation(s); automatic engagement interlocked",
+            len(unresolved),
+            extra={
+                "structured_data": {
+                    "event": "auto_fire_unresolved_reservations_recovered",
+                    "count": len(unresolved),
+                    "interlock_seconds": _ROLLING_WINDOW_SECONDS,
+                }
+            },
+        )
+
     def _preflight_rate_limit_state(self) -> None:
         """Prove restart-safe state is writable before any enabled engagement."""
 
         if not self.config.enabled or self._state_error is not None:
             return
-        with self._lock:
-            try:
-                self._persist_rate_limit_state_locked()
-            except Exception as exc:
+        try:
+            self._persist_rate_limit_state()
+        except Exception as exc:
+            with self._lock:
                 self._state_error = (
                     "Could not initialize auto-fire rate-limit state: "
                     f"{type(exc).__name__}: {exc}"
                 )
-                LOGGER.error(
-                    "AUTO_FIRE rate-limit state is not writable; automatic engagement disabled",
-                    extra={
-                        "structured_data": {
-                            "event": "auto_fire_rate_limit_state_unwritable",
-                            "path": str(self.config.rate_limit_state_file),
-                            "error": self._state_error,
-                        }
-                    },
-                )
+            LOGGER.error(
+                "AUTO_FIRE rate-limit state is not writable; automatic engagement disabled",
+                extra={
+                    "structured_data": {
+                        "event": "auto_fire_rate_limit_state_unwritable",
+                        "path": str(self.config.rate_limit_state_file),
+                        "error": self._state_error,
+                    }
+                },
+            )
 
     def _validate_initial_rate_clock(self) -> None:
         """Reject startup when persisted same-boot clock evidence is inconsistent."""
@@ -1191,7 +1699,7 @@ class AutoFireService:
         correction_seconds: float,
         context: str,
     ) -> bool:
-        if self._shots:
+        if self._attempts:
             return False
         LOGGER.warning(
             "AUTO_FIRE rate-limit clock rebased after empty-history %s correction: %.3fs during %s",
@@ -1232,19 +1740,29 @@ class AutoFireService:
             return None
         return value or None
 
-    def _persist_rate_limit_state_locked(self) -> None:
-        path = self.config.rate_limit_state_file
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        payload = {
+    def _rate_limit_payload_locked(self) -> dict[str, object]:
+        return {
             "schema_version": _RATE_LIMIT_SCHEMA_VERSION,
             "clock": {
                 "boot_id": self._rate_clock_boot_id,
                 "monotonic_seconds": self._rate_clock_monotonic,
                 "wall_epoch_seconds": self._rate_clock_wall,
             },
-            "shots": [shot.as_dict() for shot in self._shots],
+            "attempts": [attempt.as_dict() for attempt in self._attempts],
         }
+
+    def _persist_rate_limit_state(self) -> None:
+        """Serialize state writes without holding the live target/policy lock during I/O."""
+
+        with self._state_io_lock:
+            with self._lock:
+                payload = self._rate_limit_payload_locked()
+            self._write_rate_limit_payload(payload)
+
+    def _write_rate_limit_payload(self, payload: dict[str, object]) -> None:
+        path = self.config.rate_limit_state_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         try:
             with temporary.open("w", encoding="utf-8", newline="\n") as handle:
                 json.dump(payload, handle, indent=2, sort_keys=True)
@@ -1252,11 +1770,25 @@ class AutoFireService:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
+            self._fsync_parent_directory(path.parent)
         finally:
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    @staticmethod
+    def _fsync_parent_directory(directory: Path) -> None:
+        """Make the atomic replacement durable on the Linux deployment filesystem."""
+
+        if os.name != "posix":
+            return
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(str(directory), flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 __all__ = [

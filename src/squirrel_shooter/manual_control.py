@@ -201,6 +201,7 @@ class AutomaticEngagementResult:
 
     aim: InterpolatedAim
     event_id: str
+    reservation_id: str
     cooldown_seconds: float
     recording_queued: bool
     shot_attempted: bool = True
@@ -915,13 +916,15 @@ class ManualControlService:
         frame_height: int,
         cooldown_seconds: float,
         final_safety_check: Callable[[], bool],
+        reserve_actuation: Callable[[], str],
         evidence: dict[str, object],
     ) -> AutomaticEngagementResult:
         """Reserve the shared coordinator and perform one bounded automatic shot.
 
         Automatic callers are never queued behind another physical action. The
-        target is interpolated twice from the same native pixel, and the supplied
-        final guard runs exactly once immediately before the valve checks/pulse.
+        target is interpolated twice from the same native pixel. The supplied
+        final guard runs exactly once, then a durable reservation must succeed
+        immediately before the unchanged valve checks/pulse.
         """
 
         for name, value in (("pixel_x", pixel_x), ("pixel_y", pixel_y)):
@@ -950,6 +953,8 @@ class ManualControlService:
             )
         if not callable(final_safety_check):
             raise AutomaticEngagementError("invalid_request", "final_safety_check must be callable")
+        if not callable(reserve_actuation):
+            raise AutomaticEngagementError("invalid_request", "reserve_actuation must be callable")
         if not isinstance(evidence, dict):
             raise AutomaticEngagementError("invalid_request", "evidence must be a dictionary")
         if self._pan_tilt is None:
@@ -1061,6 +1066,21 @@ class ManualControlService:
                     f"Shared cooldown became active ({remaining:.3f}s remaining)",
                 )
 
+            try:
+                reservation_id = reserve_actuation()
+            except Exception as exc:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    f"Durable automatic actuation reservation failed: {type(exc).__name__}: {exc}",
+                    shot_attempted=False,
+                ) from exc
+            if not isinstance(reservation_id, str) or not reservation_id:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    "Durable automatic actuation reservation returned an invalid identifier",
+                    shot_attempted=False,
+                )
+
             event_evidence = dict(evidence)
             event_evidence.update(
                 target_pixel_x=pixel_x,
@@ -1073,6 +1093,7 @@ class ManualControlService:
                 safe_bound_result="inside_calibrated_area",
                 interpolation_result="success",
                 calibration_cell=list(final_aim.cell),
+                actuation_reservation_id=reservation_id,
             )
             shot_attempted = True
             try:
@@ -1104,6 +1125,7 @@ class ManualControlService:
             return AutomaticEngagementResult(
                 aim=final_aim,
                 event_id=event_id,
+                reservation_id=reservation_id,
                 cooldown_seconds=float(cooldown_seconds),
                 recording_queued=recording_queued,
             )

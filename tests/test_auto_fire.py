@@ -59,6 +59,9 @@ class CoordinatorResult:
     fired: bool = True
     reason: str | None = None
     recording_queued: bool | None = None
+    reservation_id: str | None = None
+    event_id: str = "auto-fire-test"
+    shot_attempted: bool = True
 
 
 class CoordinatorError(RuntimeError):
@@ -73,6 +76,7 @@ class FakeCoordinator:
         self.cooldown = 0.0
         self.calls: list[dict[str, object]] = []
         self.before_final: Callable[[], None] | None = None
+        self.after_reservation: Callable[[str], None] | None = None
         self.raise_error: Exception | None = None
         self.skip_final = False
         self.result: CoordinatorResult | None = None
@@ -89,6 +93,7 @@ class FakeCoordinator:
         frame_height: int,
         cooldown_seconds: float,
         final_safety_check: Callable[[], bool],
+        reserve_actuation: Callable[[], str],
         evidence: dict[str, object],
     ) -> object:
         self.calls.append(
@@ -101,14 +106,22 @@ class FakeCoordinator:
         )
         if self.before_final is not None:
             self.before_final()
-        if self.raise_error is not None:
+        if self.raise_error is not None and getattr(self.raise_error, "shot_attempted", False) is not True:
             raise self.raise_error
         if self.skip_final:
             return CoordinatorResult()
         final_safe = final_safety_check()
+        if not final_safe:
+            return CoordinatorResult(fired=False, shot_attempted=False)
+        reservation_id = reserve_actuation()
+        if self.after_reservation is not None:
+            self.after_reservation(reservation_id)
+        if self.raise_error is not None:
+            raise self.raise_error
         if self.result is not None:
-            return self.result if final_safe else CoordinatorResult(fired=False)
-        return CoordinatorResult(fired=final_safe)
+            self.result.reservation_id = reservation_id
+            return self.result
+        return CoordinatorResult(reservation_id=reservation_id)
 
 
 def target(
@@ -444,17 +457,157 @@ def test_allowlisted_fresh_target_engages_atomically_and_persists(tmp_path: Path
     assert evidence["source_event_id"] == "event-one" and evidence["track_id"] == 7
     assert evidence["classifier_label"] == "dog" and evidence["classifier_confidence"] == 0.90
     payload = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["clock"]["wall_epoch_seconds"] == 10000.0
     assert payload["clock"]["monotonic_seconds"] == 100.0
     assert set(payload["clock"]) == {"boot_id", "monotonic_seconds", "wall_epoch_seconds"}
-    assert payload["shots"] == [
-        {"accepted_at_epoch_seconds": 10000.0, "event_id": "event-one", "track_id": 7}
-    ]
+    assert len(payload["attempts"]) == 1
+    attempt = payload["attempts"][0]
+    assert attempt["event_id"] == "event-one" and attempt["track_id"] == 7
+    assert attempt["reserved_at_epoch_seconds"] == 10000.0
+    assert attempt["reserved_at_monotonic_seconds"] == 100.0
+    assert attempt["state"] == "completed" and attempt["outcome"] == "accepted"
+    assert attempt["shot_attempted"] is True
+    assert attempt["physical_event_id"] == "auto-fire-test"
     assert not list(tmp_path.glob(".*.tmp"))
     status = auto.status()
     assert status["accepted"] == 1 and status["shots_in_rolling_window"] == 1
     assert "shots" not in status
+
+
+def test_durable_reservation_is_visible_before_coordinator_completion(tmp_path: Path) -> None:
+    hardware = FakeCoordinator()
+    observed: dict[str, object] = {}
+    auto, _, _, _, _ = service(tmp_path, coordinator=hardware)
+
+    def inspect_reservation(reservation_id: str) -> None:
+        payload = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+        assert payload["schema_version"] == 3
+        assert len(payload["attempts"]) == 1
+        attempt = payload["attempts"][0]
+        assert attempt["reservation_id"] == reservation_id
+        assert attempt["state"] == "reserved"
+        assert attempt["shot_attempted"] is None
+        observed["reservation_id"] = reservation_id
+
+    hardware.after_reservation = inspect_reservation
+
+    decision = classify(auto)
+
+    assert decision.accepted is True
+    assert isinstance(observed["reservation_id"], str)
+    finalized = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert finalized["attempts"][0]["state"] == "completed"
+    assert finalized["attempts"][0]["reservation_id"] == observed["reservation_id"]
+
+
+def test_reservation_persistence_failure_prevents_coordinator_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = FakeCoordinator()
+    completed: list[str] = []
+    hardware.after_reservation = completed.append
+    auto, _, _, _, _ = service(tmp_path, coordinator=hardware)
+
+    def fail_write(_payload: dict[str, object]) -> None:
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(auto, "_write_rate_limit_payload", fail_write)
+
+    decision = classify(auto)
+
+    assert decision.accepted is False and decision.reason == "safety_state_invalid"
+    assert completed == []
+    status = auto.status()
+    assert status["persistence"]["healthy"] is False  # type: ignore[index]
+    assert status["shots_in_rolling_window"] == 1
+    persisted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert persisted["attempts"] == []
+
+
+def test_abrupt_exit_after_reservation_recovers_as_counted_global_interlock(
+    tmp_path: Path,
+) -> None:
+    hardware = FakeCoordinator()
+    clocks = Clocks()
+    auto, _, _, _, _ = service(tmp_path, coordinator=hardware, clocks=clocks)
+
+    def terminate_after_reservation(_reservation_id: str) -> None:
+        raise SystemExit(99)
+
+    hardware.after_reservation = terminate_after_reservation
+    with pytest.raises(SystemExit, match="99"):
+        classify(auto)
+
+    interrupted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert interrupted["attempts"][0]["state"] == "reserved"
+
+    restarted, _, _, _, restarted_hardware = service(
+        tmp_path,
+        clocks=clocks,
+        current_target=target(event_id="event-two", track_id=8),
+    )
+    restarted_decision = classify(restarted, event_id="event-two", track_id=8)
+
+    assert restarted_decision.reason == "unresolved_actuation"
+    assert restarted_hardware.calls == []
+    status = restarted.status()
+    assert status["shots_in_rolling_window"] == 1
+    assert status["unresolved_actuation_reservations"] == 1
+    assert status["restart_interlock_remaining_seconds"] == 3600.0
+    recovered = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert recovered["attempts"][0]["state"] == "recovered_uncertain"
+    assert recovered["attempts"][0]["outcome"] == "process_restart"
+
+
+def test_schema_two_history_migrates_without_losing_rate_limit(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto-fire-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "clock": {
+                    "boot_id": None,
+                    "monotonic_seconds": 100.0,
+                    "wall_epoch_seconds": 10_000.0,
+                },
+                "shots": [
+                    {
+                        "event_id": "event-one",
+                        "track_id": 7,
+                        "accepted_at_epoch_seconds": 10_000.0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    auto, _, _, _, hardware = service(tmp_path)
+
+    assert classify(auto).reason == "target_already_engaged"
+    assert hardware.calls == []
+    migrated = json.loads(state_path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == 3
+    assert len(migrated["attempts"]) == 1
+    attempt = migrated["attempts"][0]
+    assert attempt["state"] == "legacy_completed"
+    assert attempt["reserved_at_epoch_seconds"] == 10_000.0
+    assert attempt["shot_attempted"] is True
+
+
+def test_each_transaction_commit_requests_parent_directory_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auto, _, _, _, _ = service(tmp_path)
+    synced: list[Path] = []
+    monkeypatch.setattr(auto, "_fsync_parent_directory", synced.append)
+
+    assert classify(auto).accepted is True
+
+    assert synced == [tmp_path, tmp_path]
 
 
 @pytest.mark.parametrize(
@@ -583,7 +736,7 @@ def test_final_check_rejects_target_that_moved_out_of_aimed_pixel(tmp_path: Path
 
     assert decision.accepted is False and decision.reason == "target_moved_during_aim"
     state = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
-    assert state["shots"] == []
+    assert state["attempts"] == []
 
 
 def test_final_check_rejects_live_camera_geometry_change(tmp_path: Path) -> None:
@@ -600,7 +753,7 @@ def test_final_check_rejects_live_camera_geometry_change(tmp_path: Path) -> None
 
     assert decision.accepted is False and decision.reason == "calibration_frame_mismatch"
     state = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
-    assert state["shots"] == []
+    assert state["attempts"] == []
 
 
 def test_final_check_rechecks_night_and_human_latch(tmp_path: Path) -> None:
@@ -659,9 +812,11 @@ def test_failed_post_actuation_attempt_is_rate_limited_and_blocks_service(tmp_pa
     assert first.accepted is False and first.reason == "park_failed"
     assert second.reason == "safety_state_invalid"
     persisted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
-    assert persisted["shots"] == [
-        {"accepted_at_epoch_seconds": 10000.0, "event_id": "event-one", "track_id": 7}
-    ]
+    assert len(persisted["attempts"]) == 1
+    attempt = persisted["attempts"][0]
+    assert attempt["event_id"] == "event-one" and attempt["track_id"] == 7
+    assert attempt["state"] == "failed" and attempt["outcome"] == "park_failed"
+    assert attempt["shot_attempted"] is True
     status = auto.status()
     assert status["accepted"] == 0
     assert status["rejected"] == 2
@@ -805,9 +960,8 @@ def test_persisted_history_survives_forward_clock_jump_and_correction(tmp_path: 
     assert hardware.calls == []
     after = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
     assert after == before
-    assert after["shots"] == [
-        {"accepted_at_epoch_seconds": 10000.0, "event_id": "event-one", "track_id": 7}
-    ]
+    assert len(after["attempts"]) == 1
+    assert after["attempts"][0]["reserved_at_epoch_seconds"] == 10000.0
     assert "clock" in restarted.status()["persistence"]["error"]  # type: ignore[index,operator]
 
 
@@ -824,9 +978,8 @@ def test_runtime_forward_wall_clock_jump_fails_closed_without_a_second_call(tmp_
     assert decision.reason == "safety_state_invalid"
     assert len(hardware.calls) == 1
     persisted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
-    assert persisted["shots"] == [
-        {"accepted_at_epoch_seconds": 10000.0, "event_id": "event-one", "track_id": 7}
-    ]
+    assert len(persisted["attempts"]) == 1
+    assert persisted["attempts"][0]["reserved_at_epoch_seconds"] == 10000.0
 
 
 def test_runtime_forward_time_sync_rebases_when_shot_history_is_empty(tmp_path: Path) -> None:
@@ -844,9 +997,8 @@ def test_runtime_forward_time_sync_rebases_when_shot_history_is_empty(tmp_path: 
     persisted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
     assert persisted["clock"]["monotonic_seconds"] == 101.0
     assert persisted["clock"]["wall_epoch_seconds"] == 13_100.0
-    assert persisted["shots"] == [
-        {"accepted_at_epoch_seconds": 13_100.0, "event_id": "event-one", "track_id": 7}
-    ]
+    assert len(persisted["attempts"]) == 1
+    assert persisted["attempts"][0]["reserved_at_epoch_seconds"] == 13_100.0
 
 
 def test_same_boot_restart_rebases_empty_history_after_forward_time_sync(tmp_path: Path) -> None:
@@ -933,6 +1085,25 @@ def test_corrupt_or_unreadable_rate_state_disables_engagement(tmp_path: Path) ->
     persistence = auto.status()["persistence"]
     assert persistence["healthy"] is False  # type: ignore[index]
     assert "Could not read" in persistence["error"]  # type: ignore[index,operator]
+
+
+def test_semantically_invalid_v3_rate_state_disables_engagement(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto-fire-state.json"
+    auto, _, _, _, _ = service(tmp_path)
+    assert classify(auto).accepted is True
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    payload["attempts"][0]["state"] = "reserved"
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restarted, _, _, _, hardware = service(tmp_path)
+    decision = classify(restarted)
+
+    assert decision.reason == "safety_state_invalid"
+    assert hardware.calls == []
+    persistence = restarted.status()["persistence"]
+    assert persistence["healthy"] is False  # type: ignore[index]
+    assert "terminal fields" in persistence["error"]  # type: ignore[index,operator]
 
 
 def test_unwritable_rate_state_fails_before_coordinator_is_called(tmp_path: Path) -> None:
