@@ -1,0 +1,34 @@
+{
+  "event_id": "20260818-103410-613-77abc4",
+  "evidence_kind": "exact retained timestamps plus overlay-recovered candidate, not raw MOG2 replay",
+  "previous": {
+    "track_id": 1318,
+    "observed_monotonic": 174790.138243523,
+    "centroid": [805.26, 344.32],
+    "bounding_box": [746, 316, 112, 62],
+    "velocity": [-210.03, 0.0],
+    "confirmed": true,
+    "event_eligible": true,
+    "provisional_category": "small_animal_candidate",
+    "grouping_confidence": 1.0
+  },
+  "candidate": {
+    "track_id": 1319,
+    "track_id_evidence": "different/new; numeric value is synthetic because deployed overlay did not retain it",
+    "observed_monotonic": 174792.006497442,
+    "centroid": [657.0, 383.0],
+    "bounding_box": [600, 350, 108, 74],
+    "velocity": [0.0, 0.0],
+    "confirmed": false,
+    "event_eligible": false,
+    "provisional_category": "unclassified_motion",
+    "grouping_confidence": 0.0
+  },
+  "recovered_facts": {
+    "detector_observation_gap_seconds": 1.868253919,
+    "centroid_distance_pixels_approx": 153.05,
+    "event_start_to_classifier_submit_seconds": 1.408,
+    "old_source_result": "target_reacquisition_timeout"
+  },
+  "expected": "incompatible_do_not_mask_upstream_blind_spot"
+}

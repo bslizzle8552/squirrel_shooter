@@ -1,0 +1,17 @@
+{
+  "event_id": "20260818-153131-300-99a55b",
+  "evidence_kind": "retained classifier metadata and direct wider-frame review",
+  "classification": {
+    "label": "bird",
+    "confidence_approx": 0.82,
+    "crop_contents": "person lower leg and shoe",
+    "full_frame_contains_person": true
+  },
+  "timing": {
+    "event_start_to_classifier_submit_seconds": 0.008,
+    "classifier_inference_milliseconds": 494.54,
+    "group_sample_count": 7
+  },
+  "observed_runtime_result": "safety_state_invalid_due_to_clock_latch",
+  "expected": "person_full_frame_veto_independent_of_crop_label"
+}

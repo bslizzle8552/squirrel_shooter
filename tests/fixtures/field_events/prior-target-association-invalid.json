@@ -1,0 +1,24 @@
+{
+  "evidence_kind": "retained structured event/classifier facts",
+  "events": [
+    {
+      "event_id": "20260816-111857-511-1121f6",
+      "track_id": 8,
+      "classification": {"label": "dog", "confidence": 0.966959},
+      "target_coordinates_at_callback": null,
+      "result": "target_association_invalid"
+    },
+    {
+      "event_id": "20260817-095020-qualifying",
+      "track_id": 6371,
+      "classification": {"label": "dog", "confidence": 0.9582},
+      "result": "target_association_invalid_after_brief_segmentation_miss"
+    },
+    {
+      "event_id": "20260817-095031-qualifying",
+      "track_id": 6373,
+      "classification": {"label": "bird", "confidence": 0.9753},
+      "result": "target_association_invalid_after_brief_segmentation_miss"
+    }
+  ]
+}

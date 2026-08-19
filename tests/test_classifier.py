@@ -28,6 +28,7 @@ from squirrel_shooter.classifier import (
 from squirrel_shooter.classifier_setup import ModelFile, install_model
 from squirrel_shooter.config import load_config
 from squirrel_shooter.motion_runtime import MotionProcessingService
+from squirrel_shooter.safety import SceneFramePacket
 from squirrel_shooter.vision_service import VisionStatus
 from squirrel_shooter.web_dashboard import create_app
 import squirrel_shooter.classifier_setup as classifier_setup
@@ -538,6 +539,364 @@ def test_classifier_worker_is_backgrounded_and_records_one_task(tmp_path: Path) 
     assert status.queued_for_review == 0 and status.last_latency_ms == 12.5
 
 
+def test_full_frame_scene_inference_preserves_native_identity_and_geometry(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+
+    class Detector:
+        model_name = "native-scene-detector"
+
+        def classify(self, image: np.ndarray):
+            assert image.shape == (720, 1280, 3)
+            return [ClassifierDetection("Person", 0.93, (900, 40, 220, 640))], 11.0
+
+    worker = EventClassifier(config.classifier, store, detector_factory=Detector)  # type: ignore[arg-type]
+    worker.start()
+    try:
+        source_time = time.monotonic()
+        result = worker.classify_scene(
+            "request-native",
+            "event-native",
+            7,
+            SceneFramePacket(42, source_time, np.zeros((720, 1280, 3), dtype=np.uint8)),
+            timeout_seconds=1.0,
+        )
+    finally:
+        worker.stop()
+
+    assert result.status == "person"
+    assert (result.request_id, result.event_id, result.track_id) == (
+        "request-native",
+        "event-native",
+        7,
+    )
+    assert result.coordinate_space == "native_full_frame"
+    assert (result.source_sequence, result.frame_width, result.frame_height) == (42, 1280, 720)
+    assert result.detections[0].label == "person"
+    assert result.detections[0].bounding_box == (900, 40, 220, 640)
+
+
+@pytest.mark.parametrize("mode", ["load", "inference"])
+def test_full_frame_scene_dnn_failure_is_truthfully_unavailable_or_error(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+
+    class Detector:
+        model_name = "broken-scene-detector"
+
+        def classify(self, _image: np.ndarray):
+            raise RuntimeError("scene inference failed")
+
+    def factory() -> Detector:
+        if mode == "load":
+            raise FileNotFoundError("scene model missing")
+        return Detector()
+
+    worker = EventClassifier(config.classifier, store, detector_factory=factory)  # type: ignore[arg-type]
+    worker.start()
+    try:
+        source_time = time.monotonic()
+        result = worker.classify_scene(
+            "request-broken",
+            "event-broken",
+            7,
+            SceneFramePacket(1, source_time, np.zeros((40, 60, 3), dtype=np.uint8)),
+            timeout_seconds=1.0,
+        )
+    finally:
+        worker.stop()
+
+    assert result.status == ("unavailable" if mode == "load" else "error")
+    assert result.error
+
+
+def test_current_scene_preempts_queued_background_review_work(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls: list[int] = []
+
+    class Detector:
+        model_name = "priority-detector"
+
+        def classify(self, image: np.ndarray):
+            marker = int(image[0, 0, 0])
+            calls.append(marker)
+            if marker == 1:
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            return [], 1.0
+
+    worker = EventClassifier(config.classifier, store, detector_factory=Detector)  # type: ignore[arg-type]
+    worker.start()
+    first_directory = tmp_path / "captures" / "events" / "priority-first"
+    second_directory = tmp_path / "captures" / "events" / "priority-second"
+    first_directory.mkdir(parents=True)
+    second_directory.mkdir(parents=True)
+    try:
+        assert worker.submit(
+            "priority-first",
+            first_directory,
+            1,
+            np.full((40, 60, 3), 1, dtype=np.uint8),
+            (0, 0, 60, 40),
+        )
+        assert first_started.wait(timeout=1)
+        assert worker.submit(
+            "priority-second",
+            second_directory,
+            1,
+            np.full((40, 60, 3), 2, dtype=np.uint8),
+            (0, 0, 60, 40),
+        )
+        scene_results: list[object] = []
+        scene = threading.Thread(
+            target=lambda: scene_results.append(
+                worker.classify_scene(
+                    "priority-scene",
+                    "priority-event",
+                    9,
+                    SceneFramePacket(
+                        99,
+                        time.monotonic(),
+                        np.full((40, 60, 3), 9, dtype=np.uint8),
+                    ),
+                    timeout_seconds=1.0,
+                )
+            )
+        )
+        scene.start()
+        deadline = time.monotonic() + 1
+        while not worker.status().scene_request_pending and time.monotonic() < deadline:
+            time.sleep(0.005)
+        release_first.set()
+        scene.join(timeout=2)
+        assert not scene.is_alive()
+    finally:
+        release_first.set()
+        worker.stop()
+
+    assert calls[:3] == [1, 9, 2]
+    assert scene_results[0].status == "clear"  # type: ignore[union-attr]
+
+
+def test_queue_full_returns_without_producer_evidence_io(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    inference_started = threading.Event()
+    release_inference = threading.Event()
+    evidence_started = threading.Event()
+    original_save = store.save_classification
+
+    def observed_save(*args: object, **kwargs: object):
+        evidence_started.set()
+        return original_save(*args, **kwargs)
+
+    store.save_classification = observed_save  # type: ignore[method-assign]
+
+    class Detector:
+        model_name = "blocking-detector"
+
+        def classify(self, _image: np.ndarray):
+            inference_started.set()
+            assert release_inference.wait(timeout=2)
+            return [], 1.0
+
+    worker = EventClassifier(config.classifier, store, detector_factory=Detector)  # type: ignore[arg-type]
+    directories = [tmp_path / "captures" / "events" / f"queue-{index}" for index in range(3)]
+    for directory in directories:
+        directory.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit("queue-0", directories[0], 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20))
+        assert inference_started.wait(timeout=1)
+        assert worker.submit("queue-1", directories[1], 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20))
+        started = time.perf_counter()
+        assert worker.submit("queue-2", directories[2], 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20)) is False
+        assert time.perf_counter() - started < 0.1
+        assert evidence_started.is_set() is False
+    finally:
+        release_inference.set()
+        worker.stop()
+
+    assert not (directories[2] / "classification.json").exists()
+
+
+def test_decision_dispatch_starts_before_evidence_and_completion_is_distinct(
+    tmp_path: Path,
+) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    evidence_started = threading.Event()
+    completion_seen = threading.Event()
+    completions: list[tuple[str, str]] = []
+    original_save = store.save_classification
+
+    def blocking_handler(*_args: object) -> None:
+        handler_started.set()
+        assert release_handler.wait(timeout=2)
+
+    def observed_save(*args: object, **kwargs: object):
+        assert handler_started.is_set()
+        evidence_started.set()
+        return original_save(*args, **kwargs)
+
+    def completed(task: ClassifierTask, status: str, _record: object, error: str | None) -> None:
+        completions.append((task.event_id, status))
+        assert error is None
+        completion_seen.set()
+
+    store.save_classification = observed_save  # type: ignore[method-assign]
+
+    class Detector:
+        model_name = "delivery-detector"
+
+        def classify(self, _image: np.ndarray):
+            return [ClassifierDetection("dog", 0.9, (0, 0, 10, 10))], 2.0
+
+    worker = EventClassifier(  # type: ignore[arg-type]
+        config.classifier,
+        store,
+        detector_factory=Detector,
+        result_handler=blocking_handler,
+        evidence_result_handler=completed,
+    )
+    directory = tmp_path / "captures" / "events" / "delivery-order"
+    directory.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit("delivery-order", directory, 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20))
+        assert handler_started.wait(timeout=1)
+        assert evidence_started.wait(timeout=1)
+        assert completion_seen.wait(timeout=1)
+    finally:
+        release_handler.set()
+        worker.stop()
+
+    record = json.loads((directory / "classification.json").read_text(encoding="utf-8"))
+    assert record["decision_delivery_status"] == "started"
+    assert completions == [("delivery-order", "persisted")]
+    status = worker.status()
+    assert status.inference_completed == status.evidence_persisted == 1
+    assert set(status.timing_distributions) == {
+        "producer_preprocess",
+        "scheduler_enqueue_overhead",
+        "inference_queue_dwell",
+        "dnn_inference",
+        "decision_queue_dwell",
+        "decision_handler_duration",
+        "evidence_persistence",
+    }
+
+
+def test_stop_timeout_later_stops_downstream_when_inference_returns(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    inference_started = threading.Event()
+    release_inference = threading.Event()
+
+    class Detector:
+        model_name = "hung-detector"
+
+        def classify(self, _image: np.ndarray):
+            inference_started.set()
+            assert release_inference.wait(timeout=2)
+            return [], 1.0
+
+    worker = EventClassifier(config.classifier, store, detector_factory=Detector)  # type: ignore[arg-type]
+    directory = tmp_path / "captures" / "events" / "stop-hung"
+    directory.mkdir(parents=True)
+    worker.start()
+    assert worker.submit("stop-hung", directory, 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20))
+    assert inference_started.wait(timeout=1)
+
+    worker.stop(timeout=0.01)
+    assert worker.status().thread_alive is True
+    release_inference.set()
+    deadline = time.monotonic() + 2
+    while (
+        worker.status().thread_alive
+        or worker.status().decision_thread_alive
+        or worker.status().evidence_thread_alive
+        or worker.status().evidence_completion_thread_alive
+    ) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    status = worker.status()
+    assert status.thread_alive is False
+    assert status.decision_thread_alive is False
+    assert status.evidence_thread_alive is False
+    assert status.evidence_completion_thread_alive is False
+
+
+def test_pause_race_delivers_classifier_paused_for_already_queued_live_task(
+    tmp_path: Path,
+) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    handled: list[tuple[str, str | None]] = []
+
+    class Detector:
+        model_name = "pause-race-detector"
+
+        def classify(self, image: np.ndarray):
+            if int(image[0, 0, 0]) == 1:
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            return [], 1.0
+
+    def handler(
+        queued_task: ClassifierTask,
+        _detections: list[ClassifierDetection],
+        error: str | None,
+        _record: dict[str, object],
+    ) -> None:
+        handled.append((queued_task.event_id, error))
+
+    worker = EventClassifier(  # type: ignore[arg-type]
+        config.classifier,
+        store,
+        detector_factory=Detector,
+        result_handler=handler,
+    )
+    first = tmp_path / "captures" / "events" / "pause-first"
+    live = tmp_path / "captures" / "events" / "pause-live"
+    first.mkdir(parents=True)
+    live.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit("pause-first", first, 1, np.full((20, 30, 3), 1, dtype=np.uint8), (0, 0, 30, 20))
+        assert first_started.wait(timeout=1)
+        assert worker.submit(
+            "pause-live",
+            live,
+            1,
+            np.full((20, 30, 3), 2, dtype=np.uint8),
+            (0, 0, 30, 20),
+            context="auto_fire_live_event",
+            track_id=7,
+        )
+        worker.set_paused(True)
+        release_first.set()
+        deadline = time.monotonic() + 2
+        while len(handled) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        release_first.set()
+        worker.stop()
+
+    assert ("pause-live", "classifier_paused") in handled
+    assert worker.status().skipped_while_paused == 1
+
+
 def test_classifier_result_handler_receives_exact_live_task_and_is_failure_isolated(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
@@ -899,14 +1258,19 @@ def _motion_group(
     track_id: int = 7,
     centroid: tuple[float, float] = (42.0, 34.0),
     bounding_box: tuple[int, int, int, int] = (27, 24, 30, 20),
+    confirmed: bool = True,
+    event_eligible: bool = True,
+    provisional_category: str = "small_animal_candidate",
+    grouping_confidence: float = 1.0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         track_id=track_id,
         centroid=centroid,
         bounding_box=bounding_box,
-        confirmed=True,
-        event_eligible=True,
-        provisional_category="small_animal_candidate",
+        confirmed=confirmed,
+        event_eligible=event_eligible,
+        provisional_category=provisional_category,
+        grouping_confidence=grouping_confidence,
     )
 
 
@@ -986,18 +1350,311 @@ def test_runtime_records_numeric_reacquisition_gate_diagnostics(tmp_path: Path) 
         bounding_box=(140, 21, 30, 20),
     )
 
-    motion._handle_missing_auto_target("event-live", 7, (far,), 10.1)
+    motion._handle_missing_auto_target(
+        "event-live",
+        7,
+        (far,),
+        10.1,
+        frame_sequence=43,
+    )
 
     assert len(recorded) == 1
     track_id, diagnostic = recorded[0]
     assert track_id == 7
-    assert diagnostic["reference_mode"] == "last_observed_centroid"
+    assert diagnostic["reference_mode"] == "velocity_projected_centroid"
+    assert diagnostic["source_frame_sequence"] == 43
+    assert diagnostic["association_state"] == "incompatible"
+    assert diagnostic["association_reason"] == "motion_prediction_mismatch"
     assert diagnostic["decision"] == "coasting"
     candidate_diagnostic = diagnostic["candidates"][0]  # type: ignore[index]
     assert candidate_diagnostic["track_id"] == 8
     assert candidate_diagnostic["distance_from_last_centroid_pixels"] == 120.0
     assert candidate_diagnostic["area_ratio"] == 1.0
-    assert candidate_diagnostic["rejection_reason"] == "centroid_distance"
+    assert candidate_diagnostic["prediction_error_pixels"] == 120.0
+    assert candidate_diagnostic["rejection_reason"] == "motion_prediction_mismatch"
+
+
+FIELD_EVENT_FIXTURES = Path(__file__).parent / "fixtures" / "field_events"
+
+
+def _association_fixture(name: str) -> dict[str, object]:
+    return json.loads((FIELD_EVENT_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def _fixture_snapshot(
+    event_id: str,
+    payload: dict[str, object],
+    *,
+    frame_sequence: int = 100,
+) -> AutoFireTargetSnapshot:
+    centroid = tuple(float(value) for value in payload["centroid"])  # type: ignore[arg-type]
+    return AutoFireTargetSnapshot(
+        event_id=event_id,
+        track_id=int(payload["track_id"]),
+        observed_monotonic=float(payload["observed_monotonic"]),
+        pixel_x=round(centroid[0]),
+        pixel_y=round(centroid[1]),
+        bounding_box=tuple(int(value) for value in payload["bounding_box"]),  # type: ignore[arg-type]
+        frame_width=1280,
+        frame_height=720,
+        confirmed=bool(payload["confirmed"]),
+        event_eligible=bool(payload["event_eligible"]),
+        provisional_category=str(payload["provisional_category"]),
+        frame_sequence=frame_sequence,
+        velocity=tuple(float(value) for value in payload["velocity"]),  # type: ignore[arg-type]
+    )
+
+
+def _fixture_group(payload: dict[str, object]) -> SimpleNamespace:
+    return _motion_group(
+        track_id=int(payload["track_id"]),
+        centroid=tuple(float(value) for value in payload["centroid"]),  # type: ignore[arg-type]
+        bounding_box=tuple(int(value) for value in payload["bounding_box"]),  # type: ignore[arg-type]
+        confirmed=bool(payload["confirmed"]),
+        event_eligible=bool(payload["event_eligible"]),
+        provisional_category=str(payload["provisional_category"]),
+        grouping_confidence=float(payload["grouping_confidence"]),
+    )
+
+
+def test_runtime_propagates_frame_sequence_and_derives_same_track_velocity(
+    tmp_path: Path,
+) -> None:
+    motion = _auto_motion(tmp_path)
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    first = _motion_group(centroid=(35.0, 31.0), bounding_box=(20, 20, 30, 20))
+    second = _motion_group(centroid=(45.0, 35.0), bounding_box=(30, 25, 30, 20))
+
+    motion._update_live_auto_target(
+        "event-live",
+        first,
+        (first,),
+        frame,
+        10.0,
+        frame_sequence=40,
+    )
+    motion._update_live_auto_target(
+        "event-live",
+        second,
+        (second,),
+        frame,
+        10.2,
+        frame_sequence=41,
+    )
+
+    current = motion._auto_fire_target("event-live", 7)
+    assert isinstance(current, AutoFireTargetSnapshot)
+    assert current.frame_sequence == 41
+    assert current.velocity == pytest.approx((50.0, 20.0))
+
+
+def test_runtime_195417_fixture_accepts_unique_same_track_posture_change(
+    tmp_path: Path,
+) -> None:
+    fixture = _association_fixture("20260818-195417-725-0d4269.json")
+    event_id = str(fixture["event_id"])
+    previous_payload = fixture["previous"]  # type: ignore[assignment]
+    candidate_payload = fixture["candidate"]  # type: ignore[assignment]
+    previous = _fixture_snapshot(event_id, previous_payload, frame_sequence=500)  # type: ignore[arg-type]
+    candidate = _fixture_group(candidate_payload)  # type: ignore[arg-type]
+    motion = _auto_motion(tmp_path)
+    motion._live_auto_targets[(event_id, previous.track_id)] = previous
+    motion._handle_missing_auto_target(
+        event_id,
+        previous.track_id,
+        (),
+        previous.observed_monotonic + 0.05,
+        frame_sequence=501,
+    )
+
+    motion._update_live_auto_target(
+        event_id,
+        candidate,
+        (candidate,),
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        float(candidate_payload["observed_monotonic"]),  # type: ignore[index]
+        frame_sequence=502,
+    )
+
+    current = motion._auto_fire_target(event_id, previous.track_id)
+    assert isinstance(current, AutoFireTargetSnapshot)
+    assert current.bounding_box == tuple(candidate_payload["bounding_box"])  # type: ignore[arg-type,index]
+    assert current.frame_sequence == 502
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"confirmed": False},
+        {"event_eligible": False},
+        {"grouping_confidence": 0.2},
+        {"provisional_category": "person_sized"},
+    ],
+)
+def test_runtime_rejects_weak_or_unsafe_same_track_reacquisition(
+    tmp_path: Path,
+    updates: dict[str, object],
+) -> None:
+    motion = _auto_motion(tmp_path)
+    key = ("event-live", 7)
+    motion._live_auto_targets[key] = _auto_target()
+    motion._handle_missing_auto_target("event-live", 7, (), 10.05)
+    candidate = _motion_group(**updates)  # type: ignore[arg-type]
+
+    motion._update_live_auto_target(
+        "event-live",
+        candidate,
+        (candidate,),
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        10.1,
+        frame_sequence=44,
+    )
+
+    association = motion._auto_fire_target("event-live", 7)
+    assert isinstance(association, AutoFireTargetAssociation)
+    assert association.state == "reacquisition_incompatible"
+
+
+def test_runtime_partner_crossing_makes_195417_reacquisition_ambiguous(
+    tmp_path: Path,
+) -> None:
+    fixture = _association_fixture("20260818-195417-725-0d4269.json")
+    event_id = str(fixture["event_id"])
+    previous_payload = fixture["previous"]  # type: ignore[assignment]
+    candidate_payload = fixture["candidate"]  # type: ignore[assignment]
+    previous = _fixture_snapshot(event_id, previous_payload, frame_sequence=700)  # type: ignore[arg-type]
+    real = _fixture_group(candidate_payload)  # type: ignore[arg-type]
+    crossing = _motion_group(
+        track_id=4,
+        centroid=(1100.0, 370.0),
+        bounding_box=(1055, 345, 90, 55),
+        grouping_confidence=0.95,
+    )
+    motion = _auto_motion(tmp_path)
+    motion._live_auto_targets[(event_id, previous.track_id)] = previous
+    motion._handle_missing_auto_target(
+        event_id,
+        previous.track_id,
+        (),
+        previous.observed_monotonic + 0.05,
+        frame_sequence=701,
+    )
+    recorded: list[dict[str, object]] = []
+    motion._recorder = SimpleNamespace(
+        record_reacquisition_diagnostic=lambda _track_id, diagnostic: recorded.append(diagnostic)
+    )
+
+    motion._update_live_auto_target(
+        event_id,
+        real,
+        (real, crossing),
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        float(candidate_payload["observed_monotonic"]),  # type: ignore[index]
+        frame_sequence=702,
+    )
+
+    association = motion._auto_fire_target(event_id, previous.track_id)
+    assert isinstance(association, AutoFireTargetAssociation)
+    assert association.state == "reacquisition_ambiguous"
+    diagnostic = recorded[-1]
+    assert diagnostic["association_state"] == "ambiguous"
+    assert diagnostic["association_reason"] == "multiple_plausible_candidates"
+    assert diagnostic["source_frame_sequence"] == 702
+    assert diagnostic["reference_frame_sequence"] == 700
+    assert sum(
+        bool(candidate["plausible_competitor"])
+        for candidate in diagnostic["candidates"]  # type: ignore[union-attr]
+    ) == 2
+
+    motion._update_live_auto_target(
+        event_id,
+        real,
+        (real,),
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        float(candidate_payload["observed_monotonic"]) + 0.1,  # type: ignore[index]
+        frame_sequence=703,
+    )
+    terminal = motion._auto_fire_target(event_id, previous.track_id)
+    assert isinstance(terminal, AutoFireTargetAssociation)
+    assert terminal.state == "reacquisition_ambiguous"
+
+
+def test_runtime_103410_gap_does_not_revive_fragmented_track(tmp_path: Path) -> None:
+    fixture = _association_fixture("20260818-103410-613-77abc4.json")
+    event_id = str(fixture["event_id"])
+    previous_payload = fixture["previous"]  # type: ignore[assignment]
+    candidate_payload = fixture["candidate"]  # type: ignore[assignment]
+    previous = _fixture_snapshot(event_id, previous_payload)  # type: ignore[arg-type]
+    candidate = _fixture_group(candidate_payload)  # type: ignore[arg-type]
+    motion = _auto_motion(tmp_path)
+    motion._live_auto_targets[(event_id, previous.track_id)] = previous
+    motion._handle_missing_auto_target(
+        event_id,
+        previous.track_id,
+        (),
+        previous.observed_monotonic + 0.05,
+    )
+    recorded: list[dict[str, object]] = []
+    motion._recorder = SimpleNamespace(
+        record_reacquisition_diagnostic=lambda _track_id, diagnostic: recorded.append(diagnostic)
+    )
+
+    motion._handle_missing_auto_target(
+        event_id,
+        previous.track_id,
+        (candidate,),
+        float(candidate_payload["observed_monotonic"]),  # type: ignore[index]
+        frame_sequence=101,
+    )
+
+    association = motion._auto_fire_target(event_id, previous.track_id)
+    assert isinstance(association, AutoFireTargetAssociation)
+    assert association.state == "reacquisition_timeout"
+    assert recorded[-1]["association_state"] == "incompatible"
+    assert recorded[-1]["association_reason"] == "observation_gap"
+
+
+def test_prior_target_association_invalid_events_still_reject_identity_swaps(
+    tmp_path: Path,
+) -> None:
+    fixture = _association_fixture("prior-target-association-invalid.json")
+    for index, event in enumerate(fixture["events"]):  # type: ignore[union-attr]
+        motion = _auto_motion(tmp_path / str(index))
+        event_id = str(event["event_id"])
+        track_id = int(event["track_id"])
+        key = (event_id, track_id)
+        motion._live_auto_targets[key] = AutoFireTargetSnapshot(
+            event_id,
+            track_id,
+            10.0,
+            100,
+            100,
+            (80, 80, 40, 40),
+            320,
+            240,
+            True,
+            True,
+            "small_animal_candidate",
+            frame_sequence=10,
+        )
+        motion._handle_missing_auto_target(event_id, track_id, (), 10.05)
+        identity_swap = _motion_group(
+            track_id=track_id + 1,
+            centroid=(104.0, 102.0),
+            bounding_box=(84, 82, 40, 40),
+        )
+
+        motion._handle_missing_auto_target(
+            event_id,
+            track_id,
+            (identity_swap,),
+            10.1,
+            frame_sequence=11,
+        )
+
+        association = motion._auto_fire_target(event_id, track_id)
+        assert isinstance(association, AutoFireTargetAssociation)
+        assert association.state == "reacquisition_incompatible"
 
 
 def test_classifier_rejects_new_work_while_night_mode_is_paused(tmp_path: Path) -> None:
