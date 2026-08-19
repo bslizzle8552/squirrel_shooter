@@ -164,6 +164,7 @@ class AutoFireTargetSnapshot:
     confirmed: bool
     event_eligible: bool
     provisional_category: str
+    velocity: tuple[float, float] = (0.0, 0.0)
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_id, str) or _SAFE_EVENT_ID.fullmatch(self.event_id) is None:
@@ -193,6 +194,13 @@ class AutoFireTargetSnapshot:
             raise ValueError("confirmed and event_eligible must be booleans")
         if not isinstance(self.provisional_category, str) or not self.provisional_category:
             raise ValueError("provisional_category must be a non-empty string")
+        if not isinstance(self.velocity, tuple) or len(self.velocity) != 2 or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in self.velocity
+        ):
+            raise ValueError("velocity must contain two finite numbers")
 
 
 @dataclass(frozen=True)
@@ -396,7 +404,8 @@ class AutoFireService:
 
         parsed, parse_reason = self._parse_detections(detections)
         top = max(parsed, key=lambda item: item.confidence) if parsed else None
-        human_detected = any(item.label in HUMAN_DENY_LABELS for item in parsed)
+        # V1 class policy is governed only by the highest-confidence result.
+        human_detected = top is not None and top.label in HUMAN_DENY_LABELS
         if human_detected:
             self._latch_human(event_id)
 

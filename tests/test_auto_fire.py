@@ -529,16 +529,54 @@ def test_highest_confidence_result_must_itself_be_allowlisted(tmp_path: Path) ->
     assert hardware.calls == []
 
 
-def test_any_person_detection_latches_event_and_overrides_later_animal(tmp_path: Path) -> None:
+def test_100632_top_bird_ignores_secondary_person_for_class_policy(tmp_path: Path) -> None:
+    event_id = "20260819-100632-544-762eb7"
+    auto, _, _, _, hardware = service(
+        tmp_path,
+        config_changes={"min_confidence": 0.70},
+        current_target=target(event_id=event_id),
+    )
+
+    decision = classify(
+        auto,
+        event_id=event_id,
+        detections=(
+            AutoFireDetection("bird", 0.71297),
+            AutoFireDetection("person", 0.28157),
+        ),
+    )
+
+    assert decision.accepted is True and decision.reason == "accepted"
+    assert hardware.calls
+
+
+def test_top_person_latches_event_and_overrides_later_animal(tmp_path: Path) -> None:
     auto, _, _, _, hardware = service(tmp_path)
 
     first = classify(
         auto,
-        detections=(AutoFireDetection("dog", 0.95), AutoFireDetection("person", 0.30)),
+        detections=(AutoFireDetection("person", 0.90), AutoFireDetection("bird", 0.80)),
     )
     second = classify(auto, detections=(AutoFireDetection("dog", 0.99),))
 
     assert first.reason == second.reason == "human_detected"
+    assert hardware.calls == []
+
+
+def test_below_threshold_animal_with_secondary_person_stays_below_confidence(
+    tmp_path: Path,
+) -> None:
+    auto, _, _, _, hardware = service(
+        tmp_path,
+        config_changes={"min_confidence": 0.70},
+    )
+
+    decision = classify(
+        auto,
+        detections=(AutoFireDetection("bird", 0.65), AutoFireDetection("person", 0.30)),
+    )
+
+    assert decision.accepted is False and decision.reason == "below_confidence"
     assert hardware.calls == []
 
 

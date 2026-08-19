@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import threading
 from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass, field
@@ -31,6 +30,12 @@ from .files import timestamped_output_path
 from .frame_selection import BestEventFrameSelector
 from .manual_control import ManualControlService
 from .performance import AverageTimer, ThreadCpuMeter
+from .target_association import (
+    AssociationDecision,
+    AssociationPolicy,
+    TargetObservation,
+    evaluate_reacquisition,
+)
 from .thread_names import set_current_thread_name
 from .watch_detection import MotionWatcherDetector, WatchDetectionResult, annotate_watch_frame
 
@@ -160,6 +165,16 @@ class MotionProcessingService:
         self._live_auto_targets: dict[tuple[str, int], AutoFireTargetSnapshot] = {}
         self._coasting_auto_targets: dict[tuple[str, int], _CoastingAutoTarget] = {}
         self._expired_auto_targets: dict[tuple[str, int], AutoFireTargetAssociation] = {}
+        association_distance = self.config.auto_fire.reacquisition_max_centroid_distance_pixels
+        association_area_ratio = self.config.auto_fire.reacquisition_max_area_ratio
+        self._target_association_policy = AssociationPolicy(
+            maximum_elapsed_seconds=self.config.auto_fire.track_loss_grace_seconds,
+            base_prediction_error_pixels=association_distance,
+            maximum_prediction_error_pixels=max(200.0, association_distance * 2.0),
+            strong_proximity_pixels=min(60.0, association_distance),
+            ordinary_area_ratio=association_area_ratio,
+            posture_change_area_ratio=max(4.0, association_area_ratio),
+        )
         self.manual_control = manual_control_service
         coordinator = manual_control_service or _UnavailableAutoFireCoordinator()
         self.auto_fire = auto_fire_service or AutoFireService(
@@ -794,29 +809,48 @@ class MotionProcessingService:
     ) -> None:
         centroid_x, centroid_y = group.centroid
         frame_height, frame_width = frame.shape[:2]
+        pixel_x = max(0, round(float(centroid_x)))
+        pixel_y = max(0, round(float(centroid_y)))
+        key = (event_id, int(group.track_id))
+        with self._condition:
+            previous_live = self._live_auto_targets.get(key)
+            coasting = self._coasting_auto_targets.get(key)
+            expired = key in self._expired_auto_targets
+        if expired:
+            return
+        velocity = (0.0, 0.0)
+        if previous_live is not None:
+            elapsed_since_previous = observed_monotonic - previous_live.observed_monotonic
+            if elapsed_since_previous > 0.0:
+                velocity = (
+                    (pixel_x - previous_live.pixel_x) / elapsed_since_previous,
+                    (pixel_y - previous_live.pixel_y) / elapsed_since_previous,
+                )
         snapshot = AutoFireTargetSnapshot(
             event_id=event_id,
             track_id=int(group.track_id),
             observed_monotonic=observed_monotonic,
-            pixel_x=max(0, round(float(centroid_x))),
-            pixel_y=max(0, round(float(centroid_y))),
+            pixel_x=pixel_x,
+            pixel_y=pixel_y,
             bounding_box=tuple(int(value) for value in group.bounding_box),  # type: ignore[arg-type]
             frame_width=int(frame_width),
             frame_height=int(frame_height),
             confirmed=bool(group.confirmed),
             event_eligible=bool(group.event_eligible),
             provisional_category=str(group.provisional_category),
+            velocity=velocity,
         )
-        key = (snapshot.event_id, snapshot.track_id)
-        with self._condition:
-            coasting = self._coasting_auto_targets.get(key)
         if coasting is None:
             with self._condition:
                 self._live_auto_targets[key] = snapshot
-                self._expired_auto_targets.pop(key, None)
             return
 
         elapsed = observed_monotonic - coasting.lost_at_monotonic
+        association = self._evaluate_target_reacquisition(
+            coasting.last_snapshot,
+            groups,
+            observed_monotonic,
+        )
         if elapsed > self.config.auto_fire.track_loss_grace_seconds:
             self._record_reacquisition_diagnostic(
                 snapshot.track_id,
@@ -824,27 +858,33 @@ class MotionProcessingService:
                 groups,
                 observed_monotonic,
                 "timeout",
+                association,
             )
             self._expire_auto_target(key, coasting, "reacquisition_timeout", observed_monotonic)
             return
-        compatible = self._compatible_reacquisition_groups(coasting.last_snapshot, groups)
-        if len(compatible) > 1:
+        if association.state == "ambiguous":
             self._record_reacquisition_diagnostic(
                 snapshot.track_id,
                 coasting,
                 groups,
                 observed_monotonic,
                 "ambiguous",
+                association,
             )
             self._expire_auto_target(key, coasting, "reacquisition_ambiguous", observed_monotonic)
             return
-        if len(compatible) != 1 or int(compatible[0].track_id) != snapshot.track_id:
+        if (
+            association.state != "accepted"
+            or association.selected is None
+            or association.selected.track_id != snapshot.track_id
+        ):
             self._record_reacquisition_diagnostic(
                 snapshot.track_id,
                 coasting,
                 groups,
                 observed_monotonic,
                 "incompatible",
+                association,
             )
             self._expire_auto_target(key, coasting, "reacquisition_incompatible", observed_monotonic)
             return
@@ -855,6 +895,7 @@ class MotionProcessingService:
             groups,
             observed_monotonic,
             "reacquired",
+            association,
         )
 
         with self._condition:
@@ -876,6 +917,7 @@ class MotionProcessingService:
                     "event_id": snapshot.event_id,
                     "track_id": snapshot.track_id,
                     "reacquisition_seconds": elapsed,
+                    "association_reason": association.reason,
                     "old_centroid": {
                         "x": coasting.last_snapshot.pixel_x,
                         "y": coasting.last_snapshot.pixel_y,
@@ -924,24 +966,30 @@ class MotionProcessingService:
             self.auto_fire.notify_target_state_changed()
         if coasting is None or expired:
             return
-        compatible = self._compatible_reacquisition_groups(coasting.last_snapshot, groups)
-        if len(compatible) > 1:
+        association = self._evaluate_target_reacquisition(
+            coasting.last_snapshot,
+            groups,
+            observed_monotonic,
+        )
+        if association.state == "ambiguous":
             self._record_reacquisition_diagnostic(
                 track_id,
                 coasting,
                 groups,
                 observed_monotonic,
                 "ambiguous",
+                association,
             )
             self._expire_auto_target(key, coasting, "reacquisition_ambiguous", observed_monotonic)
             return
-        if len(compatible) == 1 and int(compatible[0].track_id) != track_id:
+        if association.reason == "tracker_identity_changed":
             self._record_reacquisition_diagnostic(
                 track_id,
                 coasting,
                 groups,
                 observed_monotonic,
                 "different_tracker_id",
+                association,
             )
             self._expire_auto_target(key, coasting, "reacquisition_incompatible", observed_monotonic)
             return
@@ -952,6 +1000,7 @@ class MotionProcessingService:
                 groups,
                 observed_monotonic,
                 "timeout",
+                association,
             )
             self._expire_auto_target(key, coasting, "reacquisition_timeout", observed_monotonic)
             return
@@ -961,27 +1010,46 @@ class MotionProcessingService:
             groups,
             observed_monotonic,
             "coasting",
+            association,
         )
 
-    def _compatible_reacquisition_groups(
+    def _evaluate_target_reacquisition(
         self,
         previous: AutoFireTargetSnapshot,
         groups: tuple[Any, ...] | list[Any],
-    ) -> list[Any]:
-        previous_area = previous.bounding_box[2] * previous.bounding_box[3]
-        compatible: list[Any] = []
-        for group in groups:
-            centroid = tuple(float(value) for value in group.centroid)
-            if math.dist((previous.pixel_x, previous.pixel_y), centroid) > (
-                self.config.auto_fire.reacquisition_max_centroid_distance_pixels
-            ):
-                continue
-            box = tuple(int(value) for value in group.bounding_box)
-            area = box[2] * box[3]
-            area_ratio = max(previous_area, area) / max(1, min(previous_area, area))
-            if area_ratio <= self.config.auto_fire.reacquisition_max_area_ratio:
-                compatible.append(group)
-        return compatible
+        observed_monotonic: float,
+    ) -> AssociationDecision:
+        reference = TargetObservation(
+            track_id=previous.track_id,
+            observed_monotonic=previous.observed_monotonic,
+            centroid=(float(previous.pixel_x), float(previous.pixel_y)),
+            bounding_box=previous.bounding_box,
+            velocity=tuple(float(value) for value in previous.velocity),
+            confirmed=previous.confirmed,
+            event_eligible=previous.event_eligible,
+            provisional_category=previous.provisional_category,
+            grouping_confidence=1.0,
+        )
+        candidates = tuple(
+            TargetObservation(
+                track_id=int(group.track_id),
+                observed_monotonic=observed_monotonic,
+                centroid=tuple(float(value) for value in group.centroid),  # type: ignore[arg-type]
+                bounding_box=tuple(int(value) for value in group.bounding_box),  # type: ignore[arg-type]
+                confirmed=bool(getattr(group, "confirmed", False)),
+                event_eligible=bool(getattr(group, "event_eligible", False)),
+                provisional_category=str(
+                    getattr(group, "provisional_category", "unclassified_motion")
+                ),
+                grouping_confidence=float(getattr(group, "grouping_confidence", 1.0)),
+            )
+            for group in groups
+        )
+        return evaluate_reacquisition(
+            reference,
+            candidates,
+            policy=self._target_association_policy,
+        )
 
     def _record_reacquisition_diagnostic(
         self,
@@ -990,42 +1058,36 @@ class MotionProcessingService:
         groups: tuple[Any, ...] | list[Any],
         observed_monotonic: float,
         decision: str,
+        association: AssociationDecision,
     ) -> None:
         if self._recorder is None:
             return
         previous = coasting.last_snapshot
         previous_area = previous.bounding_box[2] * previous.bounding_box[3]
         candidates: list[dict[str, Any]] = []
-        for group in groups:
+        for group, evidence in zip(groups, association.evidence, strict=True):
             centroid = tuple(float(value) for value in group.centroid)
-            distance = math.dist((previous.pixel_x, previous.pixel_y), centroid)
             box = tuple(int(value) for value in group.bounding_box)
             area = box[2] * box[3]
-            area_ratio = max(previous_area, area) / max(1, min(previous_area, area))
-            distance_compatible = distance <= self.config.auto_fire.reacquisition_max_centroid_distance_pixels
-            area_compatible = area_ratio <= self.config.auto_fire.reacquisition_max_area_ratio
             candidates.append(
                 {
+                    **evidence.as_dict(),
                     "track_id": int(group.track_id),
                     "centroid": {"x": round(centroid[0], 2), "y": round(centroid[1], 2)},
                     "bounding_box": {"x": box[0], "y": box[1], "width": box[2], "height": box[3]},
                     "bounding_box_area": area,
-                    "distance_from_last_centroid_pixels": round(distance, 2),
-                    "area_ratio": round(area_ratio, 3),
-                    "distance_compatible": distance_compatible,
-                    "area_compatible": area_compatible,
-                    "compatible": distance_compatible and area_compatible,
-                    "rejection_reason": (
-                        None
-                        if distance_compatible and area_compatible
-                        else "centroid_distance"
-                        if not distance_compatible
-                        else "bounding_box_area_ratio"
+                    "distance_from_last_centroid_pixels": round(
+                        evidence.last_centroid_distance_pixels,
+                        2,
                     ),
+                    "area_ratio": round(evidence.area_ratio, 3),
+                    "compatible": evidence.selectable,
+                    "rejection_reason": None if evidence.selectable else evidence.reason,
                     "persistence_count": int(getattr(group, "persistence_count", 0)),
                     "confirmed": bool(getattr(group, "confirmed", False)),
                     "event_eligible": bool(getattr(group, "event_eligible", False)),
                     "provisional_category": str(getattr(group, "provisional_category", "unknown")),
+                    "grouping_confidence": float(getattr(group, "grouping_confidence", 1.0)),
                 }
             )
         self._recorder.record_reacquisition_diagnostic(
@@ -1033,11 +1095,19 @@ class MotionProcessingService:
             {
                 "observed_monotonic": observed_monotonic,
                 "seconds_since_coasting_started": round(observed_monotonic - coasting.lost_at_monotonic, 3),
-                "reference_mode": "last_observed_centroid",
+                "reference_mode": "velocity_projected_centroid",
                 "reference_centroid": {"x": previous.pixel_x, "y": previous.pixel_y},
+                "reference_velocity_pixels_per_second": {
+                    "x": previous.velocity[0],
+                    "y": previous.velocity[1],
+                },
                 "reference_bounding_box_area": previous_area,
-                "max_centroid_distance_pixels": self.config.auto_fire.reacquisition_max_centroid_distance_pixels,
-                "max_bounding_box_area_ratio": self.config.auto_fire.reacquisition_max_area_ratio,
+                "association_policy": asdict(self._target_association_policy),
+                "association_state": association.state,
+                "association_reason": association.reason,
+                "selected_track_id": (
+                    None if association.selected is None else association.selected.track_id
+                ),
                 "candidate_count": len(candidates),
                 "decision": decision,
                 "candidates": candidates,

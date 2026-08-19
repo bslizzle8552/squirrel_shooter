@@ -899,14 +899,19 @@ def _motion_group(
     track_id: int = 7,
     centroid: tuple[float, float] = (42.0, 34.0),
     bounding_box: tuple[int, int, int, int] = (27, 24, 30, 20),
+    confirmed: bool = True,
+    event_eligible: bool = True,
+    provisional_category: str = "small_animal_candidate",
+    grouping_confidence: float = 1.0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         track_id=track_id,
         centroid=centroid,
         bounding_box=bounding_box,
-        confirmed=True,
-        event_eligible=True,
-        provisional_category="small_animal_candidate",
+        confirmed=confirmed,
+        event_eligible=event_eligible,
+        provisional_category=provisional_category,
+        grouping_confidence=grouping_confidence,
     )
 
 
@@ -991,13 +996,106 @@ def test_runtime_records_numeric_reacquisition_gate_diagnostics(tmp_path: Path) 
     assert len(recorded) == 1
     track_id, diagnostic = recorded[0]
     assert track_id == 7
-    assert diagnostic["reference_mode"] == "last_observed_centroid"
+    assert diagnostic["reference_mode"] == "velocity_projected_centroid"
+    assert diagnostic["association_state"] == "incompatible"
+    assert diagnostic["association_reason"] == "motion_prediction_mismatch"
     assert diagnostic["decision"] == "coasting"
     candidate_diagnostic = diagnostic["candidates"][0]  # type: ignore[index]
     assert candidate_diagnostic["track_id"] == 8
     assert candidate_diagnostic["distance_from_last_centroid_pixels"] == 120.0
     assert candidate_diagnostic["area_ratio"] == 1.0
-    assert candidate_diagnostic["rejection_reason"] == "centroid_distance"
+    assert candidate_diagnostic["rejection_reason"] == "motion_prediction_mismatch"
+
+
+FIELD_EVENT_FIXTURES = Path(__file__).parent / "fixtures" / "field_events"
+
+
+def _association_fixture(name: str) -> dict[str, object]:
+    return json.loads((FIELD_EVENT_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def test_runtime_195417_reacquires_at_current_coordinate(tmp_path: Path) -> None:
+    fixture = _association_fixture("20260818-195417-725-0d4269.json")
+    event_id = str(fixture["event_id"])
+    previous_payload = fixture["previous"]  # type: ignore[assignment]
+    candidate_payload = fixture["candidate"]  # type: ignore[assignment]
+    previous_centroid = tuple(float(value) for value in previous_payload["centroid"])  # type: ignore[index]
+    previous = AutoFireTargetSnapshot(
+        event_id=event_id,
+        track_id=int(previous_payload["track_id"]),  # type: ignore[index]
+        observed_monotonic=float(previous_payload["observed_monotonic"]),  # type: ignore[index]
+        pixel_x=round(previous_centroid[0]),
+        pixel_y=round(previous_centroid[1]),
+        bounding_box=tuple(int(value) for value in previous_payload["bounding_box"]),  # type: ignore[arg-type,index]
+        frame_width=1280,
+        frame_height=720,
+        confirmed=True,
+        event_eligible=True,
+        provisional_category="small_animal_candidate",
+        velocity=tuple(float(value) for value in previous_payload["velocity"]),  # type: ignore[arg-type,index]
+    )
+    candidate = _motion_group(
+        track_id=int(candidate_payload["track_id"]),  # type: ignore[index]
+        centroid=tuple(float(value) for value in candidate_payload["centroid"]),  # type: ignore[arg-type,index]
+        bounding_box=tuple(int(value) for value in candidate_payload["bounding_box"]),  # type: ignore[arg-type,index]
+    )
+    motion = _auto_motion(tmp_path)
+    motion._live_auto_targets[(event_id, previous.track_id)] = previous
+    motion._handle_missing_auto_target(
+        event_id,
+        previous.track_id,
+        (),
+        previous.observed_monotonic + 0.05,
+    )
+
+    motion._update_live_auto_target(
+        event_id,
+        candidate,
+        (candidate,),
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        float(candidate_payload["observed_monotonic"]),  # type: ignore[index]
+    )
+
+    current = motion._auto_fire_target(event_id, previous.track_id)
+    assert isinstance(current, AutoFireTargetSnapshot)
+    assert (current.pixel_x, current.pixel_y) == (1087, 373)
+    assert current.bounding_box == (998, 340, 158, 64)
+
+
+def test_continuous_target_updates_normally_and_carries_recent_velocity(tmp_path: Path) -> None:
+    motion = _auto_motion(tmp_path)
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    first = _motion_group(centroid=(35.0, 31.0), bounding_box=(20, 20, 30, 20))
+    second = _motion_group(centroid=(45.0, 35.0), bounding_box=(30, 25, 30, 20))
+
+    motion._update_live_auto_target("event-live", first, (first,), frame, 10.0)
+    motion._update_live_auto_target("event-live", second, (second,), frame, 10.2)
+
+    current = motion._auto_fire_target("event-live", 7)
+    assert isinstance(current, AutoFireTargetSnapshot)
+    assert (current.pixel_x, current.pixel_y) == (45, 35)
+    assert current.velocity == pytest.approx((50.0, 20.0))
+
+
+def test_expired_target_cannot_be_revived_by_later_similar_blob(tmp_path: Path) -> None:
+    motion = _auto_motion(tmp_path)
+    key = ("event-live", 7)
+    motion._live_auto_targets[key] = _auto_target()
+    motion._handle_missing_auto_target("event-live", 7, (), 10.1)
+    motion._handle_missing_auto_target("event-live", 7, (), 11.01)
+    candidate = _motion_group(centroid=(36.0, 31.0), bounding_box=(21, 20, 30, 20))
+
+    motion._update_live_auto_target(
+        "event-live",
+        candidate,
+        (candidate,),
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        11.1,
+    )
+
+    state = motion._auto_fire_target("event-live", 7)
+    assert isinstance(state, AutoFireTargetAssociation)
+    assert state.state == "reacquisition_timeout"
 
 
 def test_classifier_rejects_new_work_while_night_mode_is_paused(tmp_path: Path) -> None:
