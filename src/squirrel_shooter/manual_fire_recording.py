@@ -1,4 +1,4 @@
-"""Background evidence recording for accepted supervised manual fire events."""
+"""Background evidence recording for accepted manual and automatic fire events."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import json
 import logging
 import math
 import os
+import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +22,7 @@ from .thread_names import set_current_thread_name
 
 LOGGER = logging.getLogger(__name__)
 MAX_QUEUED_RECORDINGS = 2
+_QUEUE_STOP = object()
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,20 @@ class ManualFireRecordingSink(Protocol):
         ...
 
 
+@dataclass
+class _RecordingReservation:
+    event: ManualFireEvent
+    requested_start_monotonic: float
+    recording_start_monotonic: float
+    deadline_monotonic: float
+    available_pre_roll_seconds: float
+    post_roll_target_seconds: float
+    max_packets: int
+    packets_by_sequence: dict[int, Any]
+    last_sequence: int
+    collection_error: str | None = None
+
+
 def new_manual_fire_event_id(now: datetime | None = None) -> str:
     current = now or datetime.now().astimezone()
     return current.strftime("manual-fire-%Y%m%d-%H%M%S-%f")
@@ -220,7 +235,7 @@ def crop_and_zoom(frame: np.ndarray, bounds: CropBounds) -> np.ndarray:
 
 
 class ManualFireRecorder:
-    """Collect shared-camera frames and encode one manual event off the fire path."""
+    """Reserve shared-camera evidence immediately and encode it off the fire path."""
 
     def __init__(
         self,
@@ -238,56 +253,100 @@ class ManualFireRecorder:
         self._video_writer_factory = video_writer_factory
         self._image_writer = image_writer
         self._clock = clock
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="manual-fire-recorder")
         self._closed = False
         self._lock = threading.Lock()
-        self._queued = 0
-        self._active = False
+        self._condition = threading.Condition(self._lock)
+        self._collector_queue: queue.Queue[object] = queue.Queue(maxsize=MAX_QUEUED_RECORDINGS)
+        self._encoder_queue: queue.Queue[object] = queue.Queue(maxsize=MAX_QUEUED_RECORDINGS)
+        self._outstanding = 0
+        self._submissions_in_progress = 0
+        self._collecting = 0
+        self._encoding = False
         self._completed = 0
+        self._truncated = 0
         self._failed = 0
         self._rejected = 0
         self._last_frames_written = 0
         self._last_output_fps = 0.0
         self._last_processing_seconds = 0.0
+        self._last_recording_status: str | None = None
+        self._last_pre_roll_gap_seconds = 0.0
+        self._last_post_roll_gap_seconds = 0.0
         self._last_error: str | None = None
+        self._collector_threads = tuple(
+            threading.Thread(
+                target=self._collector_worker,
+                name=f"manual-collector-{index + 1}",
+                daemon=True,
+            )
+            for index in range(MAX_QUEUED_RECORDINGS)
+        )
+        self._encoder_thread = threading.Thread(
+            target=self._encoder_worker,
+            name="manual-recorder",
+            daemon=True,
+        )
+        for thread in self._collector_threads:
+            thread.start()
+        self._encoder_thread.start()
 
     def record(self, event: ManualFireEvent) -> None:
-        """Queue one accepted event without doing video work in the caller."""
+        """Reserve one accepted event immediately without encoding in the caller."""
 
         if not self.config.enabled:
             return
-        with self._lock:
+        with self._condition:
             if self._closed:
                 self._record_submission_failure_locked("Manual fire recorder is closed")
                 raise RuntimeError(self._last_error)
-            if self._queued >= MAX_QUEUED_RECORDINGS:
+            if self._outstanding >= MAX_QUEUED_RECORDINGS:
                 self._record_submission_failure_locked("Manual fire recording queue is full")
                 raise RuntimeError(self._last_error)
-            self._queued += 1
-            try:
-                self._executor.submit(self._record_safely, event)
-            except Exception as exc:
-                self._queued -= 1
+            self._outstanding += 1
+            self._submissions_in_progress += 1
+        try:
+            reservation = self._reserve_recording(event)
+            self._collector_queue.put_nowait(reservation)
+        except Exception as exc:
+            with self._condition:
+                self._outstanding = max(0, self._outstanding - 1)
                 self._record_submission_failure_locked(
-                    f"Manual fire recording submission failed: {type(exc).__name__}: {exc}"
+                    "Manual fire evidence reservation failed: "
+                    f"{type(exc).__name__}: {exc}"
                 )
-                raise
+            raise RuntimeError(self._last_error) from exc
+        finally:
+            with self._condition:
+                self._submissions_in_progress = max(0, self._submissions_in_progress - 1)
+                self._condition.notify_all()
 
     def status(self) -> dict[str, object]:
         """Return lightweight event-recorder activity and output metrics."""
 
         with self._lock:
+            active = self._collecting > 0 or self._encoding
             return {
                 "enabled": self.config.enabled,
-                "active": self._active,
-                "queued": self._queued,
+                "active": active,
+                "queued": self._outstanding,
+                "outstanding": self._outstanding,
+                "collecting": self._collecting,
+                "encoding": self._encoding,
+                "collector_queue_depth": self._collector_queue.qsize(),
+                "collector_queue_capacity": MAX_QUEUED_RECORDINGS,
+                "encoder_queue_depth": self._encoder_queue.qsize(),
+                "encoder_queue_capacity": MAX_QUEUED_RECORDINGS,
                 "completed": self._completed,
+                "truncated": self._truncated,
                 "failed": self._failed,
                 "rejected": self._rejected,
                 "target_fps": self.config.target_fps,
                 "last_frames_written": self._last_frames_written,
                 "last_output_fps": round(self._last_output_fps, 3),
                 "last_processing_seconds": round(self._last_processing_seconds, 3),
+                "last_recording_status": self._last_recording_status,
+                "last_pre_roll_gap_seconds": round(self._last_pre_roll_gap_seconds, 3),
+                "last_post_roll_gap_seconds": round(self._last_post_roll_gap_seconds, 3),
                 "last_error": self._last_error,
             }
 
@@ -297,18 +356,185 @@ class ManualFireRecorder:
         self._last_error = detail
 
     def close(self) -> None:
-        with self._lock:
+        with self._condition:
             if self._closed:
                 return
             self._closed = True
-        self._executor.shutdown(wait=True, cancel_futures=False)
+            self._condition.wait_for(lambda: self._submissions_in_progress == 0)
+        self._collector_queue.join()
+        for _ in self._collector_threads:
+            self._collector_queue.put(_QUEUE_STOP)
+        for thread in self._collector_threads:
+            thread.join()
+        self._encoder_queue.join()
+        self._encoder_queue.put(_QUEUE_STOP)
+        self._encoder_thread.join()
 
-    def _record_safely(self, event: ManualFireEvent) -> None:
+    def _reserve_recording(self, event: ManualFireEvent) -> _RecordingReservation:
+        requested_window_seconds = self.config.pre_roll_seconds + self.config.post_roll_seconds
+        requested_start = event.fire_started_monotonic - self.config.pre_roll_seconds
+        pre_roll_candidates = self._valid_packets(
+            self.camera.buffered_frames(
+                requested_start,
+                until_monotonic=event.fire_started_monotonic,
+                copy=False,
+            )
+        )
+        available_pre_roll_seconds = min(
+            self.config.pre_roll_seconds,
+            max(0.0, event.fire_started_monotonic - pre_roll_candidates[0].received_monotonic)
+            if pre_roll_candidates
+            else 0.0,
+        )
+        recording_start = event.fire_started_monotonic - available_pre_roll_seconds
+        post_roll_target_seconds = max(
+            self.config.post_roll_seconds,
+            requested_window_seconds - available_pre_roll_seconds,
+        )
+        deadline = event.fire_started_monotonic + post_roll_target_seconds
+        capture_until = min(deadline, max(event.fire_started_monotonic, self._clock()))
+        initial_candidates = self._valid_packets(
+            self.camera.buffered_frames(
+                recording_start,
+                until_monotonic=capture_until,
+                copy=False,
+            )
+        )
+        candidates = self._valid_packets((*pre_roll_candidates, *initial_candidates))
+        maximum_packets = max(
+            2,
+            math.ceil(max(0.001, deadline - recording_start) * self.config.target_fps) + 2,
+        )
+        selected = self._select_packets(
+            candidates,
+            start_monotonic=recording_start,
+            end_monotonic=deadline,
+            maximum_packets=maximum_packets,
+        )
+        last_sequence = max((packet.sequence for packet in candidates), default=-1)
+        return _RecordingReservation(
+            event=event,
+            requested_start_monotonic=requested_start,
+            recording_start_monotonic=recording_start,
+            deadline_monotonic=deadline,
+            available_pre_roll_seconds=available_pre_roll_seconds,
+            post_roll_target_seconds=post_roll_target_seconds,
+            max_packets=maximum_packets,
+            packets_by_sequence={packet.sequence: packet for packet in selected},
+            last_sequence=last_sequence,
+        )
+
+    def _collector_worker(self) -> None:
+        set_current_thread_name("manual-collector")
+        while True:
+            item = self._collector_queue.get()
+            try:
+                if item is _QUEUE_STOP:
+                    return
+                reservation = item
+                if not isinstance(reservation, _RecordingReservation):
+                    continue
+                with self._lock:
+                    self._collecting += 1
+                try:
+                    self._collect_post_roll(reservation)
+                except Exception as exc:
+                    reservation.collection_error = f"{type(exc).__name__}: {exc}"
+                    LOGGER.exception(
+                        "Manual fire post-roll collection failed: event_id=%s",
+                        reservation.event.event_id,
+                    )
+                finally:
+                    with self._lock:
+                        self._collecting = max(0, self._collecting - 1)
+                try:
+                    self._encoder_queue.put_nowait(reservation)
+                except queue.Full:
+                    self._persist_failed_reservation(
+                        reservation,
+                        "Manual fire encoder queue is full",
+                    )
+                    with self._lock:
+                        self._outstanding = max(0, self._outstanding - 1)
+            finally:
+                self._collector_queue.task_done()
+
+    def _collect_post_roll(self, reservation: _RecordingReservation) -> None:
+        while self._clock() < reservation.deadline_monotonic:
+            remaining = reservation.deadline_monotonic - self._clock()
+            try:
+                packet = self.camera.wait_for_frame(
+                    reservation.last_sequence,
+                    timeout=min(1.0, max(0.01, remaining)),
+                    copy=False,
+                )
+            except Exception as exc:
+                reservation.collection_error = f"{type(exc).__name__}: {exc}"
+                break
+            if packet is None:
+                continue
+            valid = self._valid_packets((packet,))
+            if not valid:
+                continue
+            reservation.last_sequence = max(reservation.last_sequence, valid[0].sequence)
+            combined = (*reservation.packets_by_sequence.values(), valid[0])
+            reservation.packets_by_sequence = {
+                item.sequence: item
+                for item in self._select_packets(
+                    combined,
+                    start_monotonic=reservation.recording_start_monotonic,
+                    end_monotonic=reservation.deadline_monotonic,
+                    maximum_packets=reservation.max_packets,
+                )
+            }
+
+        try:
+            fallback = self._valid_packets(
+                self.camera.buffered_frames(
+                    reservation.recording_start_monotonic,
+                    until_monotonic=reservation.deadline_monotonic,
+                    copy=False,
+                )
+            )
+        except Exception as exc:
+            if reservation.collection_error is None:
+                reservation.collection_error = f"{type(exc).__name__}: {exc}"
+            fallback = []
+        combined = (*reservation.packets_by_sequence.values(), *fallback)
+        reservation.packets_by_sequence = {
+            item.sequence: item
+            for item in self._select_packets(
+                combined,
+                start_monotonic=reservation.recording_start_monotonic,
+                end_monotonic=reservation.deadline_monotonic,
+                maximum_packets=reservation.max_packets,
+            )
+        }
+
+    def _encoder_worker(self) -> None:
         set_current_thread_name("manual-recorder")
+        while True:
+            item = self._encoder_queue.get()
+            try:
+                if item is _QUEUE_STOP:
+                    return
+                reservation = item
+                if not isinstance(reservation, _RecordingReservation):
+                    continue
+                with self._lock:
+                    self._encoding = True
+                try:
+                    self._record_safely(reservation)
+                finally:
+                    with self._lock:
+                        self._encoding = False
+                        self._outstanding = max(0, self._outstanding - 1)
+            finally:
+                self._encoder_queue.task_done()
+
+    def _record_safely(self, reservation: _RecordingReservation) -> None:
         processing_started = time.perf_counter()
-        with self._lock:
-            self._queued = max(0, self._queued - 1)
-            self._active = True
+        event = reservation.event
         directory = self._event_directory(event)
         LOGGER.info(
             "%s event recording started: event_id=%s",
@@ -323,15 +549,29 @@ class ManualFireRecorder:
         )
         try:
             directory.mkdir(parents=True, exist_ok=False)
-            frames_written, output_fps = self._record_event(event, directory)
+            frames_written, output_fps, recording_status, coverage = self._record_event(
+                reservation,
+                directory,
+            )
             with self._lock:
                 self._completed += 1
+                if recording_status == "truncated":
+                    self._truncated += 1
                 self._last_frames_written = frames_written
                 self._last_output_fps = output_fps
-                self._last_error = None
+                self._last_recording_status = recording_status
+                self._last_pre_roll_gap_seconds = float(coverage["pre_roll_gap_seconds"])
+                self._last_post_roll_gap_seconds = float(coverage["post_roll_gap_seconds"])
+                self._last_error = (
+                    None
+                    if recording_status == "success"
+                    else "Recording window was truncated: "
+                    + ", ".join(str(item) for item in coverage["truncation_reasons"])
+                )
         except Exception as exc:
             with self._lock:
                 self._failed += 1
+                self._last_recording_status = "error"
                 self._last_error = f"{type(exc).__name__}: {exc}"
             LOGGER.error(
                 "%s recording failed: event_id=%s error=%s",
@@ -352,79 +592,56 @@ class ManualFireRecorder:
                 self._write_metadata(
                     directory / "event.json",
                     self._base_metadata(event)
-                    | {"status": "recording_failed", "recording_status": "error", "recording_error": str(exc)},
+                    | self._coverage_metadata(
+                        reservation,
+                        tuple(reservation.packets_by_sequence.values()),
+                    )
+                    | {
+                        "status": "recording_failed",
+                        "recording_status": "error",
+                        "recording_error": str(exc),
+                    },
                 )
             except Exception:
                 LOGGER.exception("Could not persist failed manual fire recording metadata: %s", event.event_id)
         finally:
             with self._lock:
-                self._active = False
                 self._last_processing_seconds = time.perf_counter() - processing_started
 
-    def _record_event(self, event: ManualFireEvent, directory: Path) -> tuple[int, float]:
-        requested_window_seconds = self.config.pre_roll_seconds + self.config.post_roll_seconds
-        requested_start = event.fire_started_monotonic - self.config.pre_roll_seconds
-        initial_pre_roll = self.camera.buffered_frame_metadata(
-            requested_start,
-            until_monotonic=event.fire_started_monotonic,
-        )
-        available_pre_roll_seconds = min(
-            self.config.pre_roll_seconds,
-            max(
-                0.0,
-                event.fire_started_monotonic - initial_pre_roll[0].received_monotonic,
-            )
-            if initial_pre_roll
-            else 0.0,
-        )
-        recording_start = event.fire_started_monotonic - available_pre_roll_seconds
-        actual_post_roll_seconds = max(
-            self.config.post_roll_seconds,
-            requested_window_seconds - available_pre_roll_seconds,
-        )
-        deadline = event.fire_started_monotonic + actual_post_roll_seconds
-        sequence = initial_pre_roll[-1].sequence if initial_pre_roll else -1
-        packets_by_sequence = {
-            packet.sequence: packet
-            for packet in self.camera.buffered_frames(
-                recording_start,
-                until_monotonic=event.fire_started_monotonic,
-                copy=False,
-            )
-        }
-        next_sample_at = event.fire_started_monotonic
-        sample_interval = 1.0 / self.config.target_fps
-        while self._clock() < deadline:
-            remaining = deadline - self._clock()
-            packet = self.camera.wait_for_frame(
-                sequence,
-                timeout=min(1.0, max(0.01, remaining)),
-                copy=False,
-            )
-            if packet is not None:
-                sequence = max(sequence, packet.sequence)
-                if packet.received_monotonic <= deadline and packet.received_monotonic >= next_sample_at:
-                    packets_by_sequence[packet.sequence] = packet
-                    while next_sample_at <= packet.received_monotonic:
-                        next_sample_at += sample_interval
-
-        # The fallback preserves frames supplied by simpler/test sources and
-        # fills any short capture gap that is still inside the rolling buffer.
-        for packet in self.camera.buffered_frames(
-            recording_start,
-            until_monotonic=deadline,
-            copy=False,
-        ):
-            packets_by_sequence.setdefault(packet.sequence, packet)
+    def _record_event(
+        self,
+        reservation: _RecordingReservation,
+        directory: Path,
+    ) -> tuple[int, float, str, dict[str, Any]]:
+        event = reservation.event
         packets = sorted(
-            packets_by_sequence.values(),
+            reservation.packets_by_sequence.values(),
             key=lambda item: (item.received_monotonic, item.sequence),
         )
         if not packets:
             raise OSError("No shared-camera frames were available for the accepted fire")
-        first_packet = packets[0]
-        sample = first_packet.frame
-        frame_height, frame_width = sample.shape[:2]
+        usable_sample = next(
+            (
+                packet.frame
+                for packet in packets
+                if isinstance(packet.frame, np.ndarray) and packet.frame.ndim >= 2
+            ),
+            None,
+        )
+        if usable_sample is None:
+            raise OSError("No consistent shared-camera frames were available for the accepted fire")
+        frame_height, frame_width = usable_sample.shape[:2]
+        consistent_packets = [
+            packet
+            for packet in packets
+            if isinstance(packet.frame, np.ndarray)
+            and packet.frame.ndim >= 2
+            and packet.frame.shape[:2] == (frame_height, frame_width)
+        ]
+        if not consistent_packets:
+            raise OSError("No consistent shared-camera frames were available for the accepted fire")
+        inconsistent_frames = len(packets) - len(consistent_packets)
+        packets = consistent_packets
         requested_x = event.crop_center_x
         requested_y = event.crop_center_y
         if requested_x is None or requested_y is None:
@@ -446,7 +663,10 @@ class ManualFireRecorder:
         zoom_path = directory / f"{filename_prefix}_zoom.avi"
         full_incomplete = directory / f"{filename_prefix}_full.incomplete.avi"
         zoom_incomplete = directory / f"{filename_prefix}_zoom.incomplete.avi"
-        recording_window_seconds = max(0.001, deadline - recording_start)
+        recording_window_seconds = max(
+            0.001,
+            reservation.deadline_monotonic - reservation.recording_start_monotonic,
+        )
         output_fps = self._output_fps(len(packets), recording_window_seconds)
         fourcc = cv2.VideoWriter_fourcc(*self.config.clip_codec)
         full_writer = None
@@ -498,17 +718,18 @@ class ManualFireRecorder:
         if not self._image_writer(str(snapshot_path), crop_and_zoom(snapshot_frame, bounds)):
             raise OSError(f"Could not write {snapshot_path}")
         role_prefix = event.event_type
+        coverage = self._coverage_metadata(
+            reservation,
+            packets,
+            extra_reasons=("inconsistent_frame_geometry",) if inconsistent_frames else (),
+        )
+        recording_status = "success" if not coverage["truncation_reasons"] else "truncated"
         metadata = self._base_metadata(event) | {
-            "status": "complete",
-            "recording_status": "success",
+            "status": "complete" if recording_status == "success" else "recording_truncated",
+            "recording_status": recording_status,
             "end_timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
             "duration": round(recording_window_seconds, 3),
             "captured_frame_span_seconds": round(max(0.0, last_frame_at - first_frame_at), 3),
-            "pre_roll_requested_seconds": self.config.pre_roll_seconds,
-            "post_roll_requested_seconds": self.config.post_roll_seconds,
-            "pre_roll_available": available_pre_roll_seconds > 0,
-            "actual_pre_roll_seconds": round(available_pre_roll_seconds, 3),
-            "actual_post_roll_seconds": round(actual_post_roll_seconds, 3),
             "timing_basis": "monotonic_elapsed_time",
             "frames_written": frames_written,
             "output_fps": round(output_fps, 3),
@@ -530,12 +751,146 @@ class ManualFireRecorder:
             "full_frame_filename": full_path.name if self.config.save_full_frame_clip else None,
             "full_frame_clip_path": str(full_path) if self.config.save_full_frame_clip else None,
             "full_frame_file_role": f"{role_prefix}_full_frame_evidence" if self.config.save_full_frame_clip else None,
-        }
+        } | coverage
         self._write_metadata(directory / "event.json", metadata)
         LOGGER.info("%s zoom recording saved: %s", event.event_type.replace("_", " ").title(), zoom_path)
         if self.config.save_full_frame_clip:
             LOGGER.info("%s recording saved: %s", event.event_type.replace("_", " ").title(), full_path)
-        return frames_written, output_fps
+        return frames_written, output_fps, recording_status, coverage
+
+    def _persist_failed_reservation(self, reservation: _RecordingReservation, detail: str) -> None:
+        directory = self._event_directory(reservation.event)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            self._write_metadata(
+                directory / "event.json",
+                self._base_metadata(reservation.event)
+                | self._coverage_metadata(reservation, tuple(reservation.packets_by_sequence.values()))
+                | {
+                    "status": "recording_failed",
+                    "recording_status": "error",
+                    "recording_error": detail,
+                },
+            )
+        except Exception:
+            LOGGER.exception("Could not persist failed manual fire recording metadata: %s", reservation.event.event_id)
+        with self._lock:
+            self._failed += 1
+            self._last_recording_status = "error"
+            self._last_error = detail
+
+    def _coverage_metadata(
+        self,
+        reservation: _RecordingReservation,
+        packets: Iterable[Any],
+        *,
+        extra_reasons: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        event = reservation.event
+        ordered = sorted(
+            self._valid_packets(packets),
+            key=lambda item: (item.received_monotonic, item.sequence),
+        )
+        pre_roll_packets = [
+            packet for packet in ordered if packet.received_monotonic <= event.fire_started_monotonic
+        ]
+        post_roll_packets = [
+            packet for packet in ordered if packet.received_monotonic >= event.fire_started_monotonic
+        ]
+        actual_pre_roll_seconds = min(
+            self.config.pre_roll_seconds,
+            max(0.0, event.fire_started_monotonic - pre_roll_packets[0].received_monotonic)
+            if pre_roll_packets
+            else 0.0,
+        )
+        actual_post_roll_seconds = min(
+            reservation.post_roll_target_seconds,
+            max(0.0, post_roll_packets[-1].received_monotonic - event.fire_started_monotonic)
+            if post_roll_packets
+            else 0.0,
+        )
+        pre_roll_gap_seconds = max(0.0, self.config.pre_roll_seconds - actual_pre_roll_seconds)
+        post_roll_gap_seconds = max(
+            0.0,
+            reservation.post_roll_target_seconds - actual_post_roll_seconds,
+        )
+        tolerance = max(0.05, 1.5 / self.config.target_fps)
+        captured_span = (
+            max(0.0, ordered[-1].received_monotonic - ordered[0].received_monotonic)
+            if ordered
+            else 0.0
+        )
+        reasons = list(extra_reasons)
+        if pre_roll_gap_seconds > tolerance:
+            reasons.append("missing_pre_roll")
+        if post_roll_gap_seconds > tolerance:
+            reasons.append("missing_post_roll")
+        if len(ordered) < 2 or captured_span <= 0.0:
+            reasons.append("insufficient_frame_span")
+        if reservation.collection_error is not None:
+            reasons.append("collection_error")
+        reasons = list(dict.fromkeys(reasons))
+        return {
+            "evidence_window_reserved_at_submission": True,
+            "pre_roll_requested_seconds": self.config.pre_roll_seconds,
+            "post_roll_requested_seconds": self.config.post_roll_seconds,
+            "post_roll_target_seconds": round(reservation.post_roll_target_seconds, 3),
+            "pre_roll_available": actual_pre_roll_seconds > 0.0,
+            "actual_pre_roll_seconds": round(actual_pre_roll_seconds, 3),
+            "actual_post_roll_seconds": round(actual_post_roll_seconds, 3),
+            "pre_roll_gap_seconds": round(pre_roll_gap_seconds, 3),
+            "post_roll_gap_seconds": round(post_roll_gap_seconds, 3),
+            "reserved_frame_count": len(ordered),
+            "truncation_reasons": reasons,
+            "collection_error": reservation.collection_error,
+        }
+
+    def _valid_packets(self, packets: Iterable[Any]) -> list[Any]:
+        valid: dict[int, Any] = {}
+        for packet in packets:
+            try:
+                sequence = packet.sequence
+                received = float(packet.received_monotonic)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if (
+                isinstance(sequence, bool)
+                or not isinstance(sequence, int)
+                or not math.isfinite(received)
+                or received < 0.0
+            ):
+                continue
+            valid[sequence] = packet
+        return sorted(valid.values(), key=lambda item: (item.received_monotonic, item.sequence))
+
+    def _select_packets(
+        self,
+        packets: Iterable[Any],
+        *,
+        start_monotonic: float,
+        end_monotonic: float,
+        maximum_packets: int,
+    ) -> list[Any]:
+        candidates = [
+            packet
+            for packet in self._valid_packets(packets)
+            if start_monotonic <= packet.received_monotonic <= end_monotonic
+        ]
+        if not candidates:
+            return []
+        interval = 1.0 / self.config.target_fps
+        selected: list[Any] = []
+        next_sample_at = start_monotonic
+        for packet in candidates:
+            if len(selected) >= maximum_packets:
+                break
+            if not selected or packet.received_monotonic + 1e-9 >= next_sample_at:
+                selected.append(packet)
+                next_sample_at = packet.received_monotonic + interval
+        latest = candidates[-1]
+        if latest.sequence not in {packet.sequence for packet in selected} and len(selected) < maximum_packets:
+            selected.append(latest)
+        return sorted(selected, key=lambda item: (item.received_monotonic, item.sequence))
 
     @staticmethod
     def _output_fps(frame_count: int, recording_window_seconds: float) -> float:

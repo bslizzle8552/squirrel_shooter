@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -111,8 +112,8 @@ def manual_event() -> ManualFireEvent:
     return ManualFireEvent(
         event_id="manual-fire-test",
         timestamp="2026-08-09T19:32:00.000-04:00",
-        fire_started_monotonic=1.0,
-        fire_completed_monotonic=1.25,
+        fire_started_monotonic=2.0,
+        fire_completed_monotonic=2.25,
         pan=70.0,
         tilt=88.0,
         fire_pulse_seconds=0.25,
@@ -238,26 +239,184 @@ def test_recorder_writes_auto_fire_files_and_protects_record_identity(tmp_path: 
     assert len(written) == 2
 
 
-def test_recorder_rejects_unbounded_queue_growth(tmp_path: Path) -> None:
-    recorder = ManualFireRecorder(
-        FakeCamera([]),
-        tmp_path,
-        ManualFireRecordingConfig(),
-    )
-    with recorder._lock:
-        recorder._queued = 2
+def test_recorder_rejects_a_third_recording_while_two_real_slots_are_outstanding(
+    tmp_path: Path,
+) -> None:
+    frames = [
+        FramePacket(index, np.full((36, 64, 3), index, dtype=np.uint8), "stamp", float(index))
+        for index in range(3)
+    ]
+    encoder_blocked = threading.Event()
+    release_encoder = threading.Event()
+    written: dict[str, list[np.ndarray]] = {}
 
-    with pytest.raises(RuntimeError, match="queue is full"):
-        recorder.record(manual_event())
+    class BlockingWriter(FakeWriter):
+        def write(self, frame: np.ndarray) -> None:
+            if "queue-slot-one" in self.path and not encoder_blocked.is_set():
+                encoder_blocked.set()
+                assert release_encoder.wait(5.0)
+            super().write(frame)
+
+    def writer_factory(path: str, _fourcc: int, _fps: float, _size: tuple[int, int]) -> FakeWriter:
+        return BlockingWriter(path, written)
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    recorder = ManualFireRecorder(
+        FakeCamera(frames),
+        tmp_path,
+        ManualFireRecordingConfig(
+            pre_roll_seconds=2.0,
+            post_roll_seconds=0.01,
+            crop_center_x=32,
+            crop_center_y=18,
+        ),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: 10.0,
+    )
+    try:
+        recorder.record(replace(manual_event(), event_id="queue-slot-one"))
+        assert encoder_blocked.wait(2.0)
+        recorder.record(replace(manual_event(), event_id="queue-slot-two"))
+
+        with pytest.raises(RuntimeError, match="queue is full"):
+            recorder.record(replace(manual_event(), event_id="queue-slot-three"))
+
+        status = recorder.status()
+        assert status["outstanding"] == 2
+        assert status["collector_queue_capacity"] == 2
+        assert status["encoder_queue_capacity"] == 2
+        assert status["failed"] == 1
+        assert status["rejected"] == 1
+        assert status["last_error"] == "Manual fire recording queue is full"
+    finally:
+        release_encoder.set()
+        recorder.close()
 
     status = recorder.status()
-    assert status["failed"] == 1
-    assert status["rejected"] == 1
-    assert status["last_error"] == "Manual fire recording queue is full"
+    assert status["outstanding"] == 0
+    assert status["completed"] == 2
 
-    with recorder._lock:
-        recorder._queued = 0
-    recorder.close()
+
+def test_encoder_backlog_over_ten_point_four_seconds_cannot_evict_reserved_window(
+    tmp_path: Path,
+) -> None:
+    first_window = [
+        FramePacket(0, np.full((36, 64, 3), 8, dtype=np.uint8), "stamp", 8.0),
+        FramePacket(1, np.full((36, 64, 3), 10, dtype=np.uint8), "stamp", 10.0),
+        FramePacket(2, np.full((36, 64, 3), 15, dtype=np.uint8), "stamp", 15.0),
+    ]
+    second_pre_roll = [
+        FramePacket(10, np.full((36, 64, 3), 18, dtype=np.uint8), "stamp", 18.0),
+        FramePacket(11, np.full((36, 64, 3), 20, dtype=np.uint8), "stamp", 20.0),
+    ]
+    second_post_roll = [
+        FramePacket(12, np.full((36, 64, 3), 21, dtype=np.uint8), "stamp", 21.0),
+        FramePacket(13, np.full((36, 64, 3), 23, dtype=np.uint8), "stamp", 23.0),
+        FramePacket(14, np.full((36, 64, 3), 25, dtype=np.uint8), "stamp", 25.0),
+    ]
+
+    class BacklogCamera(FakeCamera):
+        def __init__(self) -> None:
+            super().__init__([*first_window, *second_pre_roll])
+            self.now = 15.0
+            self.post_roll_collected = threading.Event()
+
+        def wait_for_frame(
+            self,
+            after_sequence: int,
+            timeout: float | None = None,
+            *,
+            copy: bool = True,
+        ) -> FramePacket | None:
+            del copy
+            packet = next((item for item in second_post_roll if item.sequence > after_sequence), None)
+            if packet is None:
+                self.now += timeout or 0.0
+                return None
+            self.frames.append(packet)
+            self.now = packet.received_monotonic
+            if packet is second_post_roll[-1]:
+                self.post_roll_collected.set()
+            return packet
+
+    camera = BacklogCamera()
+    encoder_blocked = threading.Event()
+    release_encoder = threading.Event()
+    written: dict[str, list[np.ndarray]] = {}
+
+    class BlockingWriter(FakeWriter):
+        def write(self, frame: np.ndarray) -> None:
+            if "backlog-first" in self.path and not encoder_blocked.is_set():
+                encoder_blocked.set()
+                assert release_encoder.wait(5.0)
+            super().write(frame)
+
+    def writer_factory(path: str, _fourcc: int, _fps: float, _size: tuple[int, int]) -> FakeWriter:
+        return BlockingWriter(path, written)
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    config = ManualFireRecordingConfig(
+        pre_roll_seconds=2.0,
+        post_roll_seconds=5.0,
+        target_fps=1.0,
+        crop_center_x=32,
+        crop_center_y=18,
+    )
+    first_event = replace(
+        manual_event(),
+        event_id="backlog-first",
+        fire_started_monotonic=10.0,
+        fire_completed_monotonic=10.25,
+    )
+    second_event = replace(
+        manual_event(),
+        event_id="backlog-second",
+        fire_started_monotonic=20.0,
+        fire_completed_monotonic=20.25,
+    )
+    recorder = ManualFireRecorder(
+        camera,
+        tmp_path,
+        config,
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: camera.now,
+    )
+    try:
+        recorder.record(first_event)
+        assert encoder_blocked.wait(2.0)
+
+        camera.now = 20.0
+        recorder.record(second_event)
+        assert camera.post_roll_collected.wait(2.0)
+
+        camera.frames.clear()
+        camera.now = second_event.fire_started_monotonic + 10.5
+        assert camera.now - second_event.fire_started_monotonic > 10.4
+    finally:
+        release_encoder.set()
+        recorder.close()
+
+    directory = tmp_path / "events" / "2026-08-09" / second_event.event_id
+    metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
+    second_clip_frames = [
+        frames_written
+        for path, frames_written in written.items()
+        if second_event.event_id in path
+    ]
+    assert metadata["status"] == "complete"
+    assert metadata["recording_status"] == "success"
+    assert metadata["evidence_window_reserved_at_submission"] is True
+    assert metadata["actual_pre_roll_seconds"] == 2.0
+    assert metadata["actual_post_roll_seconds"] == 5.0
+    assert all(len(frames_written) == 5 for frames_written in second_clip_frames)
 
 
 def test_recorder_collects_post_roll_after_the_short_pre_roll_buffer(tmp_path: Path) -> None:
@@ -322,15 +481,16 @@ def test_recorder_collects_post_roll_after_the_short_pre_roll_buffer(tmp_path: P
 
 
 @pytest.mark.parametrize(
-    "timestamps",
+    ("timestamps", "expected_post_roll"),
     [
-        [8.0, 9.5, 11.0, 14.9],
-        [8.0 + index * 0.5 for index in range(15)],
+        ([8.0, 9.5, 11.0, 14.9], 4.9),
+        ([8.0 + index * 0.5 for index in range(15)], 5.0),
     ],
 )
 def test_recording_playback_duration_uses_elapsed_time_at_variable_frame_rates(
     tmp_path: Path,
     timestamps: list[float],
+    expected_post_roll: float,
 ) -> None:
     frames = [
         FramePacket(index, np.full((36, 64, 3), index, dtype=np.uint8), "stamp", timestamp)
@@ -367,7 +527,7 @@ def test_recording_playback_duration_uses_elapsed_time_at_variable_frame_rates(
     metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
     assert metadata["duration"] == 7.0
     assert metadata["actual_pre_roll_seconds"] == 2.0
-    assert metadata["actual_post_roll_seconds"] == 5.0
+    assert metadata["actual_post_roll_seconds"] == expected_post_roll
     assert metadata["frames_written"] == len(timestamps)
     assert metadata["output_fps"] == pytest.approx(len(timestamps) / 7.0, abs=0.001)
     assert writer_fps == pytest.approx([len(timestamps) / 7.0, len(timestamps) / 7.0])
@@ -412,8 +572,109 @@ def test_missing_pre_roll_extends_post_roll_to_seven_elapsed_seconds(tmp_path: P
     assert metadata["duration"] == 7.0
     assert metadata["pre_roll_available"] is False
     assert metadata["actual_pre_roll_seconds"] == 0.0
-    assert metadata["actual_post_roll_seconds"] == 7.0
+    assert metadata["actual_post_roll_seconds"] == 6.9
+    assert metadata["pre_roll_gap_seconds"] == 2.0
+    assert metadata["post_roll_gap_seconds"] == 0.1
+    assert metadata["status"] == "recording_truncated"
+    assert metadata["recording_status"] == "truncated"
+    assert metadata["truncation_reasons"] == ["missing_pre_roll"]
     assert writer_fps == pytest.approx([len(timestamps) / 7.0, len(timestamps) / 7.0])
+
+
+def test_partial_window_is_encoded_but_truthfully_marked_truncated(tmp_path: Path) -> None:
+    frames = [
+        FramePacket(0, np.zeros((36, 64, 3), dtype=np.uint8), "stamp", 0.0),
+        FramePacket(1, np.ones((36, 64, 3), dtype=np.uint8), "stamp", 2.0),
+        FramePacket(2, np.full((36, 64, 3), 2, dtype=np.uint8), "stamp", 3.0),
+    ]
+    written: dict[str, list[np.ndarray]] = {}
+
+    def writer_factory(path: str, _fourcc: int, _fps: float, _size: tuple[int, int]) -> FakeWriter:
+        return FakeWriter(path, written)
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    event = replace(manual_event(), event_id="partial-window")
+    recorder = ManualFireRecorder(
+        FakeCamera(frames),
+        tmp_path,
+        ManualFireRecordingConfig(
+            pre_roll_seconds=2.0,
+            post_roll_seconds=5.0,
+            target_fps=1.0,
+            crop_center_x=32,
+            crop_center_y=18,
+        ),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: 20.0,
+    )
+    recorder.record(event)
+    recorder.close()
+
+    directory = tmp_path / "events" / "2026-08-09" / event.event_id
+    metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
+    assert metadata["status"] == "recording_truncated"
+    assert metadata["recording_status"] == "truncated"
+    assert metadata["pre_roll_gap_seconds"] == 0.0
+    assert metadata["post_roll_gap_seconds"] == 4.0
+    assert metadata["truncation_reasons"] == ["missing_post_roll"]
+    assert metadata["frames_written"] == 3
+    assert all(len(frames_written) == 3 for frames_written in written.values())
+    assert recorder.status()["truncated"] == 1
+    assert recorder.status()["failed"] == 0
+
+
+def test_one_usable_frame_is_truncated_instead_of_claimed_complete_or_failed(
+    tmp_path: Path,
+) -> None:
+    frame = FramePacket(1, np.ones((36, 64, 3), dtype=np.uint8), "stamp", 2.0)
+    written: dict[str, list[np.ndarray]] = {}
+
+    def writer_factory(path: str, _fourcc: int, _fps: float, _size: tuple[int, int]) -> FakeWriter:
+        return FakeWriter(path, written)
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    event = replace(manual_event(), event_id="one-frame-window")
+    recorder = ManualFireRecorder(
+        FakeCamera([frame]),
+        tmp_path,
+        ManualFireRecordingConfig(
+            pre_roll_seconds=2.0,
+            post_roll_seconds=5.0,
+            target_fps=1.0,
+            crop_center_x=32,
+            crop_center_y=18,
+        ),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: 20.0,
+    )
+    recorder.record(event)
+    recorder.close()
+
+    directory = tmp_path / "events" / "2026-08-09" / event.event_id
+    metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
+    assert metadata["status"] == "recording_truncated"
+    assert metadata["recording_status"] == "truncated"
+    assert metadata["frames_written"] == 1
+    assert metadata["pre_roll_gap_seconds"] == 2.0
+    assert metadata["post_roll_gap_seconds"] == 7.0
+    assert metadata["truncation_reasons"] == [
+        "missing_pre_roll",
+        "missing_post_roll",
+        "insufficient_frame_span",
+    ]
+    assert len(written) == 2
+    assert all(len(frames_written) == 1 for frames_written in written.values())
+    assert recorder.status()["completed"] == 1
+    assert recorder.status()["truncated"] == 1
+    assert recorder.status()["failed"] == 0
 
 
 def test_recorder_persists_error_status_without_successful_clip(tmp_path: Path) -> None:
@@ -430,4 +691,51 @@ def test_recorder_persists_error_status_without_successful_clip(tmp_path: Path) 
     metadata = json.loads((directory / "event.json").read_text(encoding="utf-8"))
     assert metadata["status"] == "recording_failed"
     assert metadata["recording_status"] == "error"
+    assert metadata["pre_roll_gap_seconds"] == 2.0
+    assert metadata["post_roll_gap_seconds"] == pytest.approx(2.01)
     assert not (directory / "manual_fire_zoom.avi").exists()
+
+
+def test_close_drains_both_queues_stops_workers_and_is_idempotent(tmp_path: Path) -> None:
+    frames = [
+        FramePacket(index, np.full((36, 64, 3), index, dtype=np.uint8), "stamp", float(index))
+        for index in range(3)
+    ]
+    written: dict[str, list[np.ndarray]] = {}
+
+    def writer_factory(path: str, _fourcc: int, _fps: float, _size: tuple[int, int]) -> FakeWriter:
+        return FakeWriter(path, written)
+
+    def image_writer(path: str, _frame: np.ndarray) -> bool:
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    recorder = ManualFireRecorder(
+        FakeCamera(frames),
+        tmp_path,
+        ManualFireRecordingConfig(
+            pre_roll_seconds=2.0,
+            post_roll_seconds=0.01,
+            crop_center_x=32,
+            crop_center_y=18,
+        ),
+        video_writer_factory=writer_factory,
+        image_writer=image_writer,
+        clock=lambda: 10.0,
+    )
+    recorder.record(replace(manual_event(), event_id="shutdown-one"))
+    recorder.record(replace(manual_event(), event_id="shutdown-two"))
+
+    recorder.close()
+    recorder.close()
+
+    status = recorder.status()
+    assert status["active"] is False
+    assert status["outstanding"] == 0
+    assert status["collector_queue_depth"] == 0
+    assert status["encoder_queue_depth"] == 0
+    assert status["completed"] == 2
+    assert not recorder._encoder_thread.is_alive()
+    assert all(not thread.is_alive() for thread in recorder._collector_threads)
+    with pytest.raises(RuntimeError, match="recorder is closed"):
+        recorder.record(replace(manual_event(), event_id="shutdown-too-late"))
