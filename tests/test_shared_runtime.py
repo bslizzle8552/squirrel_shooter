@@ -508,6 +508,7 @@ def test_motion_holds_claimed_storage_lease_until_classifier_evidence_completion
                 )
             ]
             self.released: list[str] = []
+            self.release_error: Exception | None = None
 
         def poll_results(
             self,
@@ -524,6 +525,8 @@ def test_motion_holds_claimed_storage_lease_until_classifier_evidence_completion
             return SimpleNamespace(accepted=True, reason="queued")
 
         def release_lease(self, lease_id: str) -> bool:
+            if self.release_error is not None:
+                raise self.release_error
             self.released.append(lease_id)
             return True
 
@@ -565,6 +568,28 @@ def test_motion_holds_claimed_storage_lease_until_classifier_evidence_completion
     )
 
     assert storage.released == ["lease-one"]
+    assert motion._classifier_storage_leases == {}
+
+    retry_task = SimpleNamespace(context="completed_event", event_id="retry-event")
+    motion._classifier_storage_leases["retry-event"] = "lease-retry"
+    storage.release_error = OSError("temporary release failure")
+    with pytest.raises(OSError, match="temporary release failure"):
+        motion._handle_classifier_evidence_result(  # type: ignore[arg-type]
+            retry_task,
+            "persisted",
+            {},
+            None,
+        )
+    assert motion._classifier_storage_leases == {"retry-event": "lease-retry"}
+
+    storage.release_error = None
+    motion._handle_classifier_evidence_result(  # type: ignore[arg-type]
+        retry_task,
+        "persisted",
+        {},
+        None,
+    )
+    assert storage.released[-1] == "lease-retry"
     assert motion._classifier_storage_leases == {}
 
     rejected_directory = tmp_path / "captures" / "events" / "rejected-event"

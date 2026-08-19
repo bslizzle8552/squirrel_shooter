@@ -23,6 +23,7 @@ from .auto_fire import (
 from .camera_service import CameraService, FramePacket
 from .classifier import ClassifierDetection, ClassifierEvidenceStore, ClassifierTask, EventClassifier
 from .config import AppConfig
+from .current_scene_safety import ClassifierSceneSafetyProvider
 from .diagnostics import cleanup_oldest
 from .event_report import generate_reports, load_events
 from .event_storage import (
@@ -185,18 +186,20 @@ class MotionProcessingService:
             posture_change_area_ratio=max(4.0, association_area_ratio),
         )
         self.manual_control = manual_control_service
-        coordinator = manual_control_service or _UnavailableAutoFireCoordinator()
-        self.auto_fire = auto_fire_service or AutoFireService(
-            config.auto_fire,
-            coordinator,
-            self._auto_fire_target,
-            self._auto_fire_night_mode,
-        )
         self.classifier = classifier_service or EventClassifier(
             config.classifier,
             self.classifier_store,
             result_handler=self._handle_classifier_result,
             evidence_result_handler=self._handle_classifier_evidence_result,
+        )
+        coordinator = manual_control_service or _UnavailableAutoFireCoordinator()
+        scene_safety = ClassifierSceneSafetyProvider(self.camera, self.classifier)
+        self.auto_fire = auto_fire_service or AutoFireService(
+            config.auto_fire,
+            coordinator,
+            self._auto_fire_target,
+            self._auto_fire_night_mode,
+            scene_safety_provider=scene_safety,
         )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -412,6 +415,7 @@ class MotionProcessingService:
             event_id=task.event_id,
             track_id=task.track_id,  # type: ignore[arg-type]
             classified_observation_monotonic=task.target_observed_monotonic,  # type: ignore[arg-type]
+            classified_frame_sequence=getattr(task, "frame_sequence", None),
             detections=tuple(AutoFireDetection(item.label, item.confidence) for item in detections),
             error=error,
         )
@@ -429,9 +433,12 @@ class MotionProcessingService:
             return
         manager = self._event_storage
         with self._condition:
-            lease_id = self._classifier_storage_leases.pop(task.event_id, None)
+            lease_id = self._classifier_storage_leases.get(task.event_id)
         if lease_id is not None and manager is not None:
             manager.release_lease(lease_id)
+        with self._condition:
+            if self._classifier_storage_leases.get(task.event_id) == lease_id:
+                self._classifier_storage_leases.pop(task.event_id, None)
         if status != "persisted":
             LOGGER.error(
                 "Classifier evidence did not persist for completed event %s: %s",

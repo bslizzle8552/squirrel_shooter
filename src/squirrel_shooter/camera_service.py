@@ -366,6 +366,12 @@ class CameraService:
                 return None
             return self._latest_frame.copy() if copy else self._latest_frame
 
+    def current_frame_sequence(self) -> int:
+        """Return the latest raw-frame sequence under the camera publication lock."""
+
+        with self._condition:
+            return self._sequence
+
     def latest_annotated_frame(self, *, copy: bool = True) -> np.ndarray | None:
         with self._condition:
             if self._latest_annotated_frame is None:
