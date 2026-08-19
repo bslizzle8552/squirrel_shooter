@@ -222,9 +222,24 @@ def runtime_performance_snapshot(
             recording = candidate
     return {
         "capture_fps": round(camera.fps, 2),
+        "camera_reported_fps": round(camera.reported_fps, 2),
+        "camera_last_frame_age_seconds": camera.last_frame_age_seconds,
+        "camera_source_fourcc": getattr(camera, "source_fourcc", "unknown"),
+        "camera_capture_backend": getattr(camera, "capture_backend", "unknown"),
+        "camera_source_mode_matches_request": getattr(
+            camera,
+            "source_mode_matches_request",
+            False,
+        ),
+        "camera_source_mode_mismatch_fields": list(
+            getattr(camera, "source_mode_mismatch_fields", ())
+        ),
         "capture_read_average_ms": round(camera.capture_read_average_ms, 3),
+        "capture_read_timing": camera.capture_read_timing,
+        "physical_frame_interval_timing": camera.physical_frame_interval_timing,
         "published_frame_copy_average_ms": round(camera.published_frame_copy_average_ms, 3),
         "frame_publish_average_ms": round(camera.frame_publish_average_ms, 3),
+        "frame_publish_timing": camera.frame_publish_timing,
         "capture_thread_cpu_percent": round(camera.capture_thread_cpu_percent, 2),
         "pre_roll_buffer_fps": round(camera.pre_roll_buffer_fps, 2),
         "pre_roll_frames_buffered": camera.pre_roll_frames_buffered,

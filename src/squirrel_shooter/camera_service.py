@@ -15,9 +15,16 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .camera_common import FrameRateMeter, capture_dimensions, capture_fourcc, open_camera
+from .camera_common import (
+    FrameRateMeter,
+    capture_backend_name,
+    capture_dimensions,
+    capture_fourcc,
+    open_camera,
+    source_mode_mismatches,
+)
 from .config import CameraConfig, SharedCameraConfig
-from .performance import AverageTimer, ThreadCpuMeter
+from .performance import AverageTimer, ThreadCpuMeter, TimingDistribution
 from .thread_names import set_current_thread_name
 
 
@@ -77,6 +84,13 @@ class CameraStatus:
     dashboard_encode_failures: int = 0
     dashboard_encoder_alive: bool = False
     dashboard_encode_error: str | None = None
+    capture_read_timing: dict[str, object] | None = None
+    physical_frame_interval_timing: dict[str, object] | None = None
+    frame_publish_timing: dict[str, object] | None = None
+    source_fourcc: str = "unknown"
+    capture_backend: str = "unknown"
+    source_mode_matches_request: bool = False
+    source_mode_mismatch_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -150,6 +164,10 @@ class CameraService:
         self._height = settings.requested_height
         self._fps = 0.0
         self._reported_fps = 0.0
+        self._source_fourcc = "unknown"
+        self._capture_backend = "unknown"
+        self._source_mode_verified = False
+        self._source_mode_mismatch_fields: tuple[str, ...] = ()
         self._error: str | None = "Camera has not started"
         self._latest_frame: np.ndarray | None = None
         self._latest_annotated_frame: np.ndarray | None = None
@@ -191,6 +209,9 @@ class CameraService:
         self._pre_roll_copy_timer = AverageTimer()
         self._published_frame_copy_timer = AverageTimer()
         self._capture_cpu = ThreadCpuMeter()
+        self._capture_read_timing = TimingDistribution()
+        self._physical_frame_interval_timing = TimingDistribution()
+        self._frame_publish_timing = TimingDistribution()
 
     @property
     def stopped(self) -> bool:
@@ -241,6 +262,13 @@ class CameraService:
             self._pre_roll_copy_timer = AverageTimer()
             self._published_frame_copy_timer = AverageTimer()
             self._capture_cpu = ThreadCpuMeter()
+            self._capture_read_timing = TimingDistribution()
+            self._physical_frame_interval_timing = TimingDistribution()
+            self._frame_publish_timing = TimingDistribution()
+            self._source_fourcc = "unknown"
+            self._capture_backend = "unknown"
+            self._source_mode_verified = False
+            self._source_mode_mismatch_fields = ()
             self._last_frame_at = None
             self._last_frame_monotonic = None
             self._last_annotated_at = None
@@ -323,6 +351,13 @@ class CameraService:
                 self._dashboard_encode_failures,
                 self._mjpeg_thread is not None and self._mjpeg_thread.is_alive(),
                 self._dashboard_encode_error,
+                self._capture_read_timing.snapshot(),
+                self._physical_frame_interval_timing.snapshot(),
+                self._frame_publish_timing.snapshot(),
+                self._source_fourcc,
+                self._capture_backend,
+                self._source_mode_verified and not self._source_mode_mismatch_fields,
+                self._source_mode_mismatch_fields,
             )
 
     def latest_frame(self, *, copy: bool = True) -> np.ndarray | None:
@@ -578,6 +613,14 @@ class CameraService:
                 meter = FrameRateMeter()
                 width, height, reported_fps = capture_dimensions(capture)
                 fourcc = capture_fourcc(capture)
+                backend = capture_backend_name(capture)
+                mismatch_fields = source_mode_mismatches(
+                    self.settings,
+                    width,
+                    height,
+                    reported_fps,
+                    fourcc,
+                )
                 with self._condition:
                     self._capture = capture
                     self._camera_open_count += 1
@@ -586,22 +629,62 @@ class CameraService:
                     if width > 0 and height > 0:
                         self._width, self._height = width, height
                     self._reported_fps = reported_fps
+                    self._source_fourcc = fourcc
+                    self._capture_backend = backend
+                    self._source_mode_verified = True
+                    self._source_mode_mismatch_fields = mismatch_fields
                     self._error = None
                     self._condition.notify_all()
                 first_open = False
                 LOGGER.info(
-                    "Shared camera opened: width=%d height=%d reported_fps=%.2f fourcc=%s",
+                    "Shared camera opened: backend=%s width=%d height=%d reported_fps=%.2f fourcc=%s",
+                    backend,
                     self._width,
                     self._height,
                     reported_fps,
                     fourcc,
-                    extra={"structured_data": {"event": "camera_opened", "width": self._width, "height": self._height, "reported_fps": reported_fps, "fourcc": fourcc, "open_count": self._camera_open_count}},
+                    extra={
+                        "structured_data": {
+                            "event": "camera_opened",
+                            "backend": backend,
+                            "width": self._width,
+                            "height": self._height,
+                            "reported_fps": reported_fps,
+                            "fourcc": fourcc,
+                            "source_mode_matches_request": not mismatch_fields,
+                            "source_mode_mismatch_fields": list(mismatch_fields),
+                            "open_count": self._camera_open_count,
+                        }
+                    },
                 )
+                if mismatch_fields:
+                    LOGGER.warning(
+                        "Shared camera source mode mismatch after open: %s",
+                        ",".join(mismatch_fields),
+                        extra={
+                            "structured_data": {
+                                "event": "shared_camera_source_mode_mismatch",
+                                "requested_width": self.settings.requested_width,
+                                "requested_height": self.settings.requested_height,
+                                "requested_fourcc": "MJPG",
+                                "requested_fps": self.settings.requested_fps,
+                                "actual_width": width,
+                                "actual_height": height,
+                                "actual_fourcc": fourcc,
+                                "reported_fps": reported_fps,
+                                "mismatch_fields": list(mismatch_fields),
+                            }
+                        },
+                    )
                 consecutive_failures = 0
+                previous_received_monotonic: float | None = None
+                physical_frame_mode_verified = False
                 while not self._stop_event.is_set():
                     read_started = perf_counter()
                     ok, frame = capture.read()
-                    self._capture_read_timer.add(perf_counter() - read_started)
+                    read_seconds = perf_counter() - read_started
+                    self._capture_read_timer.add(read_seconds)
+                    self._capture_read_timing.add(read_seconds)
                     self._capture_cpu.update()
                     if not ok or frame is None:
                         if self._stop_event.is_set():
@@ -618,9 +701,42 @@ class CameraService:
                         continue
                     consecutive_failures = 0
                     height, width = frame.shape[:2]
+                    if not physical_frame_mode_verified:
+                        physical_frame_mode_verified = True
+                        physical_mismatch_fields = source_mode_mismatches(
+                            self.settings,
+                            width,
+                            height,
+                            reported_fps,
+                            fourcc,
+                        )
+                        if physical_mismatch_fields != mismatch_fields:
+                            mismatch_fields = physical_mismatch_fields
+                            log_physical_mode = (
+                                LOGGER.warning if mismatch_fields else LOGGER.info
+                            )
+                            log_physical_mode(
+                                "First physical camera frame changed source-mode verification: %s",
+                                ",".join(mismatch_fields) or "matched",
+                                extra={
+                                    "structured_data": {
+                                        "event": "camera_physical_frame_mode_verified",
+                                        "width": width,
+                                        "height": height,
+                                        "reported_fps": reported_fps,
+                                        "fourcc": fourcc,
+                                        "mismatch_fields": list(mismatch_fields),
+                                    }
+                                },
+                            )
                     fps = meter.update()
                     received_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
                     received_monotonic = monotonic()
+                    if previous_received_monotonic is not None:
+                        self._physical_frame_interval_timing.add(
+                            received_monotonic - previous_received_monotonic
+                        )
+                    previous_received_monotonic = received_monotonic
                     should_buffer = (
                         self._frame_buffer_seconds > 0
                         and (
@@ -648,6 +764,7 @@ class CameraService:
                         self._online = True
                         self._width = width
                         self._height = height
+                        self._source_mode_mismatch_fields = mismatch_fields
                         self._fps = fps
                         self._error = None
                         self._latest_frame = published_frame
@@ -670,7 +787,9 @@ class CameraService:
                             while self._frame_buffer and self._frame_buffer[0].received_monotonic < cutoff:
                                 self._frame_buffer.popleft()
                         self._condition.notify_all()
-                    self._frame_publish_timer.add(perf_counter() - publish_started)
+                    publish_seconds = perf_counter() - publish_started
+                    self._frame_publish_timer.add(publish_seconds)
+                    self._frame_publish_timing.add(publish_seconds)
             except Exception as exc:
                 if not self._stop_event.is_set():
                     self._set_offline(str(exc))

@@ -6,7 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from .camera_common import CameraOpenError, capture_dimensions, open_camera
+from .camera_common import (
+    CameraOpenError,
+    capture_dimensions,
+    open_camera,
+    probe_supported_camera_modes,
+    supports_requested_camera_mode,
+)
 from .config import ConfigError, DEFAULT_CONFIG_PATH, load_config
 
 
@@ -60,6 +66,23 @@ def main() -> int:
         return 2
 
     settings = app_config.camera
+    mode_probe = probe_supported_camera_modes(settings.device_index)
+    if not mode_probe.utility_available:
+        print(f"Supported-mode probe unavailable: {mode_probe.error}")
+    elif mode_probe.error is not None:
+        print(f"Supported-mode probe failed: {mode_probe.error}")
+    elif mode_probe.modes:
+        print("Advertised discrete V4L2 modes:")
+        for mode in mode_probe.modes:
+            cadences = ", ".join(f"{fps:g}" for fps in mode.fps) or "unreported"
+            print(f"  {mode.fourcc} {mode.width}x{mode.height}: {cadences} FPS")
+        if not supports_requested_camera_mode(mode_probe.modes, settings):
+            print(
+                "WARNING: the configured MJPG resolution/cadence is not advertised by this device."
+            )
+    else:
+        print("Supported-mode probe returned no discrete V4L2 modes.")
+
     print(
         f"Trying configured device index {settings.device_index} "
         f"at {settings.requested_width}x{settings.requested_height} "
