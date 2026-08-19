@@ -23,6 +23,7 @@ from .manual_fire_recording import (
     new_manual_fire_event_id,
 )
 from .pan_tilt import PanTiltConfig, PanTiltController, PanTiltPosition, clamp_angle
+from .safety import FinalAimDecision
 from .valve import (
     DisabledValveController,
     GPIOValveController,
@@ -915,16 +916,18 @@ class ManualControlService:
         frame_width: int,
         frame_height: int,
         cooldown_seconds: float,
-        final_safety_check: Callable[[], bool],
+        final_safety_check: Callable[[], FinalAimDecision],
         reserve_actuation: Callable[[], str],
         evidence: dict[str, object],
+        post_reservation_safety_check: Callable[[], bool],
     ) -> AutomaticEngagementResult:
         """Reserve the shared coordinator and perform one bounded automatic shot.
 
         Automatic callers are never queued behind another physical action. The
-        target is interpolated twice from the same native pixel. The supplied
-        final guard runs exactly once, then a durable reservation must succeed
-        immediately before the unchanged valve checks/pulse.
+        A settled target receives one current-scene decision. One bounded
+        re-aim may settle and check again. A durable reservation and one cheap
+        no-re-aim fence must then succeed immediately before the unchanged
+        valve checks/pulse.
         """
 
         for name, value in (("pixel_x", pixel_x), ("pixel_y", pixel_y)):
@@ -955,6 +958,11 @@ class ManualControlService:
             raise AutomaticEngagementError("invalid_request", "final_safety_check must be callable")
         if not callable(reserve_actuation):
             raise AutomaticEngagementError("invalid_request", "reserve_actuation must be callable")
+        if not callable(post_reservation_safety_check):
+            raise AutomaticEngagementError(
+                "invalid_request",
+                "post_reservation_safety_check must be callable",
+            )
         if not isinstance(evidence, dict):
             raise AutomaticEngagementError("invalid_request", "evidence must be a dictionary")
         if self._pan_tilt is None:
@@ -995,7 +1003,8 @@ class ManualControlService:
                 )
             self._validate_auto_calibration_frame_locked(frame_width, frame_height)
 
-            self._target_pixel = (pixel_x, pixel_y)
+            active_pixel = (pixel_x, pixel_y)
+            self._target_pixel = active_pixel
             self._target_aim = None
             self._target_in_range = None
             self._targeting_status = "VALIDATING AUTO TARGET"
@@ -1003,8 +1012,8 @@ class ManualControlService:
             try:
                 aim = interpolate_calibration_target(
                     self._calibration.load(),
-                    pixel_x,
-                    pixel_y,
+                    active_pixel[0],
+                    active_pixel[1],
                     self.pan_tilt_config,
                 )
             except (ControlError, OSError, ValueError, TypeError) as exc:
@@ -1025,35 +1034,88 @@ class ManualControlService:
                 self._targeting_error = str(exc)
                 raise AutomaticEngagementError("movement_failed", str(exc)) from exc
 
-            self._targeting_status = "AUTO FINAL SAFETY CHECK"
-            self._validate_auto_calibration_frame_locked(frame_width, frame_height)
-            try:
-                final_aim = interpolate_calibration_target(
-                    self._calibration.load(),
-                    pixel_x,
-                    pixel_y,
-                    self.pan_tilt_config,
-                )
-            except (ControlError, OSError, ValueError, TypeError) as exc:
-                reason = "outside_safe_bounds" if "outside the calibrated area" in str(exc).lower() else "interpolation_failed"
-                raise AutomaticEngagementError(reason, str(exc)) from exc
-            if final_aim != aim:
-                raise AutomaticEngagementError(
-                    "safety_state_invalid",
-                    "Automatic target interpolation changed during movement",
-                )
-            try:
-                final_safe = final_safety_check()
-            except Exception as exc:
-                raise AutomaticEngagementError(
-                    "safety_state_invalid",
-                    f"Final automatic safety check failed: {type(exc).__name__}: {exc}",
-                ) from exc
-            if final_safe is not True:
-                raise AutomaticEngagementError(
-                    "safety_state_invalid",
-                    "Final automatic safety check rejected the engagement",
-                )
+            final_aim = aim
+            for check_number in (1, 2):
+                self._targeting_status = "AUTO FINAL SAFETY CHECK"
+                self._validate_auto_calibration_frame_locked(frame_width, frame_height)
+                try:
+                    verified_aim = interpolate_calibration_target(
+                        self._calibration.load(),
+                        active_pixel[0],
+                        active_pixel[1],
+                        self.pan_tilt_config,
+                    )
+                except (ControlError, OSError, ValueError, TypeError) as exc:
+                    reason = (
+                        "outside_safe_bounds"
+                        if "outside the calibrated area" in str(exc).lower()
+                        else "interpolation_failed"
+                    )
+                    raise AutomaticEngagementError(reason, str(exc)) from exc
+                if verified_aim != final_aim:
+                    raise AutomaticEngagementError(
+                        "safety_state_invalid",
+                        "Automatic target interpolation changed during movement",
+                    )
+                try:
+                    final_decision = final_safety_check()
+                    if not isinstance(final_decision, FinalAimDecision):
+                        raise TypeError("final_safety_check must return FinalAimDecision")
+                except Exception as exc:
+                    if isinstance(exc, AutomaticEngagementError):
+                        raise
+                    raise AutomaticEngagementError(
+                        "safety_state_invalid",
+                        f"Final automatic safety check failed: {type(exc).__name__}: {exc}",
+                    ) from exc
+                if final_decision.action == "accept":
+                    break
+                if final_decision.action == "reject":
+                    raise AutomaticEngagementError(
+                        final_decision.reason,
+                        "Final automatic safety check rejected the engagement",
+                    )
+                if check_number == 2:
+                    raise AutomaticEngagementError(
+                        "target_moved_after_reaim",
+                        "Automatic target moved again after the one permitted re-aim",
+                    )
+                assert final_decision.pixel_x is not None and final_decision.pixel_y is not None
+                reaim_pixel = (final_decision.pixel_x, final_decision.pixel_y)
+                if reaim_pixel[0] >= frame_width or reaim_pixel[1] >= frame_height:
+                    raise AutomaticEngagementError(
+                        "target_association_invalid",
+                        "Automatic re-aim pixel is outside the current native camera frame",
+                    )
+                self._validate_auto_calibration_frame_locked(frame_width, frame_height)
+                try:
+                    reaim = interpolate_calibration_target(
+                        self._calibration.load(),
+                        reaim_pixel[0],
+                        reaim_pixel[1],
+                        self.pan_tilt_config,
+                    )
+                except (ControlError, OSError, ValueError, TypeError) as exc:
+                    reason = (
+                        "outside_safe_bounds"
+                        if "outside the calibrated area" in str(exc).lower()
+                        else "interpolation_failed"
+                    )
+                    raise AutomaticEngagementError(reason, str(exc)) from exc
+                active_pixel = reaim_pixel
+                final_aim = reaim
+                self._target_pixel = active_pixel
+                self._target_aim = final_aim
+                self._targeting_status = "AUTO RE-AIMING"
+                try:
+                    self._move_locked(
+                        PanTiltPosition(final_aim.pan, final_aim.tilt),
+                        action="automatic_reaim",
+                    )
+                except Exception as exc:
+                    self._targeting_status = "AUTO MOVE ERROR"
+                    self._targeting_error = str(exc)
+                    raise AutomaticEngagementError("movement_failed", str(exc)) from exc
             if self._valve.state is not ValveState.CLOSED:
                 raise AutomaticEngagementError(
                     "safety_state_invalid",
@@ -1081,10 +1143,25 @@ class ManualControlService:
                     shot_attempted=False,
                 )
 
+            try:
+                post_reservation_safe = post_reservation_safety_check()
+            except Exception as exc:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    f"Post-reservation safety check failed: {type(exc).__name__}: {exc}",
+                    shot_attempted=False,
+                ) from exc
+            if post_reservation_safe is not True:
+                raise AutomaticEngagementError(
+                    "safety_state_invalid",
+                    "Post-reservation safety check rejected the engagement",
+                    shot_attempted=False,
+                )
+
             event_evidence = dict(evidence)
             event_evidence.update(
-                target_pixel_x=pixel_x,
-                target_pixel_y=pixel_y,
+                target_pixel_x=active_pixel[0],
+                target_pixel_y=active_pixel[1],
                 target_frame_width=frame_width,
                 target_frame_height=frame_height,
                 calculated_pan=final_aim.pan,
@@ -1101,7 +1178,7 @@ class ManualControlService:
                     cooldown_seconds=float(cooldown_seconds),
                     event_type="auto_fire",
                     evidence=event_evidence,
-                    crop_center=(pixel_x, pixel_y, "auto_fire_target_pixel"),
+                    crop_center=(active_pixel[0], active_pixel[1], "auto_fire_target_pixel"),
                 )
             except FireCooldownError as exc:
                 shot_attempted = False

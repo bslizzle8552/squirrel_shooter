@@ -86,6 +86,8 @@ class ClassifierConfig:
     evidence_directory: Path
     audit_log_filename: str
     worker_queue_capacity: int
+    decision_queue_capacity: int = 2
+    evidence_queue_capacity: int = 8
 
 
 @dataclass(frozen=True)
@@ -410,6 +412,44 @@ def _auto_fire_config(raw: dict[str, Any]) -> AutoFireConfig:
             target_max_age_seconds=_number(
                 raw.get("target_max_age_seconds", defaults.target_max_age_seconds),
                 "auto_fire.target_max_age_seconds",
+                exclusive=True,
+            ),
+            scene_safety_max_age_seconds=_number(
+                raw.get("scene_safety_max_age_seconds", defaults.scene_safety_max_age_seconds),
+                "auto_fire.scene_safety_max_age_seconds",
+                exclusive=True,
+            ),
+            scene_safety_timeout_seconds=_number(
+                raw.get("scene_safety_timeout_seconds", defaults.scene_safety_timeout_seconds),
+                "auto_fire.scene_safety_timeout_seconds",
+                exclusive=True,
+            ),
+            final_aim_direct_drift_pixels=_number(
+                raw.get("final_aim_direct_drift_pixels", defaults.final_aim_direct_drift_pixels),
+                "auto_fire.final_aim_direct_drift_pixels",
+                exclusive=True,
+            ),
+            final_aim_reaim_max_drift_pixels=_number(
+                raw.get(
+                    "final_aim_reaim_max_drift_pixels",
+                    defaults.final_aim_reaim_max_drift_pixels,
+                ),
+                "auto_fire.final_aim_reaim_max_drift_pixels",
+                exclusive=True,
+            ),
+            final_aim_minimum_iou=_number(
+                raw.get("final_aim_minimum_iou", defaults.final_aim_minimum_iou),
+                "auto_fire.final_aim_minimum_iou",
+                maximum=1.0,
+            ),
+            final_aim_max_area_ratio=_number(
+                raw.get("final_aim_max_area_ratio", defaults.final_aim_max_area_ratio),
+                "auto_fire.final_aim_max_area_ratio",
+                minimum=1.0,
+            ),
+            final_aim_max_elapsed_seconds=_number(
+                raw.get("final_aim_max_elapsed_seconds", defaults.final_aim_max_elapsed_seconds),
+                "auto_fire.final_aim_max_elapsed_seconds",
                 exclusive=True,
             ),
             track_loss_grace_seconds=_number(
@@ -956,6 +996,16 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _path(classifier.get("evidence_directory"), "classifier.evidence_directory"),
             audit_log_filename,
             _int(classifier.get("worker_queue_capacity"), "classifier.worker_queue_capacity", minimum=1),
+            _int(
+                classifier.get("decision_queue_capacity", 2),
+                "classifier.decision_queue_capacity",
+                minimum=1,
+            ),
+            _int(
+                classifier.get("evidence_queue_capacity", 8),
+                "classifier.evidence_queue_capacity",
+                minimum=1,
+            ),
         ),
         auto_fire=auto_fire_config,
         pan_tilt=pan_tilt_config,

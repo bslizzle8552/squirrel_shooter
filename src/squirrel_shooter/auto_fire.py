@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
 from .classifier_labels import VOC_LABELS
+from .safety import (
+    FinalAimDecision,
+    SceneDetection,
+    ScenePersonSafetyProvider,
+    ScenePersonSafetyResult,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -51,8 +57,9 @@ _KNOWN_COORDINATOR_REASONS = frozenset(
 class _ActuationReservationError(RuntimeError):
     """Fail-closed durable-reservation rejection exposed through the coordinator seam."""
 
-    def __init__(self, reason: str, message: str) -> None:
+    def __init__(self, reason: str, message: str, *, reservation_id: str | None = None) -> None:
         self.reason = reason
+        self.reservation_id = reservation_id
         super().__init__(message)
 
 
@@ -94,6 +101,13 @@ class AutoFireConfig:
     max_shots_per_hour: int = 6
     classification_max_age_seconds: float = 3.0
     target_max_age_seconds: float = 0.75
+    scene_safety_max_age_seconds: float = 0.75
+    scene_safety_timeout_seconds: float = 1.5
+    final_aim_direct_drift_pixels: float = 24.0
+    final_aim_reaim_max_drift_pixels: float = 100.0
+    final_aim_minimum_iou: float = 0.10
+    final_aim_max_area_ratio: float = 4.0
+    final_aim_max_elapsed_seconds: float = 0.75
     track_loss_grace_seconds: float = 0.9
     reacquisition_max_centroid_distance_pixels: float = 100.0
     reacquisition_max_area_ratio: float = 2.5
@@ -136,6 +150,20 @@ class AutoFireConfig:
             minimum=0.0,
             exclusive_minimum=True,
         )
+        for name in (
+            "scene_safety_max_age_seconds",
+            "scene_safety_timeout_seconds",
+            "final_aim_direct_drift_pixels",
+            "final_aim_reaim_max_drift_pixels",
+            "final_aim_max_elapsed_seconds",
+        ):
+            _finite_number(getattr(self, name), name, minimum=0.0, exclusive_minimum=True)
+        _finite_number(self.final_aim_minimum_iou, "final_aim_minimum_iou", minimum=0.0, maximum=1.0)
+        _finite_number(self.final_aim_max_area_ratio, "final_aim_max_area_ratio", minimum=1.0)
+        if self.final_aim_reaim_max_drift_pixels < self.final_aim_direct_drift_pixels:
+            raise ValueError("final_aim_reaim_max_drift_pixels must be at least direct drift")
+        if self.final_aim_max_area_ratio < self.reacquisition_max_area_ratio:
+            raise ValueError("final_aim_max_area_ratio must be at least reacquisition_max_area_ratio")
         _finite_number(
             self.track_loss_grace_seconds,
             "track_loss_grace_seconds",
@@ -174,6 +202,8 @@ class AutoFireTargetSnapshot:
     confirmed: bool
     event_eligible: bool
     provisional_category: str
+    frame_sequence: int | None = None
+    velocity: tuple[float, float] = (0.0, 0.0)
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_id, str) or _SAFE_EVENT_ID.fullmatch(self.event_id) is None:
@@ -203,6 +233,19 @@ class AutoFireTargetSnapshot:
             raise ValueError("confirmed and event_eligible must be booleans")
         if not isinstance(self.provisional_category, str) or not self.provisional_category:
             raise ValueError("provisional_category must be a non-empty string")
+        if self.frame_sequence is not None and (
+            isinstance(self.frame_sequence, bool)
+            or not isinstance(self.frame_sequence, int)
+            or self.frame_sequence < 0
+        ):
+            raise ValueError("frame_sequence must be null or a non-negative integer")
+        if not isinstance(self.velocity, tuple) or len(self.velocity) != 2 or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in self.velocity
+        ):
+            raise ValueError("velocity must contain two finite numbers")
 
 
 @dataclass(frozen=True)
@@ -250,8 +293,9 @@ class AutoFireCoordinator(Protocol):
         frame_width: int,
         frame_height: int,
         cooldown_seconds: float,
-        final_safety_check: Callable[[], bool],
+        final_safety_check: Callable[[], FinalAimDecision],
         reserve_actuation: Callable[[], str],
+        post_reservation_safety_check: Callable[[], bool],
         evidence: dict[str, Any],
     ) -> object:
         ...
@@ -298,6 +342,7 @@ class _HeldClassification:
     classified_observation_monotonic: float
     detections: tuple[AutoFireDetection, ...]
     error: str | None
+    classified_frame_sequence: int | None = None
 
 
 TargetProvider = Callable[
@@ -317,6 +362,7 @@ class AutoFireService:
         target_provider: TargetProvider,
         night_mode_provider: NightModeProvider,
         *,
+        scene_safety_provider: ScenePersonSafetyProvider | None = None,
         monotonic_clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -330,6 +376,7 @@ class AutoFireService:
         self.coordinator = coordinator
         self._target_provider = target_provider
         self._night_mode_provider = night_mode_provider
+        self._scene_safety_provider = scene_safety_provider
         self._monotonic_clock = monotonic_clock
         self._wall_clock = wall_clock
         self._lock = threading.RLock()
@@ -384,6 +431,7 @@ class AutoFireService:
         event_id: str,
         track_id: int,
         classified_observation_monotonic: float,
+        classified_frame_sequence: int | None = None,
         detections: Iterable[AutoFireDetection] | None,
         error: str | None = None,
     ) -> AutoFireDecision:
@@ -393,6 +441,7 @@ class AutoFireService:
             event_id=event_id,
             track_id=track_id,
             classified_observation_monotonic=classified_observation_monotonic,
+            classified_frame_sequence=classified_frame_sequence,
             detections=detections,
             error=error,
             count_candidate=True,
@@ -404,6 +453,7 @@ class AutoFireService:
         event_id: str,
         track_id: int,
         classified_observation_monotonic: float,
+        classified_frame_sequence: int | None,
         detections: Iterable[AutoFireDetection] | None,
         error: str | None,
         count_candidate: bool,
@@ -477,6 +527,7 @@ class AutoFireService:
                     float(classified_observation_monotonic),
                     tuple(parsed),
                     error,
+                    classified_frame_sequence,
                 )
                 with self._lock:
                     self._held_classifications[(event_id, track_id)] = held
@@ -499,6 +550,13 @@ class AutoFireService:
                     decision_fields,
                 )
             return self._reject(target_reason, **decision_fields)
+
+        scene_after_candidates = [
+            value
+            for value in (classified_frame_sequence, target.frame_sequence)
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        scene_after_sequence = max(scene_after_candidates) if scene_after_candidates else None
 
         cooldown = self._coordinator_cooldown()
         if cooldown is None:
@@ -536,6 +594,15 @@ class AutoFireService:
                 "width": target.bounding_box[2],
                 "height": target.bounding_box[3],
             },
+            "initial_target_observed_monotonic": target.observed_monotonic,
+            "initial_target_pixel_x": target.pixel_x,
+            "initial_target_pixel_y": target.pixel_y,
+            "initial_target_bounding_box": {
+                "x": target.bounding_box[0],
+                "y": target.bounding_box[1],
+                "width": target.bounding_box[2],
+                "height": target.bounding_box[3],
+            },
             "cooldown_seconds": self.config.cooldown_seconds,
             "acceptance_reason": "allowlisted_classification",
         }
@@ -550,27 +617,74 @@ class AutoFireService:
             extra={"structured_data": {"event": "auto_fire_candidate", **evidence}},
         )
 
-        final_check_called = False
+        final_check_count = 0
+        final_approved = False
+        post_reservation_check_called = False
         final_rejection_reason: str | None = None
         reservation_id: str | None = None
+        reference_target = target
+        last_checked_target = target
+        approved_target: AutoFireTargetSnapshot | None = None
+        last_scene_sequence = scene_after_sequence
+        last_scene_request_id: str | None = None
+        evidence["final_scene_checks"] = []
 
-        def final_safety_check() -> bool:
-            nonlocal final_check_called, final_rejection_reason
-            final_check_called = True
-            final_rejection_reason = self._final_safety_reason(
+        def final_safety_check() -> FinalAimDecision:
+            nonlocal final_check_count, final_approved, final_rejection_reason
+            nonlocal reference_target, approved_target, aimed_pixel
+            nonlocal last_checked_target
+            nonlocal last_scene_sequence, last_scene_request_id
+            if final_check_count >= 2:
+                final_rejection_reason = "target_moved_after_reaim"
+                return FinalAimDecision.reject(final_rejection_reason)
+            final_check_count += 1
+            decision, current_target, scene = self._final_aim_decision(
                 event_id,
                 track_id,
                 classified_observation_monotonic,
+                reference_target,
                 aimed_pixel,
                 (target.frame_width, target.frame_height),
+                after_scene_sequence=last_scene_sequence,
             )
-            return final_rejection_reason is None
+            if decision.action == "reaim" and final_check_count >= 2:
+                decision = FinalAimDecision.reject("target_moved_after_reaim")
+            if scene is not None:
+                last_scene_sequence = scene.source_sequence
+                last_scene_request_id = scene.request_id
+                evidence["final_scene_checks"].append(self._scene_evidence(scene))  # type: ignore[union-attr]
+            if current_target is not None:
+                last_checked_target = current_target
+                evidence.update(
+                    target_observed_monotonic=current_target.observed_monotonic,
+                    target_pixel_x=current_target.pixel_x,
+                    target_pixel_y=current_target.pixel_y,
+                    target_bounding_box={
+                        "x": current_target.bounding_box[0],
+                        "y": current_target.bounding_box[1],
+                        "width": current_target.bounding_box[2],
+                        "height": current_target.bounding_box[3],
+                    },
+                )
+            if decision.action == "accept":
+                final_approved = True
+                approved_target = current_target
+                final_rejection_reason = None
+            elif decision.action == "reaim" and current_target is not None:
+                final_approved = False
+                reference_target = current_target
+                aimed_pixel = (current_target.pixel_x, current_target.pixel_y)
+                final_rejection_reason = None
+            else:
+                final_approved = False
+                final_rejection_reason = decision.reason
+            return decision
 
         def reserve_actuation() -> str:
             nonlocal final_rejection_reason, reservation_id
             if reservation_id is not None:
                 return reservation_id
-            if not final_check_called or final_rejection_reason is not None:
+            if final_check_count == 0 or not final_approved or final_rejection_reason is not None:
                 final_rejection_reason = final_rejection_reason or "safety_state_invalid"
                 raise _ActuationReservationError(
                     final_rejection_reason,
@@ -579,9 +693,26 @@ class AutoFireService:
             try:
                 reservation_id = self._reserve_actuation_attempt(event_id, track_id)
             except _ActuationReservationError as exc:
+                if exc.reservation_id is not None:
+                    reservation_id = exc.reservation_id
                 final_rejection_reason = exc.reason
                 raise
             return reservation_id
+
+        def post_reservation_safety_check() -> bool:
+            nonlocal post_reservation_check_called, final_rejection_reason
+            post_reservation_check_called = True
+            final_rejection_reason = self._post_reservation_safety_reason(
+                event_id,
+                track_id,
+                classified_observation_monotonic,
+                aimed_pixel,
+                (target.frame_width, target.frame_height),
+                approved_target,
+                last_scene_sequence,
+                last_scene_request_id,
+            )
+            return final_rejection_reason is None
 
         try:
             result = self.coordinator.automatic_engage(
@@ -592,6 +723,7 @@ class AutoFireService:
                 cooldown_seconds=self.config.cooldown_seconds,
                 final_safety_check=final_safety_check,
                 reserve_actuation=reserve_actuation,
+                post_reservation_safety_check=post_reservation_safety_check,
                 evidence=evidence,
             )
         except Exception as exc:
@@ -635,26 +767,31 @@ class AutoFireService:
                     },
                 )
             reason = final_rejection_reason or self._coordinator_exception_reason(exc)
-            return self._reject(reason, **decision_fields, target_pixel_x=target.pixel_x, target_pixel_y=target.pixel_y)
+            return self._reject(
+                reason,
+                **decision_fields,
+                target_pixel_x=last_checked_target.pixel_x,
+                target_pixel_y=last_checked_target.pixel_y,
+            )
 
-        if not final_check_called:
+        if final_check_count == 0:
             with self._lock:
                 self._pending = None
                 self._state_error = "Coordinator returned without invoking final_safety_check"
             return self._reject(
                 "safety_state_invalid",
                 **decision_fields,
-                target_pixel_x=target.pixel_x,
-                target_pixel_y=target.pixel_y,
+                target_pixel_x=last_checked_target.pixel_x,
+                target_pixel_y=last_checked_target.pixel_y,
             )
-        if final_rejection_reason is not None:
+        if final_rejection_reason is not None and reservation_id is None:
             with self._lock:
                 self._pending = None
             return self._reject(
                 final_rejection_reason,
                 **decision_fields,
-                target_pixel_x=target.pixel_x,
-                target_pixel_y=target.pixel_y,
+                target_pixel_x=last_checked_target.pixel_x,
+                target_pixel_y=last_checked_target.pixel_y,
             )
         if reservation_id is None:
             with self._lock:
@@ -663,9 +800,11 @@ class AutoFireService:
             return self._reject(
                 "safety_state_invalid",
                 **decision_fields,
-                target_pixel_x=target.pixel_x,
-                target_pixel_y=target.pixel_y,
+                target_pixel_x=last_checked_target.pixel_x,
+                target_pixel_y=last_checked_target.pixel_y,
             )
+        if not post_reservation_check_called and final_rejection_reason is None:
+            final_rejection_reason = "safety_state_invalid"
         returned_reservation_id = getattr(result, "reservation_id", None)
         if returned_reservation_id != reservation_id:
             persistence_error: str | None = None
@@ -686,8 +825,8 @@ class AutoFireService:
             return self._reject(
                 "safety_state_invalid",
                 **decision_fields,
-                target_pixel_x=target.pixel_x,
-                target_pixel_y=target.pixel_y,
+                target_pixel_x=last_checked_target.pixel_x,
+                target_pixel_y=last_checked_target.pixel_y,
             )
         unsuccessful_reason = self._unsuccessful_result_reason(result)
         if final_rejection_reason is not None or unsuccessful_reason is not None:
@@ -712,8 +851,8 @@ class AutoFireService:
             return self._reject(
                 final_rejection_reason or unsuccessful_reason or "safety_state_invalid",
                 **decision_fields,
-                target_pixel_x=target.pixel_x,
-                target_pixel_y=target.pixel_y,
+                target_pixel_x=last_checked_target.pixel_x,
+                target_pixel_y=last_checked_target.pixel_y,
             )
 
         recording_queued = getattr(result, "recording_queued", None)
@@ -755,8 +894,8 @@ class AutoFireService:
                 True,
                 "accepted_recording_failed" if recording_failed else "accepted",
                 **decision_fields,
-                target_pixel_x=target.pixel_x,
-                target_pixel_y=target.pixel_y,
+                target_pixel_x=aimed_pixel[0],
+                target_pixel_y=aimed_pixel[1],
             )
             self._record_decision_locked(decision)
         LOGGER.info(
@@ -813,6 +952,7 @@ class AutoFireService:
                     event_id=held.event_id,
                     track_id=held.track_id,
                     classified_observation_monotonic=held.classified_observation_monotonic,
+                    classified_frame_sequence=held.classified_frame_sequence,
                     detections=held.detections,
                     error=held.error,
                     count_candidate=False,
@@ -979,45 +1119,492 @@ class AutoFireService:
             return None, "target_association_invalid"
         return target, "accepted"
 
-    def _final_safety_reason(
+    def _base_final_safety_reason(
+        self,
+        event_id: str,
+        track_id: int,
+        classified_observation_monotonic: float,
+    ) -> tuple[str | None, float | None]:
+        if not self.config.enabled:
+            return "feature_disabled", None
+        with self._lock:
+            if self._shutting_down:
+                return "service_stopping", None
+            if self._state_error is not None:
+                return "safety_state_invalid", None
+            if self._pending != (event_id, track_id):
+                return "target_association_invalid", None
+            if event_id in self._human_denied_events:
+                return "human_detected", None
+        night = self._night_mode()
+        if night is None:
+            return "safety_state_invalid", None
+        if night:
+            return "night_mode", None
+        if self._rate_wall_now() is None:
+            return "safety_state_invalid", None
+        now = self._read_clock(self._monotonic_clock)
+        if now is None:
+            return "safety_state_invalid", None
+        if not self._fresh(now, classified_observation_monotonic, self.config.classification_max_age_seconds):
+            return "stale_classification", now
+        return None, now
+
+    def _request_scene_safety(
+        self,
+        event_id: str,
+        target: AutoFireTargetSnapshot,
+        *,
+        after_sequence: int | None,
+    ) -> tuple[ScenePersonSafetyResult | None, str]:
+        provider = self._scene_safety_provider
+        if provider is None:
+            return None, "scene_safety_unavailable"
+        request_id = uuid.uuid4().hex
+        try:
+            result = provider.check_current_scene(
+                request_id=request_id,
+                event_id=event_id,
+                track_id=target.track_id,
+                after_sequence=after_sequence,
+                timeout_seconds=self.config.scene_safety_timeout_seconds,
+            )
+        except Exception:
+            LOGGER.exception("AUTO_FIRE current full-scene person check failed")
+            return None, "scene_safety_error"
+        reason = self._scene_result_reason(
+            event_id,
+            target,
+            result,
+            expected_request_id=request_id,
+            expected_track_id=target.track_id,
+            minimum_sequence=after_sequence,
+            require_newer=True,
+        )
+        return (result, "accepted") if reason is None else (None, reason)
+
+    def _scene_result_reason(
+        self,
+        event_id: str,
+        target: AutoFireTargetSnapshot,
+        result: object,
+        *,
+        expected_request_id: str,
+        expected_track_id: int,
+        minimum_sequence: int | None,
+        require_newer: bool,
+        require_scene_at_or_after_target: bool = True,
+    ) -> str | None:
+        if not isinstance(result, ScenePersonSafetyResult):
+            return "scene_safety_unavailable"
+        if not self._valid_scene_result_shape(result):
+            return "scene_safety_invalid"
+        if result.status == "person" or any(
+            detection.label in HUMAN_DENY_LABELS for detection in result.detections
+        ):
+            self._latch_human(event_id)
+            return "human_detected"
+        if (
+            result.request_id != expected_request_id
+            or result.event_id != event_id
+            or result.track_id != expected_track_id
+            or result.coordinate_space != "native_full_frame"
+        ):
+            return "scene_safety_identity_mismatch"
+        if result.status != "clear":
+            return {
+                "ambiguous": "scene_safety_ambiguous",
+                "error": "scene_safety_error",
+                "unavailable": "scene_safety_unavailable",
+            }.get(result.status, "scene_safety_unavailable")
+        now = self._read_clock(self._monotonic_clock)
+        if (
+            now is None
+            or not self._fresh(
+                now,
+                result.source_received_monotonic,
+                self.config.scene_safety_max_age_seconds,
+            )
+            or not self._fresh(
+                now,
+                result.completed_monotonic,
+                self.config.scene_safety_max_age_seconds,
+            )
+        ):
+            return "stale_scene_safety"
+        if result.source_sequence is None:
+            return "scene_safety_unavailable"
+        if minimum_sequence is not None:
+            if require_newer and result.source_sequence <= minimum_sequence:
+                return "stale_scene_safety"
+            if not require_newer and result.source_sequence < minimum_sequence:
+                return "stale_scene_safety"
+        if (result.frame_width, result.frame_height) != (target.frame_width, target.frame_height):
+            return "scene_safety_geometry_mismatch"
+        if require_scene_at_or_after_target:
+            if target.frame_sequence is not None:
+                if result.source_sequence < target.frame_sequence:
+                    return "stale_scene_safety"
+            elif (
+                result.source_received_monotonic is None
+                or result.source_received_monotonic < target.observed_monotonic
+            ):
+                return "stale_scene_safety"
+        return None
+
+    @staticmethod
+    def _valid_scene_result_shape(result: ScenePersonSafetyResult) -> bool:
+        """Defend the physical boundary even against bypassed/mutated dataclasses."""
+
+        try:
+            if not isinstance(result.detections, tuple):
+                return False
+            if (
+                result.status not in {"clear", "person", "ambiguous", "error", "unavailable"}
+                or not isinstance(result.request_id, str)
+                or not result.request_id
+                or not isinstance(result.event_id, str)
+                or not result.event_id
+                or isinstance(result.track_id, bool)
+                or not isinstance(result.track_id, int)
+                or result.track_id <= 0
+                or result.coordinate_space != "native_full_frame"
+                or (
+                    result.status in {"error", "unavailable", "ambiguous"}
+                    and (not isinstance(result.error, str) or not result.error)
+                )
+                or (result.status in {"clear", "person"} and result.error is not None)
+            ):
+                return False
+            if (
+                isinstance(result.completed_monotonic, bool)
+                or not isinstance(result.completed_monotonic, (int, float))
+                or not math.isfinite(float(result.completed_monotonic))
+                or result.completed_monotonic < 0.0
+            ):
+                return False
+            source_values = (
+                result.source_sequence,
+                result.source_received_monotonic,
+                result.frame_width,
+                result.frame_height,
+            )
+            if any(value is None for value in source_values):
+                return (
+                    all(value is None for value in source_values)
+                    and result.status in {"error", "unavailable"}
+                    and not result.detections
+                )
+            if (
+                isinstance(result.source_sequence, bool)
+                or not isinstance(result.source_sequence, int)
+                or result.source_sequence < 0
+                or isinstance(result.source_received_monotonic, bool)
+                or not isinstance(result.source_received_monotonic, (int, float))
+                or not math.isfinite(float(result.source_received_monotonic))
+                or result.source_received_monotonic < 0.0
+                or result.completed_monotonic < result.source_received_monotonic
+            ):
+                return False
+            if (
+                isinstance(result.frame_width, bool)
+                or not isinstance(result.frame_width, int)
+                or result.frame_width <= 0
+                or isinstance(result.frame_height, bool)
+                or not isinstance(result.frame_height, int)
+                or result.frame_height <= 0
+            ):
+                return False
+            for detection in result.detections:
+                if not isinstance(detection, SceneDetection):
+                    return False
+                if (
+                    not isinstance(detection.label, str)
+                    or not detection.label
+                    or detection.label != detection.label.strip().lower()
+                    or isinstance(detection.confidence, bool)
+                    or not isinstance(detection.confidence, (int, float))
+                    or not math.isfinite(float(detection.confidence))
+                    or not 0.0 <= detection.confidence <= 1.0
+                    or not isinstance(detection.bounding_box, tuple)
+                    or len(detection.bounding_box) != 4
+                    or any(
+                        isinstance(value, bool) or not isinstance(value, int)
+                        for value in detection.bounding_box
+                    )
+                ):
+                    return False
+                x, y, width, height = detection.bounding_box
+                if (
+                    x < 0
+                    or y < 0
+                    or width <= 0
+                    or height <= 0
+                    or x + width > result.frame_width
+                    or y + height > result.frame_height
+                ):
+                    return False
+            has_person = any(item.label == "person" for item in result.detections)
+            if (result.status == "person") != has_person and (
+                result.status == "person" or result.status == "clear"
+            ):
+                return False
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return True
+
+    @staticmethod
+    def _scene_evidence(result: ScenePersonSafetyResult) -> dict[str, object]:
+        return {
+            "status": result.status,
+            "request_id": result.request_id,
+            "event_id": result.event_id,
+            "track_id": result.track_id,
+            "coordinate_space": result.coordinate_space,
+            "source_sequence": result.source_sequence,
+            "source_received_monotonic": result.source_received_monotonic,
+            "frame_width": result.frame_width,
+            "frame_height": result.frame_height,
+            "completed_monotonic": result.completed_monotonic,
+            "detections": [
+                {
+                    "label": item.label,
+                    "confidence": item.confidence,
+                    "native_bounding_box": {
+                        "x": item.bounding_box[0],
+                        "y": item.bounding_box[1],
+                        "width": item.bounding_box[2],
+                        "height": item.bounding_box[3],
+                    },
+                }
+                for item in result.detections
+            ],
+            "error": result.error,
+        }
+
+    def _final_aim_decision(
+        self,
+        event_id: str,
+        track_id: int,
+        classified_observation_monotonic: float,
+        reference_target: AutoFireTargetSnapshot,
+        aimed_pixel: tuple[int, int],
+        aimed_frame_size: tuple[int, int],
+        *,
+        after_scene_sequence: int | None,
+    ) -> tuple[FinalAimDecision, AutoFireTargetSnapshot | None, ScenePersonSafetyResult | None]:
+        reason, now = self._base_final_safety_reason(
+            event_id,
+            track_id,
+            classified_observation_monotonic,
+        )
+        if reason is not None or now is None:
+            return FinalAimDecision.reject(reason or "safety_state_invalid"), None, None
+        current, reason = self._current_target(event_id, track_id, now)
+        if current is None:
+            return FinalAimDecision.reject(reason), None, None
+        if (current.frame_width, current.frame_height) != aimed_frame_size:
+            return FinalAimDecision.reject("calibration_frame_mismatch"), current, None
+        sequence_candidates = [
+            value
+            for value in (after_scene_sequence, current.frame_sequence)
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        scene_after = max(sequence_candidates) if sequence_candidates else None
+        scene, reason = self._request_scene_safety(
+            event_id,
+            current,
+            after_sequence=scene_after,
+        )
+        if scene is None:
+            return FinalAimDecision.reject(reason), current, None
+        refreshed, reason = self._wait_for_target_at_or_after_scene(
+            event_id,
+            track_id,
+            scene,
+        )
+        if refreshed is None:
+            return FinalAimDecision.reject(reason), None, scene
+        base_reason, _ = self._base_final_safety_reason(
+            event_id,
+            track_id,
+            classified_observation_monotonic,
+        )
+        if base_reason is not None:
+            return FinalAimDecision.reject(base_reason), refreshed, scene
+        scene_reason = self._scene_result_reason(
+            event_id,
+            refreshed,
+            scene,
+            expected_request_id=scene.request_id,
+            expected_track_id=refreshed.track_id,
+            minimum_sequence=scene_after,
+            require_newer=True,
+            require_scene_at_or_after_target=False,
+        )
+        if scene_reason is not None:
+            return FinalAimDecision.reject(scene_reason), refreshed, scene
+        if (refreshed.frame_width, refreshed.frame_height) != aimed_frame_size:
+            return FinalAimDecision.reject("calibration_frame_mismatch"), refreshed, scene
+        return self._target_aim_consistency(reference_target, refreshed, aimed_pixel), refreshed, scene
+
+    def _post_reservation_safety_reason(
         self,
         event_id: str,
         track_id: int,
         classified_observation_monotonic: float,
         aimed_pixel: tuple[int, int],
         aimed_frame_size: tuple[int, int],
+        approved_target: AutoFireTargetSnapshot | None,
+        last_scene_sequence: int | None,
+        last_scene_request_id: str | None,
     ) -> str | None:
-        if not self.config.enabled:
-            return "feature_disabled"
-        with self._lock:
-            if self._shutting_down:
-                return "service_stopping"
-            if self._state_error is not None:
-                return "safety_state_invalid"
-            if self._pending != (event_id, track_id):
-                return "target_association_invalid"
-            if event_id in self._human_denied_events:
-                return "human_detected"
-        night = self._night_mode()
-        if night is None:
-            return "safety_state_invalid"
-        if night:
-            return "night_mode"
-        if self._rate_wall_now() is None:
-            return "safety_state_invalid"
-        now = self._read_clock(self._monotonic_clock)
-        if now is None:
-            return "safety_state_invalid"
-        if not self._fresh(now, classified_observation_monotonic, self.config.classification_max_age_seconds):
-            return "stale_classification"
-        target, reason = self._current_target(event_id, track_id, now)
-        if target is None:
+        reason, now = self._base_final_safety_reason(
+            event_id,
+            track_id,
+            classified_observation_monotonic,
+        )
+        if reason is not None or now is None or approved_target is None:
+            return reason or "safety_state_invalid"
+        current, reason = self._current_target(event_id, track_id, now)
+        if current is None:
             return reason
-        if (target.frame_width, target.frame_height) != aimed_frame_size:
+        if (current.frame_width, current.frame_height) != aimed_frame_size:
             return "calibration_frame_mismatch"
-        if not self._inside_box(aimed_pixel[0], aimed_pixel[1], target.bounding_box):
-            return "target_moved_during_aim"
-        return None
+        provider = self._scene_safety_provider
+        if provider is None or last_scene_request_id is None:
+            return "scene_safety_unavailable"
+        try:
+            scene = provider.latest_scene_result()
+        except Exception:
+            LOGGER.exception("AUTO_FIRE latest scene-safety snapshot read failed")
+            return "scene_safety_error"
+        scene_reason = self._scene_result_reason(
+            event_id,
+            current,
+            scene,
+            expected_request_id=last_scene_request_id,
+            expected_track_id=track_id,
+            minimum_sequence=last_scene_sequence,
+            require_newer=False,
+            require_scene_at_or_after_target=False,
+        )
+        if scene_reason is not None:
+            return scene_reason
+        consistency = self._target_aim_consistency(approved_target, current, aimed_pixel)
+        return None if consistency.action == "accept" else "target_moved_after_reservation"
+
+    def _wait_for_target_at_or_after_scene(
+        self,
+        event_id: str,
+        track_id: int,
+        scene: ScenePersonSafetyResult,
+    ) -> tuple[AutoFireTargetSnapshot | None, str]:
+        """Wait briefly for one same-track observation that brackets scene inference."""
+
+        if scene.source_sequence is None or scene.source_received_monotonic is None:
+            return None, "scene_safety_unavailable"
+        deadline = time.monotonic() + self.config.scene_safety_timeout_seconds
+        while True:
+            with self._lock:
+                generation = self._target_state_generation
+                if self._shutting_down:
+                    return None, "service_stopping"
+                if event_id in self._human_denied_events:
+                    return None, "human_detected"
+            now = self._read_clock(self._monotonic_clock)
+            if now is None:
+                return None, "safety_state_invalid"
+            target, reason = self._current_target(event_id, track_id, now)
+            if target is None:
+                if reason != "target_reacquisition_pending":
+                    return None, reason
+            elif self._target_observation_brackets_scene(target, scene):
+                return target, "accepted"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return None, "target_not_current_with_scene"
+            with self._reacquisition_condition:
+                if generation != self._target_state_generation:
+                    continue
+                self._reacquisition_condition.wait(timeout=remaining)
+
+    @staticmethod
+    def _target_observation_brackets_scene(
+        target: AutoFireTargetSnapshot,
+        scene: ScenePersonSafetyResult,
+    ) -> bool:
+        if target.frame_sequence is not None and scene.source_sequence is not None:
+            return target.frame_sequence >= scene.source_sequence
+        return (
+            scene.source_received_monotonic is not None
+            and target.observed_monotonic >= scene.source_received_monotonic
+        )
+
+    def _target_aim_consistency(
+        self,
+        reference: AutoFireTargetSnapshot,
+        current: AutoFireTargetSnapshot,
+        aimed_pixel: tuple[int, int],
+    ) -> FinalAimDecision:
+        elapsed = current.observed_monotonic - reference.observed_monotonic
+        centroid_drift = math.dist(
+            (reference.pixel_x, reference.pixel_y),
+            (current.pixel_x, current.pixel_y),
+        )
+        aimed_drift = math.dist(aimed_pixel, (current.pixel_x, current.pixel_y))
+        predicted = (
+            reference.pixel_x + reference.velocity[0] * max(0.0, elapsed),
+            reference.pixel_y + reference.velocity[1] * max(0.0, elapsed),
+        )
+        prediction_error = math.dist(predicted, (current.pixel_x, current.pixel_y))
+        overlap = self._box_iou(reference.bounding_box, current.bounding_box)
+        area_ratio = self._box_area_ratio(reference.bounding_box, current.bounding_box)
+        current_and_overlapping = (
+            0.0 <= elapsed <= self.config.final_aim_max_elapsed_seconds
+            and overlap >= self.config.final_aim_minimum_iou
+        )
+        direct = (
+            current_and_overlapping
+            and centroid_drift <= self.config.final_aim_direct_drift_pixels
+            and aimed_drift <= self.config.final_aim_direct_drift_pixels
+            and prediction_error <= self.config.final_aim_direct_drift_pixels
+            and area_ratio <= self.config.reacquisition_max_area_ratio
+        )
+        if direct:
+            return FinalAimDecision.accept()
+        bounded_reaim = (
+            current_and_overlapping
+            and centroid_drift <= self.config.final_aim_reaim_max_drift_pixels
+            and aimed_drift <= self.config.final_aim_reaim_max_drift_pixels
+            and prediction_error <= self.config.final_aim_reaim_max_drift_pixels
+            and area_ratio <= self.config.final_aim_max_area_ratio
+        )
+        if bounded_reaim:
+            return FinalAimDecision.reaim(current.pixel_x, current.pixel_y)
+        return FinalAimDecision.reject("target_moved_during_aim")
+
+    @staticmethod
+    def _box_area_ratio(
+        left: tuple[int, int, int, int],
+        right: tuple[int, int, int, int],
+    ) -> float:
+        left_area = left[2] * left[3]
+        right_area = right[2] * right[3]
+        return max(left_area, right_area) / max(1, min(left_area, right_area))
+
+    @staticmethod
+    def _box_iou(
+        left: tuple[int, int, int, int],
+        right: tuple[int, int, int, int],
+    ) -> float:
+        left_x2, left_y2 = left[0] + left[2], left[1] + left[3]
+        right_x2, right_y2 = right[0] + right[2], right[1] + right[3]
+        width = max(0, min(left_x2, right_x2) - max(left[0], right[0]))
+        height = max(0, min(left_y2, right_y2) - max(left[1], right[1]))
+        intersection = width * height
+        union = left[2] * left[3] + right[2] * right[3] - intersection
+        return 0.0 if union <= 0 else intersection / union
 
     @staticmethod
     def _fresh(now: float, observed: object, maximum_age: float) -> bool:
@@ -1115,16 +1702,19 @@ class AutoFireService:
                     raise _ActuationReservationError(
                         "service_stopping",
                         "Automatic engagement stopped after durable reservation",
+                        reservation_id=reservation_id,
                     )
                 if self._state_error is not None:
                     raise _ActuationReservationError(
                         "safety_state_invalid",
                         "Automatic safety state changed during durable reservation",
+                        reservation_id=reservation_id,
                     )
                 if event_id in self._human_denied_events:
                     raise _ActuationReservationError(
                         "human_detected",
                         "Human veto arrived during durable reservation",
+                        reservation_id=reservation_id,
                     )
         LOGGER.info(
             "AUTO_FIRE actuation durably reserved event=%s track=%s reservation=%s",

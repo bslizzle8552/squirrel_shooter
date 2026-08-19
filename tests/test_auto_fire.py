@@ -17,6 +17,11 @@ from squirrel_shooter.auto_fire import (
     AutoFireTargetSnapshot,
 )
 from squirrel_shooter.classifier_labels import VOC_LABELS
+from squirrel_shooter.safety import (
+    FinalAimDecision,
+    SceneDetection,
+    ScenePersonSafetyResult,
+)
 
 
 class Clocks:
@@ -71,6 +76,71 @@ class CoordinatorError(RuntimeError):
         super().__init__(reason or "coordinator failed")
 
 
+class FakeSceneSafetyProvider:
+    def __init__(
+        self,
+        clocks: Clocks,
+        target_source: Callable[
+            [str, int],
+            AutoFireTargetSnapshot | AutoFireTargetAssociation | None,
+        ],
+    ) -> None:
+        self.clocks = clocks
+        self.target_source = target_source
+        self.calls: list[dict[str, object]] = []
+        self.responses: list[
+            Callable[[str, str, int, int | None], ScenePersonSafetyResult]
+        ] = []
+        self.latest: ScenePersonSafetyResult | None = None
+
+    def check_current_scene(
+        self,
+        *,
+        request_id: str,
+        event_id: str,
+        track_id: int,
+        after_sequence: int | None,
+        timeout_seconds: float,
+    ) -> ScenePersonSafetyResult:
+        self.calls.append(
+            {
+                "request_id": request_id,
+                "event_id": event_id,
+                "track_id": track_id,
+                "after_sequence": after_sequence,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if self.responses:
+            result = self.responses.pop(0)(request_id, event_id, track_id, after_sequence)
+        else:
+            current = self.target_source(event_id, track_id)
+            source_time = (
+                current.observed_monotonic
+                if isinstance(current, AutoFireTargetSnapshot)
+                else self.clocks.monotonic
+            )
+            source_sequence = (after_sequence if after_sequence is not None else 0) + 1
+            result = ScenePersonSafetyResult(
+                status="clear",
+                request_id=request_id,
+                event_id=event_id,
+                track_id=track_id,
+                coordinate_space="native_full_frame",
+                source_sequence=source_sequence,
+                source_received_monotonic=source_time,
+                frame_width=1280,
+                frame_height=720,
+                detections=(),
+                completed_monotonic=max(self.clocks.monotonic, source_time),
+            )
+        self.latest = result
+        return result
+
+    def latest_scene_result(self) -> ScenePersonSafetyResult | None:
+        return self.latest
+
+
 class FakeCoordinator:
     def __init__(self) -> None:
         self.cooldown = 0.0
@@ -80,6 +150,8 @@ class FakeCoordinator:
         self.raise_error: Exception | None = None
         self.skip_final = False
         self.result: CoordinatorResult | None = None
+        self.aim_decisions: list[FinalAimDecision] = []
+        self.before_second_final: Callable[[], None] | None = None
 
     def cooldown_remaining_seconds(self) -> float:
         return self.cooldown
@@ -92,8 +164,9 @@ class FakeCoordinator:
         frame_width: int,
         frame_height: int,
         cooldown_seconds: float,
-        final_safety_check: Callable[[], bool],
+        final_safety_check: Callable[[], FinalAimDecision],
         reserve_actuation: Callable[[], str],
+        post_reservation_safety_check: Callable[[], bool],
         evidence: dict[str, object],
     ) -> object:
         self.calls.append(
@@ -110,12 +183,24 @@ class FakeCoordinator:
             raise self.raise_error
         if self.skip_final:
             return CoordinatorResult()
-        final_safe = final_safety_check()
-        if not final_safe:
+        final_decision = final_safety_check()
+        self.aim_decisions.append(final_decision)
+        if final_decision.action == "reaim":
+            if self.before_second_final is not None:
+                self.before_second_final()
+            final_decision = final_safety_check()
+            self.aim_decisions.append(final_decision)
+        if final_decision.action != "accept":
             return CoordinatorResult(fired=False, shot_attempted=False)
         reservation_id = reserve_actuation()
         if self.after_reservation is not None:
             self.after_reservation(reservation_id)
+        if post_reservation_safety_check() is not True:
+            return CoordinatorResult(
+                fired=False,
+                reservation_id=reservation_id,
+                shot_attempted=False,
+            )
         if self.raise_error is not None:
             raise self.raise_error
         if self.result is not None:
@@ -135,6 +220,8 @@ def target(
     confirmed: bool = True,
     eligible: bool = True,
     category: str = "small_animal_candidate",
+    frame_sequence: int | None = None,
+    velocity: tuple[float, float] = (0.0, 0.0),
 ) -> AutoFireTargetSnapshot:
     return AutoFireTargetSnapshot(
         event_id,
@@ -148,6 +235,8 @@ def target(
         confirmed,
         eligible,
         category,
+        frame_sequence,
+        velocity,
     )
 
 
@@ -169,16 +258,19 @@ def service(
     night: list[bool] | None = None,
     clocks: Clocks | None = None,
     coordinator: FakeCoordinator | None = None,
+    scene_provider: FakeSceneSafetyProvider | None = None,
 ) -> tuple[AutoFireService, TargetSource, list[bool], Clocks, FakeCoordinator]:
     clock = clocks or Clocks()
     source = TargetSource(current_target or target())
     night_state = night or [False]
     hardware = coordinator or FakeCoordinator()
+    safety = scene_provider or FakeSceneSafetyProvider(clock, source)
     auto = AutoFireService(
         config(tmp_path, **(config_changes or {})),
         hardware,
         source,
         lambda: night_state[0],
+        scene_safety_provider=safety,
         monotonic_clock=clock.monotonic_now,
         wall_clock=clock.wall_now,
     )
@@ -193,13 +285,45 @@ def classify(
     observed: float = 99.5,
     detections: object = (AutoFireDetection("dog", 0.90),),
     error: str | None = None,
+    frame_sequence: int | None = None,
 ):
     return auto.handle_classification(
         event_id=event_id,
         track_id=track_id,
         classified_observation_monotonic=observed,
+        classified_frame_sequence=frame_sequence,
         detections=detections,  # type: ignore[arg-type]
         error=error,
+    )
+
+
+def scene_result(
+    request_id: str,
+    event_id: str,
+    track_id: int,
+    after_sequence: int | None,
+    *,
+    status: str = "clear",
+    source_time: float = 99.5,
+    detections: tuple[SceneDetection, ...] = (),
+    request_override: str | None = None,
+    event_override: str | None = None,
+    track_override: int | None = None,
+) -> ScenePersonSafetyResult:
+    has_source = status not in {"error", "unavailable"}
+    return ScenePersonSafetyResult(
+        status=status,  # type: ignore[arg-type]
+        request_id=request_override or request_id,
+        event_id=event_override or event_id,
+        track_id=track_override or track_id,
+        coordinate_space="native_full_frame",
+        source_sequence=((after_sequence or 0) + 1) if has_source else None,
+        source_received_monotonic=source_time if has_source else None,
+        frame_width=1280 if has_source else None,
+        frame_height=720 if has_source else None,
+        detections=detections,
+        completed_monotonic=max(100.0, source_time),
+        error=(f"synthetic_{status}" if status in {"error", "unavailable", "ambiguous"} else None),
     )
 
 
@@ -248,6 +372,386 @@ def test_config_defaults_are_disabled_and_validation_is_strict(tmp_path: Path) -
         config(tmp_path, reacquisition_max_area_ratio=0.99)
 
 
+def test_153131_person_outside_animal_crop_is_a_full_scene_veto(tmp_path: Path) -> None:
+    fixture = json.loads(
+        Path("tests/fixtures/field_events/20260818-153131-300-99a55b.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+    person = SceneDetection("person", 0.88, (900, 40, 220, 640))
+    provider.responses.append(
+        lambda request, event, track_id, after: scene_result(
+            request,
+            event,
+            track_id,
+            after,
+            status="person",
+            detections=(person,),
+        )
+    )
+    auto, _, _, _, hardware = service(
+        tmp_path,
+        clocks=clocks,
+        scene_provider=provider,
+        current_target=target(event_id=fixture["event_id"]),
+    )
+
+    decision = classify(
+        auto,
+        event_id=fixture["event_id"],
+        detections=(AutoFireDetection("bird", 0.82),),
+    )
+
+    assert fixture["classification"]["full_frame_contains_person"] is True
+    assert decision.reason == "human_detected"
+    assert hardware.calls and hardware.aim_decisions == [FinalAimDecision.reject("human_detected")]
+
+
+def test_person_partially_overlapping_crop_is_a_full_scene_veto(tmp_path: Path) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+    provider.responses.append(
+        lambda request, event, track_id, after: scene_result(
+            request,
+            event,
+            track_id,
+            after,
+            status="person",
+            detections=(SceneDetection("person", 0.91, (30, 20, 60, 180)),),
+        )
+    )
+    auto, _, _, _, hardware = service(tmp_path, clocks=clocks, scene_provider=provider)
+
+    decision = classify(auto)
+
+    assert decision.reason == "human_detected"
+    assert all(call.action != "accept" for call in hardware.aim_decisions)
+
+
+def test_person_entering_after_classification_during_aim_vetoes_final_scene(tmp_path: Path) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+    person_entered = [False]
+
+    def current_scene(request: str, event: str, track_id: int, after: int | None) -> ScenePersonSafetyResult:
+        assert person_entered[0] is True
+        return scene_result(
+            request,
+            event,
+            track_id,
+            after,
+            status="person",
+            detections=(SceneDetection("person", 0.94, (500, 50, 180, 600)),),
+        )
+
+    provider.responses.append(current_scene)
+    hardware = FakeCoordinator()
+    hardware.before_final = lambda: person_entered.__setitem__(0, True)
+    auto, _, _, _, _ = service(
+        tmp_path,
+        clocks=clocks,
+        coordinator=hardware,
+        scene_provider=provider,
+    )
+
+    decision = classify(auto)
+
+    assert decision.reason == "human_detected"
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "source_time"),
+    [
+        ("clear", "stale_scene_safety", 98.0),
+        ("ambiguous", "scene_safety_ambiguous", 99.5),
+        ("error", "scene_safety_error", 99.5),
+        ("unavailable", "scene_safety_unavailable", 99.5),
+    ],
+)
+def test_non_current_or_uncertain_full_scene_result_never_fires(
+    tmp_path: Path,
+    status: str,
+    reason: str,
+    source_time: float,
+) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+    provider.responses.append(
+        lambda request, event, track_id, after: scene_result(
+            request,
+            event,
+            track_id,
+            after,
+            status=status,
+            source_time=source_time,
+        )
+    )
+    auto, _, _, _, hardware = service(tmp_path, clocks=clocks, scene_provider=provider)
+
+    decision = classify(auto)
+
+    assert decision.reason == reason
+    assert hardware.calls and hardware.calls[0]["pixel"] == (50, 50)
+    assert hardware.aim_decisions[0].action == "reject"
+
+
+def test_scene_result_completed_in_the_future_cannot_authorize(tmp_path: Path) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+
+    def future_completion(
+        request: str,
+        event: str,
+        track_id: int,
+        after: int | None,
+    ) -> ScenePersonSafetyResult:
+        result = scene_result(request, event, track_id, after)
+        object.__setattr__(result, "completed_monotonic", 100.1)
+        return result
+
+    provider.responses.append(future_completion)
+    auto, _, _, _, _ = service(tmp_path, clocks=clocks, scene_provider=provider)
+
+    assert classify(auto).reason == "stale_scene_safety"
+
+
+def test_bypass_mutated_scene_detections_fail_closed_without_exception(tmp_path: Path) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+
+    def malformed(
+        request: str,
+        event: str,
+        track_id: int,
+        after: int | None,
+    ) -> ScenePersonSafetyResult:
+        result = scene_result(request, event, track_id, after)
+        object.__setattr__(result, "detections", [object()])
+        return result
+
+    provider.responses.append(malformed)
+    auto, _, _, _, _ = service(tmp_path, clocks=clocks, scene_provider=provider)
+
+    assert classify(auto).reason == "scene_safety_invalid"
+
+
+def test_bypass_mutated_clear_result_with_error_fails_closed(tmp_path: Path) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+
+    def malformed(
+        request: str,
+        event: str,
+        track_id: int,
+        after: int | None,
+    ) -> ScenePersonSafetyResult:
+        result = scene_result(request, event, track_id, after)
+        object.__setattr__(result, "error", "partial inference failure")
+        return result
+
+    provider.responses.append(malformed)
+    auto, _, _, _, _ = service(tmp_path, clocks=clocks, scene_provider=provider)
+
+    assert classify(auto).reason == "scene_safety_invalid"
+
+
+def test_person_arriving_after_reservation_vetoes_before_pulse_and_latches_event(
+    tmp_path: Path,
+) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+    hardware = FakeCoordinator()
+
+    def person_arrives(_reservation_id: str) -> None:
+        clear = provider.latest
+        assert clear is not None
+        provider.latest = ScenePersonSafetyResult(
+            status="person",
+            request_id=clear.request_id,
+            event_id=clear.event_id,
+            track_id=clear.track_id,
+            coordinate_space="native_full_frame",
+            source_sequence=clear.source_sequence,
+            source_received_monotonic=clear.source_received_monotonic,
+            frame_width=clear.frame_width,
+            frame_height=clear.frame_height,
+            detections=(SceneDetection("person", 0.97, (600, 20, 200, 650)),),
+            completed_monotonic=clear.completed_monotonic,
+        )
+
+    hardware.after_reservation = person_arrives
+    auto, _, _, _, _ = service(
+        tmp_path,
+        clocks=clocks,
+        coordinator=hardware,
+        scene_provider=provider,
+    )
+
+    first = classify(auto)
+    second = classify(auto)
+
+    assert first.reason == second.reason == "human_detected"
+    assert first.accepted is second.accepted is False
+    payload = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert payload["attempts"][0]["state"] == "cancelled"
+    assert payload["attempts"][0]["shot_attempted"] is False
+
+
+@pytest.mark.parametrize("identity", ["request", "event", "track"])
+def test_wrong_scene_request_event_or_track_identity_cannot_authorize(
+    tmp_path: Path,
+    identity: str,
+) -> None:
+    clocks = Clocks()
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(target()))
+
+    def wrong_identity(
+        request: str,
+        event: str,
+        track_id: int,
+        after: int | None,
+    ) -> ScenePersonSafetyResult:
+        return scene_result(
+            request,
+            event,
+            track_id,
+            after,
+            request_override="wrong-request" if identity == "request" else None,
+            event_override="wrong-event" if identity == "event" else None,
+            track_override=99 if identity == "track" else None,
+        )
+
+    provider.responses.append(wrong_identity)
+    auto, _, _, _, _ = service(tmp_path, clocks=clocks, scene_provider=provider)
+
+    assert classify(auto).reason == "scene_safety_identity_mismatch"
+
+
+def test_target_observation_older_than_new_scene_times_out_fail_closed(tmp_path: Path) -> None:
+    clocks = Clocks()
+    current = target(frame_sequence=10)
+    provider = FakeSceneSafetyProvider(clocks, TargetSource(current))
+    auto, _, _, _, hardware = service(
+        tmp_path,
+        clocks=clocks,
+        current_target=current,
+        scene_provider=provider,
+        config_changes={"scene_safety_timeout_seconds": 0.02},
+    )
+
+    decision = classify(auto, frame_sequence=10)
+
+    assert decision.reason == "target_not_current_with_scene"
+    assert hardware.aim_decisions[0].action == "reject"
+
+
+def test_195417_field_target_gets_one_bounded_reaim_then_accepts(tmp_path: Path) -> None:
+    fixture = json.loads(
+        Path("tests/fixtures/field_events/20260818-195417-725-0d4269.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    previous = fixture["previous"]
+    candidate = fixture["candidate"]
+    clocks = Clocks(monotonic=previous["observed_monotonic"])
+    initial = target(
+        event_id=fixture["event_id"],
+        track_id=previous["track_id"],
+        observed=previous["observed_monotonic"],
+        pixel=(round(previous["centroid"][0]), round(previous["centroid"][1])),
+        box=tuple(previous["bounding_box"]),
+    )
+    hardware = FakeCoordinator()
+    auto, source, _, _, _ = service(
+        tmp_path,
+        clocks=clocks,
+        coordinator=hardware,
+        current_target=initial,
+        config_changes={"min_confidence": 0.70},
+    )
+
+    def move_to_candidate() -> None:
+        clocks.monotonic = candidate["observed_monotonic"]
+        source.target = target(
+            event_id=fixture["event_id"],
+            track_id=candidate["track_id"],
+            observed=candidate["observed_monotonic"],
+            pixel=(round(candidate["centroid"][0]), round(candidate["centroid"][1])),
+            box=tuple(candidate["bounding_box"]),
+        )
+
+    hardware.before_final = move_to_candidate
+    decision = classify(
+        auto,
+        event_id=fixture["event_id"],
+        track_id=previous["track_id"],
+        observed=previous["observed_monotonic"],
+        detections=(AutoFireDetection("dog", fixture["classification"]["confidence"]),),
+    )
+
+    assert decision.accepted is True
+    assert [item.action for item in hardware.aim_decisions] == ["reaim", "accept"]
+    assert (decision.target_pixel_x, decision.target_pixel_y) == (
+        round(candidate["centroid"][0]),
+        round(candidate["centroid"][1]),
+    )
+    final_evidence = hardware.calls[0]["evidence"]
+    assert final_evidence["target_bounding_box"] == {
+        "x": candidate["bounding_box"][0],
+        "y": candidate["bounding_box"][1],
+        "width": candidate["bounding_box"][2],
+        "height": candidate["bounding_box"][3],
+    }
+
+
+def test_70_pixel_drift_is_not_directly_accepted_and_second_move_rejects(tmp_path: Path) -> None:
+    clocks = Clocks()
+    initial = target(pixel=(100, 100), box=(50, 50, 150, 100))
+    hardware = FakeCoordinator()
+    auto, source, _, _, _ = service(
+        tmp_path,
+        clocks=clocks,
+        coordinator=hardware,
+        current_target=initial,
+    )
+
+    def first_move() -> None:
+        clocks.monotonic = 100.1
+        source.target = target(
+            observed=100.1,
+            pixel=(170, 100),
+            box=(120, 50, 150, 100),
+        )
+
+    def second_move() -> None:
+        clocks.monotonic = 100.2
+        source.target = target(
+            observed=100.2,
+            pixel=(240, 100),
+            box=(190, 50, 150, 100),
+        )
+
+    hardware.before_final = first_move
+    hardware.before_second_final = second_move
+    decision = classify(auto)
+
+    assert [item.action for item in hardware.aim_decisions] == ["reaim", "reject"]
+    assert decision.reason == "target_moved_after_reaim"
+    assert decision.accepted is False
+    assert (decision.target_pixel_x, decision.target_pixel_y) == (240, 100)
+    assert hardware.calls[0]["evidence"]["target_pixel_x"] == 240
+    assert hardware.calls[0]["evidence"]["target_pixel_y"] == 100
+    assert hardware.calls[0]["evidence"]["target_bounding_box"] == {
+        "x": 190,
+        "y": 50,
+        "width": 150,
+        "height": 100,
+    }
+
+
 def test_brief_dropout_holds_classification_then_uses_reacquired_position(tmp_path: Path) -> None:
     clocks = Clocks()
     source = AssociationSource(AutoFireTargetAssociation("coasting", 100.9))
@@ -257,6 +761,7 @@ def test_brief_dropout_holds_classification_then_uses_reacquired_position(tmp_pa
         hardware,
         source,
         lambda: False,
+        scene_safety_provider=FakeSceneSafetyProvider(clocks, source),
         monotonic_clock=clocks.monotonic_now,
         wall_clock=clocks.wall_now,
     )
@@ -286,6 +791,7 @@ def test_classifier_result_while_coasting_does_not_fire_before_reacquisition(tmp
     hardware = FakeCoordinator()
     auto = AutoFireService(
         config(tmp_path), hardware, source, lambda: False,
+        scene_safety_provider=FakeSceneSafetyProvider(clocks, source),
         monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
     )
     worker = threading.Thread(target=lambda: classify(auto))
@@ -321,6 +827,7 @@ def test_terminal_reacquisition_state_fails_closed(
     hardware = FakeCoordinator()
     auto = AutoFireService(
         config(tmp_path), hardware, source, lambda: False,
+        scene_safety_provider=FakeSceneSafetyProvider(clocks, source),
         monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
     )
     decisions: list[object] = []
@@ -345,6 +852,7 @@ def test_reacquisition_does_not_revive_stale_classification_or_target(tmp_path: 
     hardware = FakeCoordinator()
     auto = AutoFireService(
         config(tmp_path), hardware, source, lambda: False,
+        scene_safety_provider=FakeSceneSafetyProvider(clocks, source),
         monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
     )
     decisions: list[object] = []
@@ -384,6 +892,7 @@ def test_person_veto_cancels_classification_held_during_dropout(tmp_path: Path) 
     hardware = FakeCoordinator()
     auto = AutoFireService(
         config(tmp_path), hardware, source, lambda: False,
+        scene_safety_provider=FakeSceneSafetyProvider(clocks, source),
         monotonic_clock=clocks.monotonic_now, wall_clock=clocks.wall_now,
     )
     decisions: list[object] = []
@@ -524,6 +1033,60 @@ def test_reservation_persistence_failure_prevents_coordinator_completion(
     assert status["shots_in_rolling_window"] == 1
     persisted = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
     assert persisted["attempts"] == []
+
+
+def test_post_write_shutdown_veto_finalizes_same_reservation_without_actuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auto, _, _, _, _ = service(tmp_path)
+    original_write = auto._write_rate_limit_payload
+    writes = 0
+
+    def write_then_stop(payload: dict[str, object]) -> None:
+        nonlocal writes
+        writes += 1
+        original_write(payload)
+        if writes == 1:
+            auto.begin_shutdown()
+
+    monkeypatch.setattr(auto, "_write_rate_limit_payload", write_then_stop)
+
+    decision = classify(auto)
+
+    assert decision.reason == "service_stopping"
+    assert decision.accepted is False
+    payload = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert len(payload["attempts"]) == 1
+    assert payload["attempts"][0]["state"] == "cancelled"
+    assert payload["attempts"][0]["shot_attempted"] is False
+
+
+def test_post_write_human_veto_finalizes_same_reservation_without_actuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auto, _, _, _, _ = service(tmp_path)
+    original_write = auto._write_rate_limit_payload
+    writes = 0
+
+    def write_then_veto(payload: dict[str, object]) -> None:
+        nonlocal writes
+        writes += 1
+        original_write(payload)
+        if writes == 1:
+            auto._latch_human("event-one")
+
+    monkeypatch.setattr(auto, "_write_rate_limit_payload", write_then_veto)
+
+    decision = classify(auto)
+
+    assert decision.reason == "human_detected"
+    assert decision.accepted is False
+    payload = json.loads((tmp_path / "auto-fire-state.json").read_text(encoding="utf-8"))
+    assert len(payload["attempts"]) == 1
+    assert payload["attempts"][0]["state"] == "cancelled"
+    assert payload["attempts"][0]["shot_attempted"] is False
 
 
 def test_abrupt_exit_after_reservation_recovers_as_counted_global_interlock(

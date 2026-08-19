@@ -25,6 +25,7 @@ from squirrel_shooter.manual_control import (
 )
 from squirrel_shooter.manual_fire_recording import ManualFireEvent
 from squirrel_shooter.pan_tilt import PanTiltConfig, PanTiltPosition
+from squirrel_shooter.safety import FinalAimDecision
 from squirrel_shooter.valve import ValveState
 
 
@@ -780,11 +781,11 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
     pan_tilt.moves.clear()
     guard_calls: list[str] = []
 
-    def final_guard() -> bool:
+    def final_guard() -> FinalAimDecision:
         guard_calls.append("guard")
         events.append("guard")
         assert valve.state is ValveState.CLOSED
-        return True
+        return FinalAimDecision.accept()
 
     def reserve_actuation() -> str:
         events.append("reserve")
@@ -799,6 +800,7 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
         cooldown_seconds=5.0,
         final_safety_check=final_guard,
         reserve_actuation=reserve_actuation,
+        post_reservation_safety_check=lambda: True,
         evidence={
             "source_event_id": "motion-event-7",
             "track_id": 7,
@@ -864,11 +866,11 @@ def test_automatic_final_guard_rejection_parks_without_firing(tmp_path: Path) ->
     )
     guard_calls = 0
 
-    def reject() -> bool:
+    def reject() -> FinalAimDecision:
         nonlocal guard_calls
         guard_calls += 1
         events.append("guard-rejected")
-        return False
+        return FinalAimDecision.reject("safety_state_invalid")
 
     with pytest.raises(AutomaticEngagementError) as rejected:
         service.automatic_engage(
@@ -879,6 +881,7 @@ def test_automatic_final_guard_rejection_parks_without_firing(tmp_path: Path) ->
             cooldown_seconds=5.0,
             final_safety_check=reject,
             reserve_actuation=lambda: "reservation-test",
+            post_reservation_safety_check=lambda: True,
             evidence={},
         )
 
@@ -891,6 +894,80 @@ def test_automatic_final_guard_rejection_parks_without_firing(tmp_path: Path) ->
     assert "open" not in valve.events
     assert service.cooldown_remaining_seconds() == 0
     assert recorder.events == []
+
+
+def test_automatic_engagement_performs_at_most_one_reaim_then_fires(tmp_path: Path) -> None:
+    events: list[str] = []
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    decisions = iter(
+        (
+            FinalAimDecision.reaim(200, 150),
+            FinalAimDecision.accept(),
+        )
+    )
+
+    result = service.automatic_engage(
+        150,
+        150,
+        frame_width=1280,
+        frame_height=720,
+        cooldown_seconds=5.0,
+        final_safety_check=lambda: next(decisions),
+        reserve_actuation=lambda: "reservation-reaim",
+        post_reservation_safety_check=lambda: True,
+        evidence={},
+    )
+
+    assert result.aim == InterpolatedAim(200, 150, 90.0, 90.0, (1, 2, 4, 5))
+    assert pan_tilt.moves == [
+        PanTiltPosition(120, 90),
+        PanTiltPosition(90, 90),
+        PanTiltPosition(85, 82),
+    ]
+    assert recorder.events[0].evidence["target_pixel_x"] == 200
+    assert valve.state is ValveState.CLOSED
+
+
+def test_post_reservation_fence_rejects_before_unchanged_valve_pulse(tmp_path: Path) -> None:
+    events: list[str] = []
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    reservations: list[str] = []
+
+    def reserve() -> str:
+        reservations.append("reservation-fenced")
+        return reservations[-1]
+
+    with pytest.raises(AutomaticEngagementError) as rejected:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=FinalAimDecision.accept,
+            reserve_actuation=reserve,
+            post_reservation_safety_check=lambda: False,
+            evidence={},
+        )
+
+    assert rejected.value.reason == "safety_state_invalid"
+    assert rejected.value.shot_attempted is False
+    assert reservations == ["reservation-fenced"]
+    assert "open" not in events
+    assert pan_tilt.moves[-1] == PanTiltPosition(85, 82)
+    assert valve.state is ValveState.CLOSED and recorder.events == []
 
 
 def test_automatic_reservation_failure_parks_without_touching_valve(tmp_path: Path) -> None:
@@ -916,7 +993,8 @@ def test_automatic_reservation_failure_parks_without_touching_valve(tmp_path: Pa
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=fail_reservation,
             evidence={},
         )
@@ -969,10 +1047,10 @@ def test_automatic_engagement_rejects_changed_interpolation_before_final_guard(t
     )
     guard_calls = 0
 
-    def guard() -> bool:
+    def guard() -> FinalAimDecision:
         nonlocal guard_calls
         guard_calls += 1
-        return True
+        return FinalAimDecision.accept()
 
     with pytest.raises(AutomaticEngagementError) as rejected:
         service.automatic_engage(
@@ -983,6 +1061,7 @@ def test_automatic_engagement_rejects_changed_interpolation_before_final_guard(t
             cooldown_seconds=5.0,
             final_safety_check=guard,
             reserve_actuation=lambda: "reservation-test",
+            post_reservation_safety_check=lambda: True,
             evidence={},
         )
 
@@ -1007,7 +1086,8 @@ def test_automatic_engagement_requires_recording_and_exact_safe_interpolation(tm
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
@@ -1028,7 +1108,8 @@ def test_automatic_engagement_requires_recording_and_exact_safe_interpolation(tm
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
@@ -1056,7 +1137,8 @@ def test_automatic_engagement_rejects_camera_geometry_mismatch_before_movement(
             frame_width=640,
             frame_height=480,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
@@ -1098,7 +1180,8 @@ def test_legacy_calibration_without_frame_geometry_cannot_automatically_engage(
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
@@ -1172,7 +1255,8 @@ def test_verified_calibration_pixel_outside_declared_frame_fails_closed(
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={},
         )
@@ -1208,7 +1292,8 @@ def test_automatic_engagement_is_never_queued_behind_busy_coordinator(tmp_path: 
                 frame_width=1280,
                 frame_height=720,
                 cooldown_seconds=5.0,
-                final_safety_check=lambda: True,
+                final_safety_check=FinalAimDecision.accept,
+                post_reservation_safety_check=lambda: True,
                 reserve_actuation=lambda: "reservation-test",
                 evidence={"event_id": "first"},
             )
@@ -1226,7 +1311,8 @@ def test_automatic_engagement_is_never_queued_behind_busy_coordinator(tmp_path: 
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={"event_id": "second"},
         )
@@ -1264,7 +1350,8 @@ def test_cleanup_waits_for_in_flight_automatic_engagement(tmp_path: Path) -> Non
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+                final_safety_check=FinalAimDecision.accept,
+                post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={"source_event_id": "event-one"},
         )
@@ -1323,7 +1410,8 @@ def test_automatic_valve_failure_closes_then_parks_and_sets_auto_cooldown(tmp_pa
             frame_width=1280,
             frame_height=720,
             cooldown_seconds=5.0,
-            final_safety_check=lambda: True,
+            final_safety_check=FinalAimDecision.accept,
+            post_reservation_safety_check=lambda: True,
             reserve_actuation=lambda: "reservation-test",
             evidence={"event_id": "failed-pulse"},
         )
@@ -1351,7 +1439,8 @@ def test_automatic_recording_submission_failure_cannot_skip_park(tmp_path: Path)
         frame_width=1280,
         frame_height=720,
         cooldown_seconds=5.0,
-        final_safety_check=lambda: True,
+        final_safety_check=FinalAimDecision.accept,
+        post_reservation_safety_check=lambda: True,
         reserve_actuation=lambda: "reservation-test",
         evidence={"event_id": "recording-failure"},
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -12,10 +13,10 @@ import shutil
 import threading
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any, Callable
 
 import cv2
@@ -23,6 +24,8 @@ import numpy as np
 
 from .classifier_labels import VOC_LABELS
 from .config import AppConfig, ClassifierConfig
+from .performance import TimingDistribution
+from .safety import SceneDetection, SceneFramePacket, ScenePersonSafetyResult
 from .thread_names import set_current_thread_name
 
 
@@ -50,6 +53,7 @@ TRAINING_LABEL_SUGGESTIONS = (
 SAFE_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
 SAFE_TRAINING_LABEL = re.compile(r"[a-z][a-z0-9_]{1,39}")
 CLASSIFICATION_SCHEMA_VERSION = 5
+DECISION_DISPATCH_START_WAIT_SECONDS = 0.50
 TRAINING_SAMPLE_SCHEMA_VERSION = 2
 CLASSIFICATION_FILENAME = "classification.json"
 CLASSIFIER_INPUT_FILENAME = "classifier-input.jpg"
@@ -98,6 +102,7 @@ class ClassifierTask:
     target_provisional_category: str | None = None
     target_confirmed: bool = False
     target_event_eligible: bool = False
+    enqueued_monotonic: float | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,92 @@ class ClassifierStatus:
     paused: bool = False
     skipped_while_paused: int = 0
     inference_fps: float = 0.0
+    decision_queue_depth: int = 0
+    evidence_queue_depth: int = 0
+    evidence_completion_queue_depth: int = 0
+    evidence_completion_backpressured: bool = False
+    evidence_completion_terminal_error: bool = False
+    scene_request_pending: bool = False
+    decision_dropped: int = 0
+    evidence_dropped: int = 0
+    evidence_completion_dropped: int = 0
+    decision_thread_alive: bool = False
+    evidence_thread_alive: bool = False
+    evidence_completion_thread_alive: bool = False
+    inference_active: bool = False
+    decision_active: bool = False
+    evidence_active: bool = False
+    evidence_completion_active: bool = False
+    inference_last_progress_age_seconds: float | None = None
+    decision_last_progress_age_seconds: float | None = None
+    evidence_last_progress_age_seconds: float | None = None
+    evidence_completion_last_progress_age_seconds: float | None = None
+    timing_distributions: dict[str, dict[str, object]] = field(default_factory=dict)
+    inference_completed: int = 0
+    evidence_persisted: int = 0
+
+
+@dataclass(frozen=True)
+class _ClassifierOutcome:
+    task: ClassifierTask
+    detections: tuple[ClassifierDetection, ...]
+    error: str | None
+    latency_ms: float | None
+    model_name: str
+
+
+@dataclass
+class _DecisionDeliveryState:
+    started: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+    status: str = "queued"
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def update(self, status: str, *, started: bool = False, finished: bool = False) -> None:
+        with self._lock:
+            self.status = status
+            if started:
+                self.started.set()
+            if finished:
+                self.finished.set()
+
+    def snapshot(self) -> str:
+        with self._lock:
+            return self.status
+
+
+@dataclass(frozen=True)
+class _DecisionDispatch:
+    outcome: _ClassifierOutcome
+    delivery: _DecisionDeliveryState
+    enqueued_monotonic: float
+
+
+@dataclass(frozen=True)
+class _EvidenceJob:
+    outcome: _ClassifierOutcome
+    delivery: _DecisionDeliveryState
+
+
+@dataclass(frozen=True)
+class _EvidenceCompletion:
+    task: ClassifierTask
+    status: str
+    record: dict[str, Any] | None
+    error: str | None
+    attempts: int = 0
+
+
+@dataclass
+class _SceneInferenceTask:
+    request_id: str
+    event_id: str
+    track_id: int
+    packet: SceneFramePacket
+    deadline_monotonic: float
+    enqueued_monotonic: float
+    completed: threading.Event
+    result: ScenePersonSafetyResult | None = None
 
 
 class MobileNetSSDDetector:
@@ -232,6 +323,7 @@ class ClassifierEvidenceStore:
         model_name: str,
         *,
         error: str | None = None,
+        decision_delivery_status: str | None = None,
     ) -> dict[str, Any]:
         self.prepare()
         automatic_label = next(
@@ -284,6 +376,7 @@ class ClassifierEvidenceStore:
             "selected_motion_bounding_box_area": task.selected_motion_bounding_box_area,
             "total_event_frames_considered": task.total_event_frames_considered,
             "classification_context": task.context,
+            "decision_delivery_status": decision_delivery_status,
             "track_id": task.track_id,
             "source_frame_sequence": task.frame_sequence,
             "target_pixel": (
@@ -888,7 +981,7 @@ class ClassifierEvidenceStore:
 
 
 class EventClassifier:
-    """Single-worker, bounded-queue classifier that never blocks frame processing."""
+    """One DNN owner with current-scene priority and decoupled downstream work."""
 
     def __init__(
         self,
@@ -901,46 +994,136 @@ class EventClassifier:
             None,
         ]
         | None = None,
+        evidence_result_handler: Callable[
+            [ClassifierTask, str, dict[str, Any] | None, str | None],
+            None,
+        ]
+        | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self._detector_factory = detector_factory or (lambda: MobileNetSSDDetector(config))
         self._result_handler = result_handler
-        self._tasks: queue.Queue[ClassifierTask] = queue.Queue(maxsize=config.worker_queue_capacity)
+        self._evidence_result_handler = evidence_result_handler
+        self._scheduler_condition = threading.Condition()
+        self._live_tasks: deque[ClassifierTask] = deque()
+        self._background_tasks: deque[ClassifierTask] = deque()
+        self._pending_scene: _SceneInferenceTask | None = None
+        self._scene_active = False
+        self._decision_queue: queue.Queue[_DecisionDispatch] = queue.Queue(
+            maxsize=config.decision_queue_capacity
+        )
+        self._evidence_queue: queue.Queue[_EvidenceJob] = queue.Queue(
+            maxsize=config.evidence_queue_capacity
+        )
+        self._completion_reserve = max(
+            2,
+            config.evidence_queue_capacity + config.worker_queue_capacity + 1,
+        )
+        self._evidence_completion_queue: queue.Queue[_EvidenceCompletion] = queue.Queue(
+            maxsize=2 * self._completion_reserve
+        )
+        self._evidence_completion_overflow: deque[_EvidenceCompletion] = deque(
+            maxlen=self._completion_reserve
+        )
+        self._completion_backpressure = threading.Event()
+        self._completion_terminal_error = threading.Event()
         self._stop_event = threading.Event()
+        self._downstream_stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._decision_thread: threading.Thread | None = None
+        self._evidence_thread: threading.Thread | None = None
+        self._evidence_completion_thread: threading.Thread | None = None
+        self._decision_done = threading.Event()
+        self._evidence_done = threading.Event()
         self._lock = threading.Lock()
         self._submitted = 0
         self._completed = 0
+        self._inference_completed = 0
         self._auto_accepted = 0
         self._queued_for_review = 0
         self._unknown = 0
         self._errors = 0
         self._paused = False
         self._skipped_while_paused = 0
+        self._decision_dropped = 0
+        self._evidence_dropped = 0
+        self._evidence_completion_dropped = 0
+        self._inference_active = False
+        self._decision_active = False
+        self._evidence_active = False
+        self._evidence_completion_active = False
+        self._last_inference_progress_monotonic: float | None = None
+        self._last_decision_progress_monotonic: float | None = None
+        self._last_evidence_progress_monotonic: float | None = None
+        self._last_evidence_completion_progress_monotonic: float | None = None
         self._last_latency_ms: float | None = None
         self._last_error: str | None = None
+        self._last_scene_result: ScenePersonSafetyResult | None = None
         self._completion_times: deque[float] = deque()
+        self._preprocess_timing = TimingDistribution()
+        self._enqueue_timing = TimingDistribution()
+        self._dequeue_timing = TimingDistribution()
+        self._inference_timing = TimingDistribution()
+        self._decision_queue_dwell_timing = TimingDistribution()
+        self._decision_handler_timing = TimingDistribution()
+        self._evidence_persistence_timing = TimingDistribution()
+        self._evidence_completion_handler_timing = TimingDistribution()
 
     def start(self) -> None:
         if not self.config.enabled or (self._thread is not None and self._thread.is_alive()):
             return
         self.store.prepare()
         self._stop_event.clear()
+        self._downstream_stop.clear()
+        self._decision_done.clear()
+        self._evidence_done.clear()
+        self._completion_backpressure.clear()
+        self._completion_terminal_error.clear()
+        self._decision_thread = threading.Thread(
+            target=self._decision_worker,
+            name="auto-fire-decision",
+            daemon=True,
+        )
+        self._evidence_thread = threading.Thread(
+            target=self._evidence_worker,
+            name="classifier-evidence",
+            daemon=True,
+        )
+        self._evidence_completion_thread = threading.Thread(
+            target=self._evidence_completion_worker,
+            name="classifier-evidence-completion",
+            daemon=True,
+        )
         self._thread = threading.Thread(target=self._run, name="classifier", daemon=True)
+        self._decision_thread.start()
+        self._evidence_thread.start()
+        self._evidence_completion_thread.start()
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
+        deadline = monotonic() + max(0.0, timeout)
         self._stop_event.set()
+        with self._scheduler_condition:
+            self._scheduler_condition.notify_all()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=timeout)
+            thread.join(timeout=max(0.0, deadline - monotonic()))
+        for downstream in (
+            self._decision_thread,
+            self._evidence_thread,
+            self._evidence_completion_thread,
+        ):
+            if downstream is not None and downstream is not threading.current_thread():
+                downstream.join(timeout=max(0.0, deadline - monotonic()))
 
     def set_paused(self, paused: bool) -> None:
         """Pause CPU-heavy inference without stopping the worker lifecycle."""
 
         with self._lock:
             self._paused = paused
+        with self._scheduler_condition:
+            self._scheduler_condition.notify_all()
 
     def submit(
         self,
@@ -964,9 +1147,11 @@ class EventClassifier:
     ) -> bool:
         with self._lock:
             paused = self._paused
-        if not self.config.enabled or paused:
+        if not self.config.enabled or paused or self._stop_event.is_set():
             return False
+        preprocess_started = perf_counter()
         crop, crop_box = _candidate_crop(frame, source_bounding_box, self.config.crop_margin_percent)
+        self._preprocess_timing.add(perf_counter() - preprocess_started)
         task = ClassifierTask(
             event_id=event_id,
             event_directory=event_directory,
@@ -987,13 +1172,14 @@ class EventClassifier:
             target_provisional_category=target_provisional_category,
             target_confirmed=target_confirmed,
             target_event_eligible=target_event_eligible,
+            enqueued_monotonic=monotonic(),
         )
         return self._enqueue(task)
 
     def retry(self, item_id: str) -> bool:
         with self._lock:
             paused = self._paused
-        if not self.config.enabled or paused:
+        if not self.config.enabled or paused or self._stop_event.is_set():
             return False
         record = self.store.get_record(item_id)
         if record.get("classification_status") != "unclassified":
@@ -1019,45 +1205,269 @@ class EventClassifier:
             ),
             original_image=original_image,
             context="retry",
+            enqueued_monotonic=monotonic(),
         )
         self.store.record_action("retry_requested", record)
         return self._enqueue(task)
 
-    def _enqueue(self, task: ClassifierTask) -> bool:
-        try:
-            self._tasks.put_nowait(task)
-        except queue.Full:
-            record = self.store.save_classification(
-                task, [], None, MobileNetSSDDetector.model_name, error="classifier_queue_full"
+    def classify_scene(
+        self,
+        request_id: str,
+        event_id: str,
+        track_id: int,
+        packet: SceneFramePacket,
+        *,
+        timeout_seconds: float,
+    ) -> ScenePersonSafetyResult:
+        """Run one highest-priority latest-only full-frame person check."""
+
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0.0
+        ):
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        with self._lock:
+            paused = self._paused
+        if (
+            not self.config.enabled
+            or paused
+            or self._stop_event.is_set()
+            or self._thread is None
+            or not self._thread.is_alive()
+        ):
+            return self._scene_failure(
+                request_id,
+                event_id,
+                track_id,
+                packet,
+                "unavailable",
+                "classifier_unavailable",
             )
+        task = _SceneInferenceTask(
+            request_id,
+            event_id,
+            track_id,
+            packet,
+            monotonic() + float(timeout_seconds),
+            monotonic(),
+            threading.Event(),
+        )
+        superseded: _SceneInferenceTask | None = None
+        with self._scheduler_condition:
+            superseded = self._pending_scene
+            self._pending_scene = task
+            self._scheduler_condition.notify()
+        if superseded is not None:
+            superseded.result = self._scene_failure(
+                superseded.request_id,
+                superseded.event_id,
+                superseded.track_id,
+                superseded.packet,
+                "unavailable",
+                "superseded_by_newer_scene_request",
+            )
+            superseded.completed.set()
+        if not task.completed.wait(timeout=float(timeout_seconds)) or task.result is None:
+            return self._scene_failure(
+                request_id,
+                event_id,
+                track_id,
+                packet,
+                "unavailable",
+                "scene_inference_timeout",
+            )
+        return task.result
+
+    def latest_scene_result(self) -> ScenePersonSafetyResult | None:
+        with self._lock:
+            return self._last_scene_result
+
+    def _enqueue(self, task: ClassifierTask) -> bool:
+        enqueue_started = perf_counter()
+        if self._completion_backpressure.is_set():
             with self._lock:
-                self._errors += 1
-                self._last_error = str(record["error"])
-            self._notify_result(task, [], "classifier_queue_full", record)
+                self._last_error = "classifier_completion_backpressure"
+            self._queue_rejected_task(
+                task,
+                "classifier_completion_backpressure",
+                evidence_completion_required=False,
+            )
+            self._enqueue_timing.add(perf_counter() - enqueue_started)
+            return False
+        live = task.context == "auto_fire_live_event"
+        evicted: ClassifierTask | None = None
+        accepted = False
+        with self._scheduler_condition:
+            queued = len(self._live_tasks) + len(self._background_tasks)
+            if queued < self.config.worker_queue_capacity:
+                (self._live_tasks if live else self._background_tasks).append(task)
+                accepted = True
+            elif live and self._background_tasks:
+                evicted = self._background_tasks.popleft()
+                self._live_tasks.append(task)
+                accepted = True
+            if accepted:
+                self._scheduler_condition.notify()
+        if evicted is not None:
+            self._queue_rejected_task(
+                evicted,
+                "classifier_preempted_by_live_task",
+                evidence_completion_required=True,
+            )
+        if not accepted:
+            self._queue_rejected_task(
+                task,
+                "classifier_queue_full",
+                evidence_completion_required=False,
+            )
+            self._enqueue_timing.add(perf_counter() - enqueue_started)
             return False
         with self._lock:
             self._submitted += 1
+        self._enqueue_timing.add(perf_counter() - enqueue_started)
         return True
 
+    def _queue_rejected_task(
+        self,
+        task: ClassifierTask,
+        error: str,
+        *,
+        evidence_completion_required: bool,
+    ) -> None:
+        with self._lock:
+            self._errors += 1
+            self._last_error = error
+        outcome = _ClassifierOutcome(task, (), error, None, MobileNetSSDDetector.model_name)
+        self._queue_decision(outcome)
+        if evidence_completion_required:
+            self._queue_evidence_completion(
+                _EvidenceCompletion(task, "dropped_before_inference", None, error)
+            )
+        self._log_downstream_drop(task, "scheduler", error)
+
+    def _queue_decision(self, outcome: _ClassifierOutcome) -> _DecisionDeliveryState:
+        delivery = _DecisionDeliveryState()
+        if self._result_handler is None:
+            delivery.update("not_configured", started=True, finished=True)
+            return delivery
+        try:
+            self._decision_queue.put_nowait(
+                _DecisionDispatch(outcome, delivery, monotonic())
+            )
+        except queue.Full:
+            delivery.update("dropped_queue_full", started=True, finished=True)
+            with self._lock:
+                self._decision_dropped += 1
+                self._last_error = "classifier_decision_queue_full"
+            self._log_downstream_drop(
+                outcome.task,
+                "decision",
+                "classifier_decision_queue_full",
+            )
+        return delivery
+
     def status(self) -> ClassifierStatus:
+        status_now = monotonic()
+        with self._scheduler_condition:
+            queue_depth = len(self._live_tasks) + len(self._background_tasks)
+            scene_pending = self._pending_scene is not None or self._scene_active
         with self._lock:
             self._prune_completion_times_locked(perf_counter())
             return ClassifierStatus(
-                self.config.enabled,
-                self._thread is not None and self._thread.is_alive(),
-                self._submitted,
-                self._completed,
-                self._auto_accepted,
-                self._queued_for_review,
-                self._tasks.qsize(),
-                self._last_latency_ms,
-                self._last_error,
-                self._unknown,
-                self._errors,
-                self._paused,
-                self._skipped_while_paused,
-                len(self._completion_times) / 60.0,
+                enabled=self.config.enabled,
+                thread_alive=self._thread is not None and self._thread.is_alive(),
+                submitted=self._submitted,
+                completed=self._completed,
+                auto_accepted=self._auto_accepted,
+                queued_for_review=self._queued_for_review,
+                queue_depth=queue_depth,
+                last_latency_ms=self._last_latency_ms,
+                last_error=self._last_error,
+                unknown=self._unknown,
+                errors=self._errors,
+                paused=self._paused,
+                skipped_while_paused=self._skipped_while_paused,
+                inference_fps=len(self._completion_times) / 60.0,
+                decision_queue_depth=self._decision_queue.qsize(),
+                evidence_queue_depth=self._evidence_queue.qsize(),
+                evidence_completion_queue_depth=(
+                    self._evidence_completion_queue.qsize()
+                    + len(self._evidence_completion_overflow)
+                ),
+                evidence_completion_backpressured=self._completion_backpressure.is_set(),
+                evidence_completion_terminal_error=self._completion_terminal_error.is_set(),
+                scene_request_pending=scene_pending,
+                decision_dropped=self._decision_dropped,
+                evidence_dropped=self._evidence_dropped,
+                evidence_completion_dropped=self._evidence_completion_dropped,
+                decision_thread_alive=(
+                    self._decision_thread is not None and self._decision_thread.is_alive()
+                ),
+                evidence_thread_alive=(
+                    self._evidence_thread is not None and self._evidence_thread.is_alive()
+                ),
+                evidence_completion_thread_alive=(
+                    self._evidence_completion_thread is not None
+                    and self._evidence_completion_thread.is_alive()
+                ),
+                inference_active=self._inference_active,
+                decision_active=self._decision_active,
+                evidence_active=self._evidence_active,
+                evidence_completion_active=self._evidence_completion_active,
+                inference_last_progress_age_seconds=self._progress_age(
+                    status_now,
+                    self._last_inference_progress_monotonic,
+                ),
+                decision_last_progress_age_seconds=self._progress_age(
+                    status_now,
+                    self._last_decision_progress_monotonic,
+                ),
+                evidence_last_progress_age_seconds=self._progress_age(
+                    status_now,
+                    self._last_evidence_progress_monotonic,
+                ),
+                evidence_completion_last_progress_age_seconds=self._progress_age(
+                    status_now,
+                    self._last_evidence_completion_progress_monotonic,
+                ),
+                timing_distributions={
+                    "producer_preprocess": self._preprocess_timing.snapshot(),
+                    "scheduler_enqueue_overhead": self._enqueue_timing.snapshot(),
+                    "inference_queue_dwell": self._dequeue_timing.snapshot(),
+                    "dnn_inference": self._inference_timing.snapshot(),
+                    "decision_queue_dwell": self._decision_queue_dwell_timing.snapshot(),
+                    "decision_handler_duration": self._decision_handler_timing.snapshot(),
+                    "evidence_persistence": self._evidence_persistence_timing.snapshot(),
+                    "evidence_completion_handler": (
+                        self._evidence_completion_handler_timing.snapshot()
+                    ),
+                },
+                inference_completed=self._inference_completed,
+                evidence_persisted=self._completed,
             )
+
+    @staticmethod
+    def _progress_age(now: float, then: float | None) -> float | None:
+        return None if then is None else max(0.0, now - then)
+
+    def _set_stage_activity(self, stage: str, active: bool, progressed_at: float) -> None:
+        with self._lock:
+            if stage == "inference":
+                self._inference_active = active
+                self._last_inference_progress_monotonic = progressed_at
+            elif stage == "decision":
+                self._decision_active = active
+                self._last_decision_progress_monotonic = progressed_at
+            elif stage == "evidence":
+                self._evidence_active = active
+                self._last_evidence_progress_monotonic = progressed_at
+            elif stage == "evidence_completion":
+                self._evidence_completion_active = active
+                self._last_evidence_completion_progress_monotonic = progressed_at
+            else:  # pragma: no cover - internal invariant
+                raise ValueError(f"unsupported classifier stage: {stage}")
 
     def _prune_completion_times_locked(self, now: float) -> None:
         cutoff = now - 60.0
@@ -1068,99 +1478,544 @@ class EventClassifier:
         self._completion_times.append(completed_at)
         self._prune_completion_times_locked(completed_at)
 
+    def _record_inference_completion(self, reported_latency_ms: float | None) -> None:
+        completed_at = perf_counter()
+        with self._lock:
+            self._inference_completed += 1
+            self._last_latency_ms = reported_latency_ms
+            self._append_completion_time_locked(completed_at)
+
+    def _next_work(self) -> ClassifierTask | _SceneInferenceTask | None:
+        with self._scheduler_condition:
+            self._scheduler_condition.wait_for(
+                lambda: self._pending_scene is not None
+                or bool(self._live_tasks)
+                or bool(self._background_tasks)
+                or self._stop_event.is_set(),
+                timeout=0.2,
+            )
+            if self._pending_scene is not None:
+                task = self._pending_scene
+                self._pending_scene = None
+                self._scene_active = True
+                return task
+            if self._live_tasks:
+                return self._live_tasks.popleft()
+            if self._background_tasks:
+                return self._background_tasks.popleft()
+            return None
+
+    def _scheduler_empty(self) -> bool:
+        with self._scheduler_condition:
+            return (
+                self._pending_scene is None
+                and not self._live_tasks
+                and not self._background_tasks
+                and not self._scene_active
+            )
+
     def _run(self) -> None:
         set_current_thread_name("classifier")
         detector: MobileNetSSDDetector | None = None
         detector_error: str | None = None
-        while not self._stop_event.is_set() or not self._tasks.empty():
-            try:
-                task = self._tasks.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            try:
-                while True:
+        try:
+            while not self._stop_event.is_set() or not self._scheduler_empty():
+                work = self._next_work()
+                if work is None:
+                    continue
+                dequeued_at = monotonic()
+                enqueued_at = work.enqueued_monotonic
+                if enqueued_at is not None:
+                    self._dequeue_timing.add(dequeued_at - enqueued_at)
+                self._set_stage_activity("inference", True, dequeued_at)
+                try:
                     with self._lock:
                         paused = self._paused
-                    if not paused or self._stop_event.wait(0.2):
-                        break
-                if paused and self._stop_event.is_set():
-                    with self._lock:
-                        self._skipped_while_paused += 1
-                    continue
-                if detector is None:
-                    try:
-                        detector = self._detector_factory()
-                        detector_error = None
-                    except Exception as exc:
-                        detector_error = f"{type(exc).__name__}: {exc}"
-                        LOGGER.error(
-                            "Classifier model could not be loaded",
-                            extra={"structured_data": {"event": "classifier_load_error", "error": detector_error}},
+                    if paused:
+                        if isinstance(work, _SceneInferenceTask):
+                            self._complete_scene(
+                                work,
+                                self._scene_failure(
+                                    work.request_id,
+                                    work.event_id,
+                                    work.track_id,
+                                    work.packet,
+                                    "unavailable",
+                                    "classifier_paused",
+                                ),
+                            )
+                        else:
+                            with self._lock:
+                                self._skipped_while_paused += 1
+                            self._queue_outcome(
+                                _ClassifierOutcome(
+                                    work,
+                                    (),
+                                    "classifier_paused",
+                                    None,
+                                    MobileNetSSDDetector.model_name,
+                                )
+                            )
+                        continue
+                    if detector is None:
+                        try:
+                            detector = self._detector_factory()
+                            detector_error = None
+                        except Exception as exc:
+                            detector_error = f"{type(exc).__name__}: {exc}"
+                            LOGGER.error(
+                                "Classifier model could not be loaded",
+                                extra={
+                                    "structured_data": {
+                                        "event": "classifier_load_error",
+                                        "error": detector_error,
+                                    }
+                                },
+                            )
+                    if isinstance(work, _SceneInferenceTask):
+                        if monotonic() > work.deadline_monotonic:
+                            self._complete_scene(
+                                work,
+                                self._scene_failure(
+                                    work.request_id,
+                                    work.event_id,
+                                    work.track_id,
+                                    work.packet,
+                                    "unavailable",
+                                    "scene_inference_deadline_expired",
+                                ),
+                            )
+                            continue
+                        if detector is None:
+                            self._complete_scene(
+                                work,
+                                self._scene_failure(
+                                    work.request_id,
+                                    work.event_id,
+                                    work.track_id,
+                                    work.packet,
+                                    "unavailable",
+                                    detector_error or "classifier_unavailable",
+                                ),
+                            )
+                            continue
+                        inference_started = perf_counter()
+                        reported_latency: float | None = None
+                        try:
+                            detections, _latency = detector.classify(work.packet.frame)
+                            reported_latency = _latency
+                            scene_detections = tuple(
+                                SceneDetection(
+                                    item.label.strip().lower(),
+                                    item.confidence,
+                                    item.bounding_box,
+                                )
+                                for item in detections
+                            )
+                            status = (
+                                "person"
+                                if any(item.label == "person" for item in scene_detections)
+                                else "clear"
+                            )
+                            result = ScenePersonSafetyResult(
+                                status=status,
+                                request_id=work.request_id,
+                                event_id=work.event_id,
+                                track_id=work.track_id,
+                                coordinate_space="native_full_frame",
+                                source_sequence=work.packet.sequence,
+                                source_received_monotonic=work.packet.received_monotonic,
+                                frame_width=work.packet.width,
+                                frame_height=work.packet.height,
+                                detections=scene_detections,
+                                completed_monotonic=max(
+                                    monotonic(),
+                                    work.packet.received_monotonic,
+                                ),
+                            )
+                        except Exception as exc:
+                            error = f"{type(exc).__name__}: {exc}"
+                            detector = None
+                            detector_error = error
+                            result = self._scene_failure(
+                                work.request_id,
+                                work.event_id,
+                                work.track_id,
+                                work.packet,
+                                "error",
+                                error,
+                            )
+                            LOGGER.error(
+                                "Full-frame person-safety inference failed",
+                                extra={
+                                    "structured_data": {
+                                        "event": "scene_person_safety_error",
+                                        "event_id": work.event_id,
+                                        "source_sequence": work.packet.sequence,
+                                        "error": error,
+                                    }
+                                },
+                                exc_info=True,
+                            )
+                        finally:
+                            self._inference_timing.add(perf_counter() - inference_started)
+                            self._record_inference_completion(reported_latency)
+                        self._complete_scene(work, result)
+                        continue
+                    if detector is None:
+                        outcome = _ClassifierOutcome(
+                            work,
+                            (),
+                            detector_error or "classifier_unavailable",
+                            None,
+                            MobileNetSSDDetector.model_name,
                         )
-                if detector is None:
-                    detections, latency = [], None
-                    error = detector_error or "classifier_unavailable"
-                    model_name = MobileNetSSDDetector.model_name
-                else:
-                    try:
-                        detections, latency = detector.classify(task.image)
-                        error = None
-                        model_name = detector.model_name
-                    except Exception as exc:
-                        detections, latency = [], None
-                        error = f"{type(exc).__name__}: {exc}"
-                        model_name = detector.model_name
-                        detector = None
-                        detector_error = error
-                        LOGGER.error(
-                            "Classifier inference failed",
-                            extra={
-                                "structured_data": {
-                                    "event": "classifier_inference_error",
-                                    "event_id": task.event_id,
-                                    "error": error,
-                                }
-                            },
-                            exc_info=True,
-                        )
-                record = self.store.save_classification(task, detections, latency, model_name, error=error)
-                with self._lock:
-                    self._completed += 1
-                    self._last_latency_ms = latency
-                    completed_at = perf_counter()
-                    self._append_completion_time_locked(completed_at)
-                    self._last_error = error
-                    if record["auto_accepted"]:
-                        self._auto_accepted += 1
-                    elif record["classification_status"] == "review":
-                        self._queued_for_review += 1
-                    elif record["classification_status"] == "unknown":
-                        self._unknown += 1
-                    elif record["classification_status"] == "unclassified":
-                        self._errors += 1
-                self._notify_result(task, detections, error, record)
-            except Exception as exc:
-                with self._lock:
-                    self._last_error = f"{type(exc).__name__}: {exc}"
-                LOGGER.error("Classifier task failed", extra={"structured_data": {"event": "classifier_task_error", "error": str(exc)}}, exc_info=True)
-            finally:
-                self._tasks.task_done()
+                    else:
+                        inference_started = perf_counter()
+                        reported_latency = None
+                        try:
+                            detections, latency = detector.classify(work.image)
+                            reported_latency = latency
+                            outcome = _ClassifierOutcome(
+                                work,
+                                tuple(detections),
+                                None,
+                                latency,
+                                detector.model_name,
+                            )
+                        except Exception as exc:
+                            error = f"{type(exc).__name__}: {exc}"
+                            outcome = _ClassifierOutcome(work, (), error, None, detector.model_name)
+                            detector = None
+                            detector_error = error
+                            LOGGER.error(
+                                "Classifier inference failed",
+                                extra={
+                                    "structured_data": {
+                                        "event": "classifier_inference_error",
+                                        "event_id": work.event_id,
+                                        "error": error,
+                                    }
+                                },
+                                exc_info=True,
+                            )
+                        finally:
+                            self._inference_timing.add(perf_counter() - inference_started)
+                            self._record_inference_completion(reported_latency)
+                    self._queue_outcome(outcome)
+                finally:
+                    self._set_stage_activity("inference", False, monotonic())
+        finally:
+            self._downstream_stop.set()
 
-    def _notify_result(
+    def _complete_scene(
         self,
-        task: ClassifierTask,
-        detections: list[ClassifierDetection],
-        error: str | None,
-        record: dict[str, Any],
+        task: _SceneInferenceTask,
+        result: ScenePersonSafetyResult,
     ) -> None:
-        handler = self._result_handler
-        if handler is None:
+        task.result = result
+        with self._lock:
+            self._last_scene_result = result
+        with self._scheduler_condition:
+            self._scene_active = False
+            self._scheduler_condition.notify_all()
+        task.completed.set()
+
+    @staticmethod
+    def _scene_failure(
+        request_id: str,
+        event_id: str,
+        track_id: int,
+        packet: SceneFramePacket,
+        status: str,
+        error: str,
+    ) -> ScenePersonSafetyResult:
+        return ScenePersonSafetyResult(
+            status=status,  # type: ignore[arg-type]
+            request_id=request_id,
+            event_id=event_id,
+            track_id=track_id,
+            coordinate_space="native_full_frame",
+            source_sequence=packet.sequence,
+            source_received_monotonic=packet.received_monotonic,
+            frame_width=packet.width,
+            frame_height=packet.height,
+            detections=(),
+            completed_monotonic=max(monotonic(), packet.received_monotonic),
+            error=error,
+        )
+
+    def _queue_outcome(self, outcome: _ClassifierOutcome) -> None:
+        delivery = self._queue_decision(outcome)
+        try:
+            self._evidence_queue.put_nowait(_EvidenceJob(outcome, delivery))
+        except queue.Full:
+            with self._lock:
+                self._evidence_dropped += 1
+                self._last_error = "classifier_evidence_queue_full"
+            self._log_downstream_drop(outcome.task, "evidence", "classifier_evidence_queue_full")
+            self._queue_evidence_completion(
+                _EvidenceCompletion(
+                    outcome.task,
+                    "dropped_queue_full",
+                    None,
+                    "classifier_evidence_queue_full",
+                )
+            )
+
+    @staticmethod
+    def _log_downstream_drop(task: ClassifierTask, stage: str, reason: str) -> None:
+        LOGGER.error(
+            "Classifier downstream %s work dropped for event=%s reason=%s",
+            stage,
+            task.event_id,
+            reason,
+            extra={
+                "structured_data": {
+                    "event": "classifier_downstream_drop",
+                    "stage": stage,
+                    "event_id": task.event_id,
+                    "track_id": task.track_id,
+                    "classification_context": task.context,
+                    "source_frame_sequence": task.frame_sequence,
+                    "reason": reason,
+                }
+            },
+        )
+
+    def _decision_worker(self) -> None:
+        set_current_thread_name("auto-fire-decision")
+        try:
+            while not self._downstream_stop.is_set() or not self._decision_queue.empty():
+                try:
+                    item = self._decision_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                self._decision_queue_dwell_timing.add(
+                    monotonic() - item.enqueued_monotonic
+                )
+                started = perf_counter()
+                self._set_stage_activity("decision", True, monotonic())
+                item.delivery.update("started", started=True)
+                try:
+                    status = self._notify_result(item.outcome)
+                    item.delivery.update(status, finished=True)
+                finally:
+                    self._decision_handler_timing.add(perf_counter() - started)
+                    self._set_stage_activity("decision", False, monotonic())
+                    self._decision_queue.task_done()
+        finally:
+            self._decision_done.set()
+
+    def _evidence_worker(self) -> None:
+        set_current_thread_name("classifier-evidence")
+        try:
+            while not self._downstream_stop.is_set() or not self._evidence_queue.empty():
+                try:
+                    item = self._evidence_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                persistence_started = perf_counter()
+                self._set_stage_activity("evidence", True, monotonic())
+                record: dict[str, Any] | None = None
+                completion_status = "failed"
+                completion_error: str | None = None
+                try:
+                    dispatch_started = item.delivery.started.wait(
+                        timeout=DECISION_DISPATCH_START_WAIT_SECONDS
+                    )
+                    if not dispatch_started:
+                        raise RuntimeError(
+                            "decision_dispatch_not_started_before_evidence_deadline"
+                        )
+                    delivery_status = item.delivery.snapshot()
+                    outcome = item.outcome
+                    record = self.store.save_classification(
+                        outcome.task,
+                        list(outcome.detections),
+                        outcome.latency_ms,
+                        outcome.model_name,
+                        error=outcome.error,
+                        decision_delivery_status=delivery_status,
+                    )
+                    completion_status = "persisted"
+                    with self._lock:
+                        self._completed += 1
+                        self._last_error = outcome.error
+                        if record["auto_accepted"]:
+                            self._auto_accepted += 1
+                        elif record["classification_status"] == "review":
+                            self._queued_for_review += 1
+                        elif record["classification_status"] == "unknown":
+                            self._unknown += 1
+                        elif record["classification_status"] == "unclassified":
+                            self._errors += 1
+                except Exception as exc:
+                    completion_error = f"{type(exc).__name__}: {exc}"
+                    with self._lock:
+                        self._evidence_dropped += 1
+                        self._last_error = completion_error
+                    LOGGER.error(
+                        "Classifier evidence persistence failed",
+                        extra={
+                            "structured_data": {
+                                "event": "classifier_evidence_error",
+                                "event_id": item.outcome.task.event_id,
+                                "track_id": item.outcome.task.track_id,
+                                "classification_context": item.outcome.task.context,
+                                "error": completion_error,
+                            }
+                        },
+                        exc_info=True,
+                    )
+                finally:
+                    self._evidence_persistence_timing.add(perf_counter() - persistence_started)
+                    self._set_stage_activity("evidence", False, monotonic())
+                    self._queue_evidence_completion(
+                        _EvidenceCompletion(
+                            item.outcome.task,
+                            completion_status,
+                            record,
+                            completion_error,
+                        )
+                    )
+                    self._evidence_queue.task_done()
+        finally:
+            self._evidence_done.set()
+
+    def _queue_evidence_completion(self, completion: _EvidenceCompletion) -> None:
+        if self._evidence_result_handler is None:
             return
         try:
-            handler(task, detections, error, record)
+            self._evidence_completion_queue.put_nowait(completion)
+            if self._evidence_completion_queue.qsize() >= self._completion_reserve:
+                self._completion_backpressure.set()
+        except queue.Full:
+            capacity_exhausted = False
+            with self._lock:
+                if len(self._evidence_completion_overflow) < self._completion_reserve:
+                    self._evidence_completion_overflow.append(completion)
+                    self._last_error = "classifier_evidence_completion_overflow"
+                else:  # pragma: no cover - requires violating bounded in-flight invariant
+                    self._evidence_completion_dropped += 1
+                    self._last_error = "classifier_evidence_completion_capacity_exhausted"
+                    capacity_exhausted = True
+            self._completion_backpressure.set()
+            if capacity_exhausted:
+                self._log_downstream_drop(
+                    completion.task,
+                    "evidence_completion",
+                    "classifier_evidence_completion_capacity_exhausted",
+                )
+
+    def _evidence_completion_worker(self) -> None:
+        set_current_thread_name("classifier-evidence-completion")
+        while not (
+            self._downstream_stop.is_set()
+            and self._evidence_done.is_set()
+            and self._evidence_completion_queue.empty()
+            and not self._evidence_completion_overflow
+        ):
+            completion_from_queue = False
+            with self._lock:
+                completion = (
+                    self._evidence_completion_overflow.popleft()
+                    if self._evidence_completion_overflow
+                    else None
+                )
+            if completion is None:
+                try:
+                    completion = self._evidence_completion_queue.get(timeout=0.2)
+                    completion_from_queue = True
+                except queue.Empty:
+                    continue
+            handler_started = perf_counter()
+            self._set_stage_activity("evidence_completion", True, monotonic())
+            try:
+                handler = self._evidence_result_handler
+                if handler is not None:
+                    handler(
+                        completion.task,
+                        completion.status,
+                        completion.record,
+                        completion.error,
+                    )
+            except Exception as exc:
+                retrying = completion.attempts < 2
+                LOGGER.exception(
+                    "Classifier evidence completion handler failed%s",
+                    "; retrying" if retrying else "; terminal backpressure engaged",
+                    extra={
+                        "structured_data": {
+                            "event": "classifier_evidence_completion_handler_error",
+                            "event_id": completion.task.event_id,
+                            "track_id": completion.task.track_id,
+                            "classification_context": completion.task.context,
+                            "evidence_status": completion.status,
+                            "attempt": completion.attempts + 1,
+                            "retrying": retrying,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    },
+                )
+                if retrying:
+                    self._queue_evidence_completion(
+                        _EvidenceCompletion(
+                            completion.task,
+                            completion.status,
+                            completion.record,
+                            completion.error,
+                            completion.attempts + 1,
+                        )
+                    )
+                else:
+                    with self._lock:
+                        self._evidence_completion_dropped += 1
+                        self._last_error = "classifier_evidence_completion_handler_failed"
+                    self._completion_terminal_error.set()
+                    self._completion_backpressure.set()
+            finally:
+                self._evidence_completion_handler_timing.add(
+                    perf_counter() - handler_started
+                )
+                self._set_stage_activity("evidence_completion", False, monotonic())
+                if completion_from_queue:
+                    self._evidence_completion_queue.task_done()
+                if (
+                    self._evidence_completion_queue.qsize() < self._completion_reserve
+                    and not self._evidence_completion_overflow
+                    and not self._completion_terminal_error.is_set()
+                ):
+                    self._completion_backpressure.clear()
+
+    def _notify_result(self, outcome: _ClassifierOutcome) -> str:
+        handler = self._result_handler
+        if handler is None:
+            return "not_configured"
+        task = outcome.task
+        decision_record: dict[str, Any] = {
+            "classification_context": task.context,
+            "track_id": task.track_id,
+            "source_frame_sequence": task.frame_sequence,
+            "target_observed_monotonic": task.target_observed_monotonic,
+            "target_pixel": (
+                None
+                if task.target_pixel is None
+                else {"x": task.target_pixel[0], "y": task.target_pixel[1]}
+            ),
+            "evidence_persistence_pending": True,
+        }
+        try:
+            handler(
+                task,
+                list(outcome.detections),
+                outcome.error,
+                decision_record,
+            )
+            return "completed"
         except Exception:
             LOGGER.exception(
-                "Classifier result handler failed; classification evidence remains intact",
+                "Classifier result handler failed; evidence persistence remains isolated",
                 extra={
                     "structured_data": {
                         "event": "classifier_result_handler_error",
@@ -1169,6 +2024,7 @@ class EventClassifier:
                     }
                 },
             )
+            return "handler_error"
 
 
 def _candidate_crop(

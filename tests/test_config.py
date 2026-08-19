@@ -42,6 +42,13 @@ def test_loads_camera_config(tmp_path: Path) -> None:
     assert config.auto_fire.cooldown_seconds == 5.0
     assert config.auto_fire.max_shots_per_event == 1
     assert config.auto_fire.max_shots_per_hour == 6
+    assert config.auto_fire.scene_safety_max_age_seconds == 0.75
+    assert config.auto_fire.scene_safety_timeout_seconds == 1.5
+    assert config.auto_fire.final_aim_direct_drift_pixels == 24
+    assert config.auto_fire.final_aim_reaim_max_drift_pixels == 100
+    assert config.auto_fire.final_aim_minimum_iou == 0.10
+    assert config.auto_fire.final_aim_max_area_ratio == 4.0
+    assert config.auto_fire.final_aim_max_elapsed_seconds == 0.75
     assert config.auto_fire.track_loss_grace_seconds == 0.9
     assert config.auto_fire.reacquisition_max_centroid_distance_pixels == 100.0
     assert config.auto_fire.reacquisition_max_area_ratio == 2.5
@@ -200,6 +207,13 @@ def test_auto_fire_allows_an_explicit_empty_allowlist(tmp_path: Path) -> None:
         ("max_shots_per_hour", 0, "max_shots_per_hour"),
         ("classification_max_age_seconds", 0, "classification_max_age_seconds"),
         ("target_max_age_seconds", 0, "target_max_age_seconds"),
+        ("scene_safety_max_age_seconds", 0, "scene_safety_max_age_seconds"),
+        ("scene_safety_timeout_seconds", 0, "scene_safety_timeout_seconds"),
+        ("final_aim_direct_drift_pixels", 0, "final_aim_direct_drift_pixels"),
+        ("final_aim_reaim_max_drift_pixels", 0, "final_aim_reaim_max_drift_pixels"),
+        ("final_aim_minimum_iou", 1.1, "final_aim_minimum_iou"),
+        ("final_aim_max_area_ratio", 0.9, "final_aim_max_area_ratio"),
+        ("final_aim_max_elapsed_seconds", 0, "final_aim_max_elapsed_seconds"),
         ("track_loss_grace_seconds", 0, "track_loss_grace_seconds"),
         (
             "reacquisition_max_centroid_distance_pixels",

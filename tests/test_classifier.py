@@ -792,7 +792,103 @@ def test_decision_dispatch_starts_before_evidence_and_completion_is_distinct(
         "decision_queue_dwell",
         "decision_handler_duration",
         "evidence_persistence",
+        "evidence_completion_handler",
     }
+
+
+def test_evidence_does_not_persist_when_decision_dispatch_cannot_start(
+    tmp_path: Path,
+) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    first_handler_started = threading.Event()
+    release_first_handler = threading.Event()
+    second_completion = threading.Event()
+    completion_statuses: dict[str, tuple[str, str | None]] = {}
+
+    def handler(queued_task: ClassifierTask, *_args: object) -> None:
+        if queued_task.event_id == "dispatch-blocked-first":
+            first_handler_started.set()
+            assert release_first_handler.wait(timeout=2)
+
+    def completed(
+        queued_task: ClassifierTask,
+        status: str,
+        _record: object,
+        error: str | None,
+    ) -> None:
+        completion_statuses[queued_task.event_id] = (status, error)
+        if queued_task.event_id == "dispatch-blocked-second":
+            second_completion.set()
+
+    class Detector:
+        model_name = "dispatch-blocked-detector"
+
+        def classify(self, _image: np.ndarray):
+            return [], 1.0
+
+    worker = EventClassifier(  # type: ignore[arg-type]
+        config.classifier,
+        store,
+        detector_factory=Detector,
+        result_handler=handler,
+        evidence_result_handler=completed,
+    )
+    first = tmp_path / "captures" / "events" / "dispatch-blocked-first"
+    second = tmp_path / "captures" / "events" / "dispatch-blocked-second"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit("dispatch-blocked-first", first, 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20))
+        assert first_handler_started.wait(timeout=1)
+        assert worker.submit("dispatch-blocked-second", second, 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20))
+        assert second_completion.wait(timeout=2)
+        assert not (second / "classification.json").exists()
+    finally:
+        release_first_handler.set()
+        worker.stop()
+
+    status, error = completion_statuses["dispatch-blocked-second"]
+    assert status == "failed"
+    assert error and "decision_dispatch_not_started" in error
+
+
+def test_evidence_completion_handler_retries_then_recovers(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    recovered = threading.Event()
+    attempts: list[int] = []
+
+    def flaky_completion(*_args: object) -> None:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise RuntimeError("transient lease release failure")
+        recovered.set()
+
+    class Detector:
+        model_name = "completion-retry-detector"
+
+        def classify(self, _image: np.ndarray):
+            return [], 1.0
+
+    worker = EventClassifier(  # type: ignore[arg-type]
+        config.classifier,
+        store,
+        detector_factory=Detector,
+        evidence_result_handler=flaky_completion,
+    )
+    directory = tmp_path / "captures" / "events" / "completion-retry"
+    directory.mkdir(parents=True)
+    worker.start()
+    try:
+        assert worker.submit("completion-retry", directory, 1, np.zeros((20, 30, 3), dtype=np.uint8), (0, 0, 30, 20))
+        assert recovered.wait(timeout=2)
+    finally:
+        worker.stop()
+
+    assert attempts == [1, 2]
+    assert worker.status().evidence_completion_terminal_error is False
 
 
 def test_stop_timeout_later_stops_downstream_when_inference_returns(tmp_path: Path) -> None:
