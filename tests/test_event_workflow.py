@@ -12,16 +12,21 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from conftest import write_test_config
 from squirrel_shooter.config import load_config
 from squirrel_shooter.event_report import generate_reports
 from squirrel_shooter.event_storage import (
+    EVENT_COMPONENT_SAMPLE_LIMIT,
     EVENT_FIELDS,
+    EVENT_GROUP_SAMPLE_LIMIT,
+    EventStorageManager,
     EventLogWriter,
     EventRecorder,
     RollingFrameBuffer,
     SessionLog,
+    _AsyncClipWriter,
     enforce_retention,
     new_event_id,
     recover_incomplete_events,
@@ -66,6 +71,32 @@ class FakeWriter:
 
     def release(self) -> None:
         self.released = True
+
+
+class BlockingWriter(FakeWriter):
+    def __init__(self, path: str, gate: threading.Event, *_: object) -> None:
+        super().__init__(path)
+        self.gate = gate
+        self.write_started = threading.Event()
+
+    def write(self, frame: np.ndarray) -> None:
+        self.write_started.set()
+        self.gate.wait(timeout=5.0)
+        super().write(frame)
+
+
+class FailingWriter(FakeWriter):
+    def write(self, frame: np.ndarray) -> None:
+        raise OSError("injected codec failure")
+
+
+def wait_until(predicate, timeout: float = 2.0) -> bool:  # type: ignore[no-untyped-def]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
 
 
 def camera_metadata() -> dict[str, object]:
@@ -136,9 +167,13 @@ def test_event_json_csv_and_jsonl_are_completed_and_flushed(tmp_path: Path) -> N
         assert logged["track_id"] == "7"
     assert json.loads(logs.jsonl_path.read_text(encoding="utf-8").splitlines()[0])["event_id"] == active.event_id
     assert writers[0].released
+    fsync_timing = logs.fsync_timing()
+    assert fsync_timing["csv"]["total_count"] == 1
+    assert fsync_timing["jsonl"]["total_count"] == 1
+    assert fsync_timing["all"]["total_count"] == 2
 
 
-def test_event_prebuffer_encoding_does_not_block_motion_processing(tmp_path: Path) -> None:
+def test_103410_slow_prebuffer_does_not_recreate_recording_blind_spot(tmp_path: Path) -> None:
     config = configured(tmp_path)
     logs = EventLogWriter(config)
     recorder = EventRecorder(
@@ -150,11 +185,16 @@ def test_event_prebuffer_encoding_does_not_block_motion_processing(tmp_path: Pat
     frame = np.zeros((72, 128, 3), dtype=np.uint8)
     rendering_started = threading.Event()
     release_rendering = threading.Event()
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "field_events" / "20260818-103410-613-77abc4.json")
+        .read_text(encoding="utf-8")
+    )
+    event_started = float(fixture["previous"]["observed_monotonic"])
 
     def slow_prebuffer():
         rendering_started.set()
         release_rendering.wait(timeout=2.0)
-        yield 0.0, frame
+        yield event_started - 0.1, frame
 
     started = time.monotonic()
     active = recorder.begin(
@@ -163,18 +203,217 @@ def test_event_prebuffer_encoding_does_not_block_motion_processing(tmp_path: Pat
         frame,
         frame,
         slow_prebuffer(),
-        now=1.0,
+        now=event_started,
         measured_fps=9.9,
     )
     elapsed = time.monotonic() - started
 
     assert rendering_started.wait(timeout=0.5)
     assert elapsed < 0.25
-    recorder.update(7, candidate(), frame, now=1.1)
+    next_detector_started = time.monotonic()
+    recorder.update(7, candidate(), frame, now=event_started + 0.1)
+    assert time.monotonic() - next_detector_started < 0.1
     release_rendering.set()
-    record = recorder.finish(7, now=4.2)
-    assert record["frames_written"] == 3
+    record = recorder.finish(7, now=event_started + 0.1)
+    assert record["frames_written"] == 2
+    assert record["writer_telemetry"]["supplied_duration_seconds"] == pytest.approx(0.2)
     assert active.clip_path.exists()
+
+
+def test_event_clip_encoded_duration_tracks_supplied_monotonic_timeline(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    writers: list[FakeWriter] = []
+
+    def factory(path: str, *_args: object) -> FakeWriter:
+        writer = FakeWriter(path)
+        writers.append(writer)
+        return writer
+
+    recorder = EventRecorder(config, logs, camera_metadata(), video_writer_factory=factory)
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    start = 100.0
+    recorder.begin(
+        7,
+        candidate(),
+        frame,
+        frame,
+        ((start, frame), (start + 0.08, frame)),
+        now=start + 0.2,
+        measured_fps=25.0,
+    )
+    for timestamp in (start + 0.37, start + 0.61, start + 1.2):
+        recorder.update(7, candidate(), frame, now=timestamp)
+
+    record = recorder.finish(7, now=start + 1.2)
+    telemetry = record["writer_telemetry"]
+    supplied = float(telemetry["supplied_duration_seconds"])
+    encoded = float(telemetry["encoded_duration_seconds"])
+    output_fps = float(telemetry["output_fps"])
+
+    assert output_fps == config.motion.target_fps
+    assert supplied == pytest.approx(1.2)
+    assert encoded == pytest.approx(writers[0].frames / output_fps)
+    assert abs(encoded - supplied) <= 1.0 / output_fps
+    assert telemetry["timestamp_regressions"] == 0
+
+
+def test_event_metadata_bounds_samples_but_aggregates_every_observation(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FakeWriter(path),
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=10.0)
+    for index in range(300):
+        recorder.update(7, candidate(), frame, now=1.0 + ((index + 1) / 1000.0))
+
+    record = recorder.finish(7, now=1.301)
+
+    assert record["group_sample_count"] == 301
+    assert record["group_samples_retained"] == EVENT_GROUP_SAMPLE_LIMIT
+    assert record["group_samples_omitted"] == 301 - EVENT_GROUP_SAMPLE_LIMIT
+    assert len(record["components"]) == EVENT_COMPONENT_SAMPLE_LIMIT
+    assert record["group_samples"][0]["sample_index"] == 0
+    assert record["group_samples"][-1]["sample_index"] == 300
+    assert all("component_blobs" not in sample for sample in record["group_samples"])
+    assert all("recent_centroid_path" not in sample for sample in record["group_samples"])
+    assert record["average_area"] == 280.0
+    assert record["group_sample_storage"]["aggregates_cover_all_samples"] is True
+
+
+def test_event_writer_full_queue_keeps_newest_frame_without_blocking(tmp_path: Path) -> None:
+    gate = threading.Event()
+    raw = BlockingWriter(str(tmp_path / "blocked.avi"), gate)
+    writer = _AsyncClipWriter(raw, (), queue_limit=2, no_progress_seconds=0.05)
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    assert writer.write(frame).accepted
+    assert raw.write_started.wait(timeout=0.5)
+    assert writer.write(frame).accepted
+    assert writer.write(frame).accepted
+    started = time.monotonic()
+    outcome = writer.write(frame)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert outcome.accepted and outcome.degraded
+    assert outcome.reason == "queue_full_dropped_oldest"
+    status = writer.status()
+    assert status.queue_high_water == 2
+    assert status.frames_dropped == 1
+    assert status.blocking_put_attempts == 0
+    assert status.blocked_put_seconds == 0.0
+    assert status.nonblocking_enqueue_timing["total_count"] == 4
+    assert wait_until(lambda: writer.status().state == "stalled", timeout=0.5)
+
+    gate.set()
+    completed = writer.release(timeout=1.0)
+    assert completed.state == "finished"
+    assert completed.frames_written == 3
+
+
+def test_event_writer_stop_timeout_is_bounded_and_observable(tmp_path: Path) -> None:
+    gate = threading.Event()
+    raw = BlockingWriter(str(tmp_path / "stalled.avi"), gate)
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    writer = _AsyncClipWriter(raw, (frame,), no_progress_seconds=0.01)
+    assert raw.write_started.wait(timeout=0.5)
+
+    started = time.monotonic()
+    status = writer.release(timeout=0.05)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert status.state == "stalled"
+    assert status.thread_alive is True
+    assert status.join_timed_out is True
+
+    gate.set()
+    assert wait_until(lambda: not writer.status().thread_alive)
+    assert writer.release(timeout=0.2).state == "finished"
+
+
+def test_event_writer_detects_hung_inflight_write_with_empty_queue(tmp_path: Path) -> None:
+    gate = threading.Event()
+    raw = BlockingWriter(str(tmp_path / "inflight-stall.avi"), gate)
+    writer = _AsyncClipWriter(raw, (), queue_limit=1, no_progress_seconds=0.01)
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    assert writer.write(frame).accepted
+    assert raw.write_started.wait(timeout=0.5)
+    assert wait_until(lambda: writer.status().state == "stalled", timeout=0.5)
+    status = writer.status()
+
+    assert status.queue_depth == 0
+    assert status.write_in_progress is True
+    assert status.thread_alive is True
+    gate.set()
+    assert writer.release(timeout=1.0).state == "finished"
+
+
+def test_event_queue_degradation_is_persisted_truthfully(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    gate = threading.Event()
+    writers: list[BlockingWriter] = []
+
+    def factory(path: str, *args: object) -> BlockingWriter:
+        writer = BlockingWriter(path, gate, *args)
+        writers.append(writer)
+        return writer
+
+    recorder = EventRecorder(config, logs, camera_metadata(), video_writer_factory=factory)
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    active = recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=9.9)
+    assert writers[0].write_started.wait(timeout=0.5)
+
+    for index in range(12):
+        recorder.update(7, candidate(), frame, now=1.1 + (index / 10))
+
+    gate.set()
+    record = recorder.finish(7, now=4.2)
+    persisted = json.loads((active.directory / "event.json").read_text(encoding="utf-8"))
+
+    assert record["status"] == "complete"
+    assert record["recording_status"] == "degraded"
+    assert record["frames_dropped"] > 0
+    assert record["writer_telemetry"]["queue_high_water"] == 8
+    assert record["writer_telemetry"]["blocking_put_attempts"] == 0
+    assert record["writer_telemetry"]["blocked_put_seconds"] == 0.0
+    assert record["writer_telemetry"]["nonblocking_enqueue_timing"]["total_count"] == 12
+    assert persisted["recording_status"] == "degraded"
+    assert not active.marker.exists()
+    assert active.clip_path.exists()
+
+
+def test_event_writer_failure_keeps_partial_marker_and_failed_metadata(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FailingWriter(path),
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    active = recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=9.9)
+    assert wait_until(lambda: active.writer.status().state == "failed")
+
+    recorder.update(7, candidate(), frame, now=1.1)
+    record = recorder.finish(7, now=4.2)
+    persisted = json.loads((active.directory / "event.json").read_text(encoding="utf-8"))
+
+    assert record["status"] == "recording_failed"
+    assert record["recording_status"] == "failed"
+    assert "injected codec failure" in str(record["writer_telemetry"]["error"])
+    assert record["clip_path"] is None
+    assert active.marker.exists()
+    assert persisted["status"] == "recording_failed"
 
 
 def test_event_reacquisition_diagnostics_are_bounded(tmp_path: Path) -> None:
@@ -382,6 +621,216 @@ def test_retention_deletes_oldest_complete_events_only(tmp_path: Path) -> None:
     assert not old.exists()
     assert middle.exists() and newest.exists() and protected.exists()
     assert actions[0]["event_id"] == "old"
+
+
+def test_storage_manager_finalizes_off_thread_and_exposes_pending_pins(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    gate = threading.Event()
+    writers: list[BlockingWriter] = []
+
+    def factory(path: str, *args: object) -> BlockingWriter:
+        writer = BlockingWriter(path, gate, *args)
+        writers.append(writer)
+        return writer
+
+    recorder = EventRecorder(config, logs, camera_metadata(), video_writer_factory=factory)
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    active = recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=9.9)
+    assert writers[0].write_started.wait(timeout=0.5)
+    manager = EventStorageManager(
+        recorder,
+        config.camera.output_directory / "events",
+        config.retention,
+    )
+    manager.start()
+    external_pin = tmp_path / "classifier-still-writing"
+    manager.pin(external_pin)
+
+    started = time.monotonic()
+    submission = manager.request_finalize(7, now=4.2)
+    elapsed = time.monotonic() - started
+
+    assert submission.accepted
+    assert elapsed < 0.1
+    assert 7 not in recorder.active
+    assert active.directory.resolve() in manager.pending_directories()
+    assert external_pin.resolve() in manager.protected_directories()
+
+    gate.set()
+    assert wait_until(lambda: manager.status().completed_finalizations == 1)
+    results = manager.poll_results()
+    assert len(results) == 1
+    assert results[0].kind == "finalize" and results[0].success
+    assert results[0].lease_id is None
+    assert results[0].record is not None
+    assert results[0].record["recording_status"] == "success"
+    assert manager.pending_directories() == set()
+    status = manager.status()
+    assert status.leased_directories == 0
+    assert status.event_log_fsync_timing["csv"]["total_count"] == 1
+    assert status.event_log_fsync_timing["jsonl"]["total_count"] == 1
+    assert status.event_log_fsync_timing["all"]["total_count"] == 2
+    manager.unpin(external_pin)
+    assert external_pin.resolve() not in manager.protected_directories()
+    assert manager.stop(timeout=1.0).thread_alive is False
+
+
+def test_storage_manager_contains_finalizer_failure_and_preserves_marker(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FakeWriter(path),
+        image_writer=lambda _path, _frame: False,
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    active = recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=10.0)
+    manager = EventStorageManager(recorder, config.camera.output_directory / "events", config.retention)
+    manager.start()
+
+    assert manager.request_finalize(7, now=1.1).accepted
+    assert wait_until(lambda: manager.status().failed_finalizations == 1)
+    result = manager.poll_results()[0]
+
+    assert result.kind == "finalize" and result.success is False
+    assert "Could not write" in str(result.error)
+    assert active.marker.exists()
+    assert manager.pending_directories() == set()
+    assert manager.stop(timeout=1.0).thread_alive is False
+
+
+def test_storage_manager_hung_retention_has_bounded_stop_and_queue_rejection(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FakeWriter(path),
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=10.0)
+    recorder.begin(8, candidate(), frame, frame, (), now=1.0, measured_fps=10.0)
+    retention_started = threading.Event()
+    release_retention = threading.Event()
+
+    def slow_retention(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        retention_started.set()
+        release_retention.wait(timeout=5.0)
+        return []
+
+    manager = EventStorageManager(
+        recorder,
+        config.camera.output_directory / "events",
+        config.retention,
+        queue_limit=1,
+        retention_runner=slow_retention,
+    )
+    manager.start()
+    assert manager.request_retention().accepted
+    assert retention_started.wait(timeout=0.5)
+    assert manager.request_finalize(7, now=1.1).accepted
+
+    started = time.monotonic()
+    rejected = manager.request_finalize(8, now=1.1)
+    assert time.monotonic() - started < 0.1
+    assert rejected.accepted is False and rejected.reason == "finalization_queue_full"
+    assert 8 in recorder.active
+
+    stop_started = time.monotonic()
+    stalled = manager.stop(timeout=0.05)
+    assert time.monotonic() - stop_started < 0.2
+    assert stalled.thread_alive and stalled.join_timed_out
+    assert manager.request_stop_pending_writers() == 1
+
+    release_retention.set()
+    assert manager.stop(timeout=1.0).thread_alive is False
+    recorder.finish(8, now=1.2)
+    status = manager.status()
+    assert status.queue_high_water == 1
+    assert status.retention_timing["total_count"] == 1
+    assert status.finalization_timing["total_count"] == 1
+
+
+def test_storage_manager_retention_never_deletes_pinned_directory(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FakeWriter(path),
+    )
+    root = config.camera.output_directory / "events"
+    now = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    old = make_complete_event(root, "pinned-old", now - timedelta(days=40))
+    manager = EventStorageManager(recorder, root, config.retention)
+    manager.pin(old)
+    manager.start()
+
+    assert manager.request_retention(now=now).accepted
+    assert wait_until(lambda: manager.status().completed_retention_runs == 1)
+    first = manager.poll_results()
+    assert first[0].kind == "retention" and first[0].success
+    assert old.exists()
+
+    manager.unpin(old)
+    assert manager.request_retention(now=now).accepted
+    assert wait_until(lambda: manager.status().completed_retention_runs == 2)
+    second = manager.poll_results()
+    assert second[0].retention_actions[0]["event_id"] == "pinned-old"
+    assert not old.exists()
+    assert manager.stop(timeout=1.0).thread_alive is False
+
+
+def test_storage_result_claim_atomically_leases_directory_across_retention(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    logs = EventLogWriter(config)
+    recorder = EventRecorder(
+        config,
+        logs,
+        camera_metadata(),
+        video_writer_factory=lambda path, *_args: FakeWriter(path),
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    active = recorder.begin(7, candidate(), frame, frame, (), now=1.0, measured_fps=10.0)
+    manager = EventStorageManager(
+        recorder,
+        config.camera.output_directory / "events",
+        config.retention,
+    )
+    manager.start()
+
+    assert manager.request_finalize(7, now=1.1).accepted
+    assert wait_until(lambda: manager.status().completed_finalizations == 1)
+    claimed = manager.poll_results(claim_finalize_directories=True)
+
+    assert len(claimed) == 1
+    assert claimed[0].directory == active.directory
+    assert claimed[0].lease_id is not None
+    assert manager.status().leased_directories == 1
+    assert active.directory.resolve() in manager.protected_directories()
+
+    future = datetime.now().astimezone() + timedelta(days=40)
+    assert manager.request_retention(now=future).accepted
+    assert wait_until(lambda: manager.status().completed_retention_runs == 1)
+    retention_while_leased = manager.poll_results()
+    assert retention_while_leased[0].retention_actions == ()
+    assert active.directory.exists()
+
+    assert manager.release_lease(claimed[0].lease_id)
+    assert manager.status().leased_directories == 0
+    assert manager.request_retention(now=future).accepted
+    assert wait_until(lambda: manager.status().completed_retention_runs == 2)
+    retention_after_release = manager.poll_results()
+    assert retention_after_release[0].retention_actions[0]["event_id"] == active.event_id
+    assert not active.directory.exists()
+    assert manager.stop(timeout=1.0).thread_alive is False
 
 
 def test_report_and_review_csv_generation_preserve_human_labels(tmp_path: Path) -> None:

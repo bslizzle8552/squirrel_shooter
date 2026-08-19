@@ -26,11 +26,17 @@ from .classifier import ClassifierDetection, ClassifierEvidenceStore, Classifier
 from .config import AppConfig
 from .diagnostics import cleanup_oldest
 from .event_report import generate_reports, load_events
-from .event_storage import EventLogWriter, EventRecorder, SessionLog, enforce_retention, recover_incomplete_events
+from .event_storage import (
+    EventLogWriter,
+    EventRecorder,
+    EventStorageManager,
+    SessionLog,
+    recover_incomplete_events,
+)
 from .files import timestamped_output_path
 from .frame_selection import BestEventFrameSelector
 from .manual_control import ManualControlService
-from .performance import AverageTimer, ThreadCpuMeter
+from .performance import AverageTimer, ThreadCpuMeter, TimingDistribution
 from .thread_names import set_current_thread_name
 from .watch_detection import MotionWatcherDetector, WatchDetectionResult, annotate_watch_frame
 
@@ -86,6 +92,9 @@ class MotionRuntimeStatus:
     annotations_rendered: int = 0
     idle_annotations_skipped: int = 0
     auto_fire: dict[str, Any] = field(default_factory=dict)
+    motion_loop_start_interval_timing: dict[str, object] = field(default_factory=dict)
+    motion_loop_duration_timing: dict[str, object] = field(default_factory=dict)
+    event_storage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -172,6 +181,7 @@ class MotionProcessingService:
             config.classifier,
             self.classifier_store,
             result_handler=self._handle_classifier_result,
+            evidence_result_handler=self._handle_classifier_evidence_result,
         )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -205,15 +215,20 @@ class MotionProcessingService:
         self._force_event_requested = False
         self._classifier_selectors: dict[str, BestEventFrameSelector] = {}
         self._classifier_clip_offsets: dict[str, int] = {}
+        self._classifier_storage_leases: dict[str, str] = {}
         self._live_group_holds: dict[int, tuple[float, Any]] = {}
         self._recent_events: deque[dict[str, Any]] = deque(maxlen=config.motion.recent_event_limit)
         self._logs: EventLogWriter | None = None
         self._session: SessionLog | None = None
         self._recorder: EventRecorder | None = None
+        self._event_storage: EventStorageManager | None = None
         self._prebuffer = _DetectionFrameBuffer(config.motion.event_lifecycle.pre_event_seconds)
         self._detector_timer = AverageTimer()
         self._annotation_timer = AverageTimer()
         self._motion_cpu = ThreadCpuMeter()
+        self._motion_loop_start_interval = TimingDistribution()
+        self._motion_loop_duration = TimingDistribution()
+        self._last_motion_loop_started: float | None = None
         self._annotations_rendered = 0
         self._idle_annotations_skipped = 0
         self._last_rejection: str | None = None
@@ -221,6 +236,8 @@ class MotionProcessingService:
         self._last_camera_read_failures = 0
         self._error_throttle: OrderedDict[str, tuple[float, int]] = OrderedDict()
         self._suppressed_error_count = 0
+        self._event_storage_last_error: str | None = None
+        self._event_storage_submission_rejections = 0
         self._camera_metadata: dict[str, Any] = {
             "source_camera": f"opencv_device_{config.camera.device_index}",
             "camera_device_index": config.camera.device_index,
@@ -248,6 +265,12 @@ class MotionProcessingService:
             self._finalized = False
             self._error_throttle.clear()
             self._suppressed_error_count = 0
+            self._event_storage_last_error = None
+            self._event_storage_submission_rejections = 0
+            self._motion_loop_start_interval.reset()
+            self._motion_loop_duration.reset()
+            self._last_motion_loop_started = None
+            self._classifier_storage_leases.clear()
             self._prepare_outputs()
             self.classifier.start()
             self._thread = threading.Thread(target=self._run, name="motion-detect", daemon=True)
@@ -306,6 +329,9 @@ class MotionProcessingService:
                 self._annotations_rendered,
                 self._idle_annotations_skipped,
                 self.auto_fire.status(),
+                self._motion_loop_start_interval.snapshot(),
+                self._motion_loop_duration.snapshot(),
+                self._event_storage_status(),
             )
 
     def status_dict(self) -> dict[str, Any]:
@@ -314,6 +340,21 @@ class MotionProcessingService:
         age = data["last_detector_age_seconds"]
         data["last_detector_age_seconds"] = None if age is None else round(float(age), 2)
         data["alive"] = bool(data["thread_alive"] and (age is None or age <= self.config.health.detector_stale_seconds))
+        return data
+
+    def _event_storage_status(self) -> dict[str, Any]:
+        manager = self._event_storage
+        recorder = self._recorder
+        data: dict[str, Any] = {}
+        if manager is not None:
+            data.update(asdict(manager.status()))
+        writer_statuses = None if recorder is None else getattr(recorder, "active_writer_statuses", None)
+        if callable(writer_statuses):
+            data["active_writers"] = list(writer_statuses())
+        else:
+            data["active_writers"] = []
+        data["runtime_last_error"] = self._event_storage_last_error
+        data["submission_rejections"] = self._event_storage_submission_rejections
         return data
 
     def recent_events(self) -> list[dict[str, Any]]:
@@ -359,6 +400,37 @@ class MotionProcessingService:
             detections=tuple(AutoFireDetection(item.label, item.confidence) for item in detections),
             error=error,
         )
+
+    def _handle_classifier_evidence_result(
+        self,
+        task: ClassifierTask,
+        status: str,
+        _record: dict[str, Any] | None,
+        error: str | None,
+    ) -> None:
+        """Release retention ownership only after evidence persistence terminates."""
+
+        if task.context != "completed_event":
+            return
+        manager = self._event_storage
+        with self._condition:
+            lease_id = self._classifier_storage_leases.pop(task.event_id, None)
+        if lease_id is not None and manager is not None:
+            manager.release_lease(lease_id)
+        if status != "persisted":
+            LOGGER.error(
+                "Classifier evidence did not persist for completed event %s: %s",
+                task.event_id,
+                error or status,
+                extra={
+                    "structured_data": {
+                        "event": "classifier_evidence_persistence_failed",
+                        "event_id": task.event_id,
+                        "status": status,
+                        "error": error,
+                    }
+                },
+            )
 
     def mjpeg_frames(self):  # type: ignore[no-untyped-def]
         return self.camera.mjpeg_frames(
@@ -418,6 +490,12 @@ class MotionProcessingService:
             video_writer_factory=self._video_writer_factory,
             image_writer=self._image_writer,
         )
+        self._event_storage = EventStorageManager(
+            self._recorder,
+            self.config.camera.output_directory / "events",
+            self.config.retention,
+        )
+        self._event_storage.start()
         self._session.save()
 
     def _run(self) -> None:
@@ -432,33 +510,43 @@ class MotionProcessingService:
                 remaining = next_frame_at - monotonic()
                 if remaining > 0 and self._stop_event.wait(remaining):
                     break
+                loop_started = monotonic()
+                if self._last_motion_loop_started is not None:
+                    self._motion_loop_start_interval.add(
+                        loop_started - self._last_motion_loop_started
+                    )
+                self._last_motion_loop_started = loop_started
                 try:
-                    packet = self.camera.wait_for_frame(camera_sequence, copy=False)
-                except Exception as exc:
-                    consecutive_failures += 1
-                    self._record_error("Shared frame wait failed", exc)
-                    self._stop_event.wait(self._failure_backoff_seconds(consecutive_failures))
-                    continue
-                self._sync_camera_failures()
-                if packet is None:
-                    continue
-                camera_sequence = packet.sequence
-                next_frame_at = monotonic() + frame_interval
-                try:
-                    self._process_packet(packet)
-                    self._motion_cpu.update()
-                    if consecutive_failures:
-                        self._flush_suppressed_errors("Motion processing recovered")
-                    consecutive_failures = 0
-                except Exception as exc:
-                    consecutive_failures += 1
-                    self._record_error("Motion frame processing failed", exc)
-                    if self._display_requested():
-                        try:
-                            self.camera.publish_annotated(packet.sequence, packet.frame, copy=False)
-                        except Exception:
-                            LOGGER.exception("Could not publish raw fallback after motion failure")
-                    self._stop_event.wait(self._failure_backoff_seconds(consecutive_failures))
+                    self._poll_event_storage()
+                    try:
+                        packet = self.camera.wait_for_frame(camera_sequence, copy=False)
+                    except Exception as exc:
+                        consecutive_failures += 1
+                        self._record_error("Shared frame wait failed", exc)
+                        self._stop_event.wait(self._failure_backoff_seconds(consecutive_failures))
+                        continue
+                    self._sync_camera_failures()
+                    if packet is None:
+                        continue
+                    camera_sequence = packet.sequence
+                    next_frame_at = monotonic() + frame_interval
+                    try:
+                        self._process_packet(packet)
+                        self._motion_cpu.update()
+                        if consecutive_failures:
+                            self._flush_suppressed_errors("Motion processing recovered")
+                        consecutive_failures = 0
+                    except Exception as exc:
+                        consecutive_failures += 1
+                        self._record_error("Motion frame processing failed", exc)
+                        if self._display_requested():
+                            try:
+                                self.camera.publish_annotated(packet.sequence, packet.frame, copy=False)
+                            except Exception:
+                                LOGGER.exception("Could not publish raw fallback after motion failure")
+                        self._stop_event.wait(self._failure_backoff_seconds(consecutive_failures))
+                finally:
+                    self._motion_loop_duration.add(monotonic() - loop_started)
             clean = True
         except Exception as exc:
             self._record_error("Motion processor thread failed", exc)
@@ -555,11 +643,8 @@ class MotionProcessingService:
             self.classifier.set_paused(True)
             self._prebuffer.clear()
             self._live_group_holds.clear()
-            completed: list[dict[str, Any]] = []
             if self._recorder is not None:
-                completed = self._recorder.finish_all(now=now, notes="night vision pause")
-            for record in completed:
-                self._record_completed_event(record)
+                self._request_all_event_finalizations(now=now, notes="night vision pause")
             self._classifier_selectors.clear()
             self._classifier_clip_offsets.clear()
             with self._condition:
@@ -771,18 +856,116 @@ class MotionProcessingService:
                 if selector is not None:
                     self._consider_classifier_frame(selector, None, packet.frame)
             if self._recorder.should_finish(event, now):
-                self._record_completed_event(self._recorder.finish(track_id, now=now))
-                with self._condition:
-                    self._live_auto_targets.pop((event.event_id, track_id), None)
-                    self._coasting_auto_targets.pop((event.event_id, track_id), None)
-                    self._expired_auto_targets.pop((event.event_id, track_id), None)
-                self.auto_fire.notify_target_state_changed()
-                active = {item.directory for item in self._recorder.active.values()}
-                actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention, active_directories=active)
-                if self._session is not None:
-                    self._session.add_retention_actions(actions)
+                if self._request_event_finalization(track_id, now=now):
+                    with self._condition:
+                        self._live_auto_targets.pop((event.event_id, track_id), None)
+                        self._coasting_auto_targets.pop((event.event_id, track_id), None)
+                        self._expired_auto_targets.pop((event.event_id, track_id), None)
+                    self.auto_fire.notify_target_state_changed()
         with self._condition:
             self._active_events = len(self._recorder.active)
+
+    def _request_event_finalization(
+        self,
+        track_id: int,
+        *,
+        now: float,
+        notes: str = "",
+    ) -> bool:
+        recorder = self._recorder
+        if recorder is None:
+            return False
+        manager = self._event_storage
+        if manager is None:
+            # Unit-level injected recorders retain their historical synchronous
+            # contract. Production setup always constructs the storage manager.
+            self._record_completed_event(recorder.finish(track_id, now=now, notes=notes))
+            return True
+        submission = manager.request_finalize(track_id, now=now, notes=notes)
+        if submission.accepted:
+            return True
+        self._event_storage_submission_rejections += 1
+        self._note_event_storage_failure(
+            f"Event finalization submission rejected for track {track_id}: {submission.reason}"
+        )
+        return False
+
+    def _request_all_event_finalizations(self, *, now: float, notes: str) -> bool:
+        recorder = self._recorder
+        if recorder is None:
+            return True
+        if self._event_storage is None:
+            for record in recorder.finish_all(now=now, notes=notes):
+                self._record_completed_event(record)
+            return True
+        all_accepted = True
+        for track_id in tuple(recorder.active):
+            if self._request_event_finalization(track_id, now=now, notes=notes):
+                continue
+            all_accepted = False
+            abandon = getattr(recorder, "abandon", None)
+            if callable(abandon):
+                try:
+                    abandon(
+                        track_id,
+                        reason=f"finalization unavailable during {notes}",
+                    )
+                except KeyError:
+                    pass
+        return all_accepted
+
+    def _poll_event_storage(self) -> None:
+        manager = self._event_storage
+        if manager is None:
+            return
+        request_retention = False
+        for result in manager.poll_results(
+            maximum=2,
+            claim_finalize_directories=True,
+        ):
+            if result.kind == "finalize":
+                request_retention = True
+                if result.record is not None:
+                    self._record_completed_event(
+                        result.record,
+                        storage_lease_id=result.lease_id,
+                    )
+                elif result.event_id:
+                    self._classifier_selectors.pop(result.event_id, None)
+                    self._classifier_clip_offsets.pop(result.event_id, None)
+                    if result.lease_id is not None:
+                        manager.release_lease(result.lease_id)
+                if not result.success:
+                    self._note_event_storage_failure(
+                        f"Event {result.event_id or 'unknown'} evidence finalization failed: "
+                        f"{result.error or 'unknown error'}"
+                    )
+            elif result.success:
+                if self._session is not None:
+                    self._session.add_retention_actions(list(result.retention_actions))
+            else:
+                self._note_event_storage_failure(
+                    f"Event retention failed: {result.error or 'unknown error'}"
+                )
+        if request_retention:
+            submission = manager.request_retention()
+            if not submission.accepted and submission.reason != "manager_not_running":
+                self._event_storage_submission_rejections += 1
+                self._note_event_storage_failure(
+                    f"Event retention submission rejected: {submission.reason}"
+                )
+
+    def _note_event_storage_failure(self, detail: str) -> None:
+        repeated = detail == self._event_storage_last_error
+        self._event_storage_last_error = detail
+        if repeated:
+            return
+        if self._session is not None:
+            self._session.add_exception(detail)
+        LOGGER.error(
+            detail,
+            extra={"structured_data": {"event": "event_storage_failure", "error": detail}},
+        )
 
     def _update_live_auto_target(
         self,
@@ -1123,12 +1306,17 @@ class MotionProcessingService:
             None if motion_area is None else float(motion_area),
         )
 
-    def _submit_completed_event(self, record: dict[str, Any]) -> None:
+    def _submit_completed_event(
+        self,
+        record: dict[str, Any],
+        *,
+        storage_lease_id: str | None = None,
+    ) -> bool:
         event_id = str(record.get("event_id", ""))
         selector = self._classifier_selectors.pop(event_id, None)
         clip_offset = self._classifier_clip_offsets.pop(event_id, 0)
         if selector is None or self._night_mode_paused:
-            return
+            return False
         clip_path = Path(str(record.get("clip_path", "")))
         selected = selector.select(
             lambda frame_number: self._load_event_clip_frame(clip_path, clip_offset + frame_number - 1)
@@ -1139,7 +1327,7 @@ class MotionProcessingService:
                 event_id,
                 extra={"structured_data": {"event": "classifier_frame_unavailable", "event_id": event_id}},
             )
-            return
+            return False
         if selected.method != "best":
             LOGGER.warning(
                 "Classifier frame fallback selected: event_id=%s frame=%d method=%s",
@@ -1157,16 +1345,53 @@ class MotionProcessingService:
                 },
             )
         event_directory = Path(str(record.get("snapshot_path", ""))).parent
-        self.classifier.submit(
-            event_id,
-            event_directory,
-            selected.frame_number,
-            selected.frame,
-            selected.bounding_box,
-            selection_method=selected.method,
-            selected_motion_bounding_box_area=selected.bounding_box_area,
-            total_event_frames_considered=selected.total_frames_considered,
-        )
+        manager = self._event_storage
+        lease_id = storage_lease_id
+        if lease_id is None and manager is not None:
+            lease_id = manager.acquire_lease(event_directory)
+        if lease_id is not None:
+            with self._condition:
+                prior_lease_id = self._classifier_storage_leases.get(event_id)
+                self._classifier_storage_leases[event_id] = lease_id
+            if (
+                prior_lease_id is not None
+                and prior_lease_id != lease_id
+                and manager is not None
+            ):
+                manager.release_lease(prior_lease_id)
+        try:
+            accepted = self.classifier.submit(
+                event_id,
+                event_directory,
+                selected.frame_number,
+                selected.frame,
+                selected.bounding_box,
+                selection_method=selected.method,
+                selected_motion_bounding_box_area=selected.bounding_box_area,
+                total_event_frames_considered=selected.total_frames_considered,
+            )
+        except Exception:
+            self._release_classifier_storage_lease(event_id, lease_id)
+            raise
+        if not accepted:
+            self._release_classifier_storage_lease(event_id, lease_id)
+        return bool(accepted)
+
+    def _release_classifier_storage_lease(
+        self,
+        event_id: str,
+        expected_lease_id: str | None,
+    ) -> None:
+        if expected_lease_id is None:
+            return
+        with self._condition:
+            current = self._classifier_storage_leases.get(event_id)
+            if current != expected_lease_id:
+                return
+            lease_id = self._classifier_storage_leases.pop(event_id)
+        manager = self._event_storage
+        if manager is not None:
+            manager.release_lease(lease_id)
 
     @staticmethod
     def _load_event_clip_frame(clip_path: Path, zero_based_frame_number: int) -> np.ndarray | None:
@@ -1182,35 +1407,50 @@ class MotionProcessingService:
         finally:
             capture.release()
 
-    def _record_completed_event(self, record: dict[str, Any]) -> None:
-        self._submit_completed_event(record)
-        snapshot_path = record.get("snapshot_path")
-        event_directory = (
-            Path(snapshot_path).parent
-            if isinstance(snapshot_path, str) and snapshot_path
-            else None
-        )
-        classification = (
-            None
-            if event_directory is None
-            else self.classifier_store.reconcile_completed_event(event_directory)
-        )
-        if classification is not None and event_directory is not None:
-            record = {
-                **record,
-                "classification_path": str(event_directory / "classification.json"),
-                "classifier_input_path": classification.get("input_image_path"),
-                "original_frame_path": classification.get("original_frame_path"),
-                "predicted_class": classification.get("top_label"),
-                "prediction_confidence": classification.get("top_confidence"),
-                "classification_status": classification.get("classification_status"),
-                "classification_error": classification.get("error"),
-            }
-        with self._condition:
-            self._recent_events.append(record)
-            self._last_event_summary = dict(record)
-            self._last_snapshot = record.get("end_timestamp")
-            self._snapshots_saved += 1
+    def _record_completed_event(
+        self,
+        record: dict[str, Any],
+        *,
+        storage_lease_id: str | None = None,
+    ) -> None:
+        classifier_owns_lease = False
+        try:
+            classifier_owns_lease = self._submit_completed_event(
+                record,
+                storage_lease_id=storage_lease_id,
+            )
+            snapshot_path = record.get("snapshot_path")
+            event_directory = (
+                Path(snapshot_path).parent
+                if isinstance(snapshot_path, str) and snapshot_path
+                else None
+            )
+            classification = (
+                None
+                if event_directory is None
+                else self.classifier_store.reconcile_completed_event(event_directory)
+            )
+            if classification is not None and event_directory is not None:
+                record = {
+                    **record,
+                    "classification_path": str(event_directory / "classification.json"),
+                    "classifier_input_path": classification.get("input_image_path"),
+                    "original_frame_path": classification.get("original_frame_path"),
+                    "predicted_class": classification.get("top_label"),
+                    "prediction_confidence": classification.get("top_confidence"),
+                    "classification_status": classification.get("classification_status"),
+                    "classification_error": classification.get("error"),
+                }
+            with self._condition:
+                self._recent_events.append(record)
+                self._last_event_summary = dict(record)
+                self._last_snapshot = record.get("end_timestamp")
+                self._snapshots_saved += 1
+        finally:
+            if storage_lease_id is not None and not classifier_owns_lease:
+                manager = self._event_storage
+                if manager is not None:
+                    manager.release_lease(storage_lease_id)
 
     def _sync_camera_failures(self) -> None:
         status = self.camera.status()
@@ -1293,20 +1533,47 @@ class MotionProcessingService:
                 return
             self._finalized = True
         now = monotonic()
-        if self._recorder is not None:
-            for record in self._recorder.finish_all(now=now):
-                self._record_completed_event(record)
+        manager = self._event_storage
+        if not self._request_all_event_finalizations(now=now, notes="orderly shutdown"):
+            clean = False
+        if manager is not None:
+            retention_submission = manager.request_retention()
+            if not retention_submission.accepted:
+                clean = False
+                self._event_storage_submission_rejections += 1
+                self._note_event_storage_failure(
+                    f"Shutdown retention submission rejected: {retention_submission.reason}"
+                )
         with self._condition:
             self._active_events = 0
             self._live_auto_targets.clear()
             self._coasting_auto_targets.clear()
             self._expired_auto_targets.clear()
         self.auto_fire.notify_target_state_changed()
-        actions = enforce_retention(self.config.camera.output_directory / "events", self.config.retention)
+        if manager is not None:
+            storage_status = manager.stop()
+            self._poll_event_storage()
+            timed_out = storage_status.thread_alive or bool(storage_status.pending_finalizations)
+            storage_failed = bool(
+                storage_status.failed_finalizations
+                or storage_status.failed_retention_runs
+                or storage_status.completion_results_dropped
+            )
+            if timed_out or storage_failed:
+                clean = False
+                if timed_out:
+                    manager.request_stop_pending_writers()
+                    self._note_event_storage_failure(
+                        "Event storage did not finish before the bounded shutdown deadline; "
+                        "incomplete evidence was preserved"
+                    )
+                else:
+                    self._note_event_storage_failure(
+                        "Event storage completed shutdown work with recorded evidence or retention failures"
+                    )
         self._flush_suppressed_errors("Motion processor stopped", save_session=False)
         if self._session is not None:
             self._sync_camera_failures()
-            self._session.add_retention_actions(actions)
             if self._session.data.get("camera_open_result") == "not_attempted":
                 self._session.data["camera_open_result"] = "failed"
             if self.config.reporting.rebuild_on_clean_shutdown and clean:

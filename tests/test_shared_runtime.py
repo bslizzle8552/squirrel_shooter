@@ -25,6 +25,7 @@ from squirrel_shooter.app import (
 )
 from squirrel_shooter.camera_service import CameraService, FramePacket
 from squirrel_shooter.config import CameraConfig, SharedCameraConfig, load_config
+from squirrel_shooter.event_storage import EventStorageManager, EventStorageResult
 from squirrel_shooter.motion_runtime import MotionProcessingService
 from squirrel_shooter.web_dashboard import create_app
 import squirrel_shooter.motion_runtime as motion_runtime_module
@@ -370,7 +371,12 @@ def test_motion_processing_samples_fast_camera_at_configured_rate(tmp_path: Path
         def status(self):
             return SimpleNamespace(read_failures=0)
 
-    motion = MotionProcessingService(FastCamera(), config)  # type: ignore[arg-type]
+    classifier = SimpleNamespace(set_paused=lambda _paused: None)
+    motion = MotionProcessingService(  # type: ignore[arg-type]
+        FastCamera(),
+        config,
+        classifier_service=classifier,
+    )
     processed: list[float] = []
     motion._process_packet = lambda _packet: processed.append(time.monotonic())  # type: ignore[method-assign]
     motion._finalize = lambda *, clean: None  # type: ignore[method-assign]
@@ -384,6 +390,208 @@ def test_motion_processing_samples_fast_camera_at_configured_rate(tmp_path: Path
     assert 3 <= len(processed) <= 5
     assert all(later - earlier >= 0.08 for earlier, later in zip(processed, processed[1:]))
     assert motion.camera.copy_requests and not any(motion.camera.copy_requests)  # type: ignore[attr-defined]
+    status = motion.status()
+    assert status.motion_loop_duration_timing["total_count"] == len(processed)
+    assert status.motion_loop_start_interval_timing["total_count"] == len(processed) - 1
+    assert status.motion_loop_start_interval_timing["p95_ms"] >= 80.0
+
+
+def test_motion_finalization_submission_does_not_wait_for_slow_storage(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+    finalizer_started = threading.Event()
+    release_finalizer = threading.Event()
+    event_directory = tmp_path / "captures" / "events" / "slow-finalizer"
+    event_directory.mkdir(parents=True)
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.active = {
+                7: SimpleNamespace(
+                    event_id="slow-finalizer",
+                    track_id=7,
+                    directory=event_directory,
+                    writer=SimpleNamespace(request_stop=lambda: None),
+                )
+            }
+
+        def detach_for_finalization(self, track_id: int) -> object:
+            return self.active.pop(track_id)
+
+        def restore_active(self, event: object) -> None:
+            self.active[event.track_id] = event  # type: ignore[attr-defined]
+
+        def active_directories(self) -> set[Path]:
+            return {item.directory.resolve() for item in self.active.values()}
+
+        def finalize_detached(self, event: object, *, now: float, notes: str) -> dict[str, object]:
+            del now, notes
+            finalizer_started.set()
+            release_finalizer.wait(timeout=2.0)
+            return {
+                "event_id": event.event_id,  # type: ignore[attr-defined]
+                "status": "complete",
+                "recording_status": "success",
+                "snapshot_path": str(event.directory / "snapshot.jpg"),  # type: ignore[attr-defined]
+                "end_timestamp": "now",
+            }
+
+    recorder = Recorder()
+    manager = EventStorageManager(
+        recorder,  # type: ignore[arg-type]
+        tmp_path / "captures" / "events",
+        config.retention,
+    )
+    manager.start()
+    classifier = SimpleNamespace(set_paused=lambda _paused: None)
+    motion = MotionProcessingService(  # type: ignore[arg-type]
+        SimpleNamespace(),
+        config,
+        classifier_service=classifier,
+    )
+    motion._recorder = recorder  # type: ignore[assignment]
+    motion._event_storage = manager
+
+    started = time.monotonic()
+    assert motion._request_event_finalization(7, now=1.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert finalizer_started.wait(timeout=0.5)
+    assert manager.pending_directories() == {event_directory.resolve()}
+    release_finalizer.set()
+    wait_until(lambda: manager.status().completed_finalizations == 1)
+    motion._poll_event_storage()
+
+    assert motion.recent_events()[0]["event_id"] == "slow-finalizer"
+    assert manager.status().leased_directories == 0
+    wait_until(lambda: manager.status().completed_retention_runs == 1)
+    assert manager.stop(timeout=1.0).thread_alive is False
+
+
+def test_motion_holds_claimed_storage_lease_until_classifier_evidence_completion(
+    tmp_path: Path,
+) -> None:
+    config = runtime_config(tmp_path)
+    event_directory = tmp_path / "captures" / "events" / "leased-event"
+    event_directory.mkdir(parents=True)
+    record = {
+        "event_id": "leased-event",
+        "status": "complete",
+        "recording_status": "success",
+        "snapshot_path": str(event_directory / "snapshot.jpg"),
+        "clip_path": str(event_directory / "clip.avi"),
+        "end_timestamp": "now",
+    }
+
+    class Classifier:
+        def __init__(self) -> None:
+            self.submissions: list[tuple[object, ...]] = []
+            self.accepted = True
+
+        def set_paused(self, _paused: bool) -> None:
+            return
+
+        def submit(self, *args: object, **_kwargs: object) -> bool:
+            self.submissions.append(args)
+            return self.accepted
+
+    class Storage:
+        def __init__(self) -> None:
+            self.results = [
+                EventStorageResult(
+                    kind="finalize",
+                    success=True,
+                    event_id="leased-event",
+                    directory=event_directory,
+                    record=record,
+                    lease_id="lease-one",
+                )
+            ]
+            self.released: list[str] = []
+
+        def poll_results(
+            self,
+            maximum: int,
+            *,
+            claim_finalize_directories: bool,
+        ) -> list[EventStorageResult]:
+            assert maximum == 2
+            assert claim_finalize_directories is True
+            results, self.results = self.results, []
+            return results
+
+        def request_retention(self) -> object:
+            return SimpleNamespace(accepted=True, reason="queued")
+
+        def release_lease(self, lease_id: str) -> bool:
+            self.released.append(lease_id)
+            return True
+
+    class Selector:
+        def select(self, _loader: object) -> object:
+            return SimpleNamespace(
+                frame_number=3,
+                frame=np.zeros((20, 30, 3), dtype=np.uint8),
+                bounding_box=(2, 3, 10, 8),
+                method="best",
+                bounding_box_area=80,
+                total_frames_considered=5,
+            )
+
+    classifier = Classifier()
+    storage = Storage()
+    motion = MotionProcessingService(  # type: ignore[arg-type]
+        SimpleNamespace(),
+        config,
+        classifier_service=classifier,  # type: ignore[arg-type]
+    )
+    motion._event_storage = storage  # type: ignore[assignment]
+    motion._classifier_selectors["leased-event"] = Selector()  # type: ignore[assignment]
+
+    motion._poll_event_storage()
+
+    assert len(classifier.submissions) == 1
+    assert storage.released == []
+    assert motion._classifier_storage_leases == {"leased-event": "lease-one"}
+    task = SimpleNamespace(context="completed_event", event_id="leased-event")
+    motion._handle_classifier_result(task, [], None, {})  # type: ignore[arg-type]
+    assert storage.released == []
+
+    motion._handle_classifier_evidence_result(  # type: ignore[arg-type]
+        task,
+        "persisted",
+        {"classification_status": "review"},
+        None,
+    )
+
+    assert storage.released == ["lease-one"]
+    assert motion._classifier_storage_leases == {}
+
+    rejected_directory = tmp_path / "captures" / "events" / "rejected-event"
+    rejected_directory.mkdir(parents=True)
+    rejected_record = {
+        **record,
+        "event_id": "rejected-event",
+        "snapshot_path": str(rejected_directory / "snapshot.jpg"),
+        "clip_path": str(rejected_directory / "clip.avi"),
+    }
+    storage.results = [
+        EventStorageResult(
+            kind="finalize",
+            success=True,
+            event_id="rejected-event",
+            directory=rejected_directory,
+            record=rejected_record,
+            lease_id="lease-two",
+        )
+    ]
+    classifier.accepted = False
+    motion._classifier_selectors["rejected-event"] = Selector()  # type: ignore[assignment]
+
+    motion._poll_event_storage()
+
+    assert "lease-two" in storage.released
+    assert "rejected-event" not in motion._classifier_storage_leases
 
 
 def test_motion_failure_backoff_is_bounded_and_exponential() -> None:
