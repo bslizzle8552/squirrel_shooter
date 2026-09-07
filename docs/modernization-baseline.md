@@ -92,3 +92,11 @@ This is ready for the separately authorized Phase 2 recording work in this
 worktree. It is not a deployment or physical validation result. Continue to
 preserve current hardware values and the conservative pre-actuation ledger
 while designing recording changes.
+
+## Phase 2 continuation
+
+The separately authorized recording implementation is described in
+[Clean recording Phase 2](clean-recording-phase2.md). It adds the shared-camera
+streaming manual/automatic session API, independent dashboard RECORD/STOP,
+media provenance exclusions and an explicit legacy FIRE compatibility adapter.
+The Phase 0/1 control contracts and operational values above remain in force.
