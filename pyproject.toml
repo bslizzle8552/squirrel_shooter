@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]
+detector = ["ncnn==1.0.20260526"]
 servo = [
     "adafruit-circuitpython-servokit",
     "adafruit-circuitpython-pca9685",

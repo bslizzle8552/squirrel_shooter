@@ -14,6 +14,7 @@ from .classifier_labels import VOC_LABELS
 from .manual_control import ManualControlConfig
 from .manual_fire_recording import ManualFireRecordingConfig
 from .recording import RecordingConfig
+from .detector import DetectorConfig
 from .pan_tilt import PanTiltConfig
 from .valve import ValveConfig
 
@@ -288,6 +289,7 @@ class AppConfig:
     # Exact bytes parsed by load_config, retained through dataclass overrides.
     source_sha256: str | None = None
     recording: RecordingConfig = RecordingConfig()
+    detector: DetectorConfig = DetectorConfig()
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -688,6 +690,13 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     if not isinstance(raw, dict):
         raise ConfigError("Configuration must be a YAML mapping")
     try:
+        detector_raw = raw.get("detector", {})
+        if not isinstance(detector_raw, dict):
+            raise ValueError("detector must be a mapping")
+        detector_config = DetectorConfig(**detector_raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Invalid detector configuration: {exc}") from exc
+    try:
         recording_raw = raw.get("recording", {})
         if not isinstance(recording_raw, dict):
             raise ValueError("recording must be a mapping")
@@ -1053,4 +1062,5 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         source_path=config_path.resolve(),
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
         recording=recording_config,
+        detector=detector_config,
     )

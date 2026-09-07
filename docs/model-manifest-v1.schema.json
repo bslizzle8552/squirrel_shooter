@@ -1,0 +1,217 @@
+{
+  "title": "Squirrel collector NCNN manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "classes",
+    "class_count",
+    "input",
+    "output",
+    "runtime",
+    "export_status",
+    "equivalence_status",
+    "intended_role",
+    "ready",
+    "model_id",
+    "model_version",
+    "source_training_run",
+    "exported_at_utc",
+    "source_checkpoint_sha256",
+    "equivalence_report_sha256",
+    "export_tools",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "classes": {
+      "const": [
+        "squirrel"
+      ]
+    },
+    "class_count": {
+      "const": 1
+    },
+    "input": {
+      "const": {
+        "width": 416,
+        "height": 416,
+        "color_order": "BGR",
+        "resize": "aspect_ratio_min_floor_linear",
+        "letterbox": "top_left",
+        "fill": 114,
+        "layout": "CHW",
+        "dtype": "float32",
+        "scale": 1.0,
+        "mean": [
+          0,
+          0,
+          0
+        ],
+        "std": [
+          1,
+          1,
+          1
+        ],
+        "name": "in0"
+      }
+    },
+    "output": {
+      "const": {
+        "name": "out0",
+        "shape": [
+          3549,
+          6
+        ],
+        "decoded": false,
+        "fields": [
+          "grid_x",
+          "grid_y",
+          "log_w",
+          "log_h",
+          "objectness",
+          "class_score"
+        ],
+        "strides": [
+          8,
+          16,
+          32
+        ],
+        "confidence": "objectness_times_class",
+        "nms": "class_agnostic_greedy",
+        "nms_iou": 0.65,
+        "box_coordinates": "native_xyxy_clipped"
+      }
+    },
+    "runtime": {
+      "const": {
+        "backend": "ncnn",
+        "version": "1.0.20260526",
+        "precision": "fp32",
+        "device": "cpu"
+      }
+    },
+    "export_status": {
+      "const": "PASS"
+    },
+    "equivalence_status": {
+      "const": "PASS"
+    },
+    "intended_role": {
+      "const": "control_incapable_collector"
+    },
+    "ready": {
+      "const": true
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_training_run": {
+      "type": "string",
+      "minLength": 1
+    },
+    "exported_at_utc": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_checkpoint_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "equivalence_report_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "export_tools": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "param",
+        "bin",
+        "equivalence"
+      ],
+      "properties": {
+        "param": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file",
+            "bytes",
+            "sha256"
+          ],
+          "properties": {
+            "file": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "bin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file",
+            "bytes",
+            "sha256"
+          ],
+          "properties": {
+            "file": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "equivalence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file",
+            "bytes",
+            "sha256"
+          ],
+          "properties": {
+            "file": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,3 +1,16 @@
+# Collector-only detector. The diagnostic floor is not a firing threshold.
+detector:
+  enabled: false
+  backend: ncnn
+  manifest_path: ""
+  manifest_sha256: ""
+  target_hz: 2.0
+  maximum_source_age_seconds: 0.75
+  maximum_result_age_seconds: 1.5
+  diagnostic_confidence_floor: 0.01
+  num_threads: 2
+  shutdown_timeout_seconds: 2.0
+
 # Conservative starting values for a fixed 1280x720 garden camera. Fifteen FPS
 # gives the 12 FPS evidence sampler headroom without asking the Pi to capture
 # twice as many frames as any consumer uses.
