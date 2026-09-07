@@ -25,7 +25,8 @@ import numpy as np
 from .classifier_labels import VOC_LABELS
 from .config import AppConfig, ClassifierConfig
 from .performance import TimingDistribution
-from .safety import SceneDetection, SceneFramePacket, ScenePersonSafetyResult
+from .legacy_mobilenet_policy import ScenePersonSafetyResult
+from .safety import SceneDetection, SceneFramePacket
 from .thread_names import set_current_thread_name
 
 

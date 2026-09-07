@@ -1,4 +1,8 @@
-"""Current full-frame person-safety inference on the shared camera/classifier."""
+"""LEGACY MobileNet full-frame person checks on the shared camera/classifier.
+
+Retained for current behavior only. The future one-class squirrel architecture
+does not require this provider or a replacement human detector.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +11,12 @@ from time import monotonic
 from typing import Callable, Protocol
 
 from .camera_service import CameraService
-from .safety import SceneFramePacket, ScenePersonSafetyResult
+from .legacy_mobilenet_policy import ScenePersonSafetyResult
+from .safety import SceneFramePacket
 
 
 class SceneClassifier(Protocol):
-    """Small classifier seam used without creating another model owner."""
+    """LEGACY classifier seam used without creating another model owner."""
 
     def classify_scene(
         self,

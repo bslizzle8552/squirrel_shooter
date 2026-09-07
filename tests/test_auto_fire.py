@@ -17,10 +17,10 @@ from squirrel_shooter.auto_fire import (
     AutoFireTargetSnapshot,
 )
 from squirrel_shooter.classifier_labels import VOC_LABELS
+from squirrel_shooter.legacy_mobilenet_policy import ScenePersonSafetyResult
 from squirrel_shooter.safety import (
     FinalAimDecision,
     SceneDetection,
-    ScenePersonSafetyResult,
 )
 
 
@@ -1434,6 +1434,23 @@ def test_failed_post_actuation_attempt_is_rate_limited_and_blocks_service(tmp_pa
     assert status["rejected"] == 2
     assert status["shots_in_rolling_window"] == 1
     assert status["persistence"]["healthy"] is False  # type: ignore[index]
+
+
+def test_calibration_edit_rejection_preserves_reason_without_reserving_shot(tmp_path: Path) -> None:
+    hardware = FakeCoordinator()
+    hardware.raise_error = CoordinatorError("calibration_edit_active")
+    auto, _, _, _, _ = service(tmp_path, coordinator=hardware)
+
+    decision = classify(auto)
+
+    assert decision.accepted is False
+    assert decision.reason == "calibration_edit_active"
+    assert hardware.aim_decisions == []
+    assert auto.status()["shots_in_rolling_window"] == 0
+    assert auto.status()["persistence"]["healthy"] is True  # type: ignore[index]
+    state_path = tmp_path / "auto-fire-state.json"
+    if state_path.exists():
+        assert json.loads(state_path.read_text(encoding="utf-8"))["attempts"] == []
 
 
 def test_successful_shot_with_recording_queue_failure_is_counted_then_blocks(

@@ -7,7 +7,8 @@ import pytest
 
 from squirrel_shooter.camera_service import FramePacket
 from squirrel_shooter.current_scene_safety import ClassifierSceneSafetyProvider
-from squirrel_shooter.safety import SceneFramePacket, ScenePersonSafetyResult
+from squirrel_shooter.safety import SceneFramePacket
+from squirrel_shooter.legacy_mobilenet_policy import ScenePersonSafetyResult
 
 
 @dataclass

@@ -1,4 +1,9 @@
-"""Fail-closed, event-driven policy for computer-aided automatic engagement."""
+"""Automatic engagement orchestration with an explicit legacy semantic boundary.
+
+The active MobileNet policy remains operational until detector migration. Its
+person checks are compatibility behavior, not a requirement of future squirrel
+operation; physical freshness, geometry, coordination and reservations remain.
+"""
 
 from __future__ import annotations
 
@@ -14,19 +19,16 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
-from .classifier_labels import VOC_LABELS
-from .safety import (
-    FinalAimDecision,
-    SceneDetection,
+from . import legacy_mobilenet_policy as legacy_policy
+from .legacy_mobilenet_policy import (
+    HUMAN_DENY_LABELS,  # Compatibility export; semantics belong to the legacy policy.
     ScenePersonSafetyProvider,
     ScenePersonSafetyResult,
 )
+from .safety import FinalAimDecision
 
 
 LOGGER = logging.getLogger(__name__)
-HUMAN_DENY_LABELS = frozenset({"person"})
-_MODEL_LABELS = frozenset(VOC_LABELS[1:])
-_UNKNOWN_LABELS = frozenset({"background", "unknown", "unclassified", "no-result", "no_result"})
 _SAFE_EVENT_ID = re.compile(r"[A-Za-z0-9_-]+")
 _RATE_LIMIT_SCHEMA_VERSION = 3
 _PREVIOUS_RATE_LIMIT_SCHEMA_VERSION = 2
@@ -37,6 +39,7 @@ _KNOWN_COORDINATOR_REASONS = frozenset(
     {
         "cooldown_active",
         "coordinator_busy",
+        "calibration_edit_active",
         "calibration_frame_mismatch",
         "calibration_frame_unknown",
         "hardware_not_ready",
@@ -117,19 +120,7 @@ class AutoFireConfig:
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be true or false")
         _finite_number(self.min_confidence, "min_confidence", minimum=0.70, maximum=1.0)
-        if not isinstance(self.allowed_classes, tuple):
-            raise ValueError("allowed_classes must be a tuple")
-        if len(set(self.allowed_classes)) != len(self.allowed_classes):
-            raise ValueError("allowed_classes must not contain duplicates")
-        for label in self.allowed_classes:
-            if not isinstance(label, str) or not label or label != label.strip().lower():
-                raise ValueError("allowed_classes must contain canonical lowercase labels")
-            if label not in _MODEL_LABELS:
-                raise ValueError(f"allowed_classes contains unsupported classifier label: {label}")
-            if label in HUMAN_DENY_LABELS:
-                raise ValueError(f"allowed_classes must never contain human deny label: {label}")
-        if self.enabled and not self.allowed_classes:
-            raise ValueError("enabled auto-fire requires at least one allowed class")
+        legacy_policy.validate_allowed_classes(self.allowed_classes, enabled=self.enabled)
         _finite_number(self.cooldown_seconds, "cooldown_seconds", minimum=0.0, exclusive_minimum=True)
         _positive_integer(self.max_shots_per_event, "max_shots_per_event")
         _finite_number(
@@ -469,8 +460,8 @@ class AutoFireService:
 
         parsed, parse_reason = self._parse_detections(detections)
         top = max(parsed, key=lambda item: item.confidence) if parsed else None
-        # Supervised V1 class policy uses only the top detection for the event person latch.
-        human_detected = top is not None and top.label in HUMAN_DENY_LABELS
+        # LEGACY: retain top-only veto ordering while the MobileNet path is active.
+        human_detected = top is not None and legacy_policy.is_human_label(top.label)
         if human_detected:
             self._latch_human(event_id)
 
@@ -497,14 +488,14 @@ class AutoFireService:
             return self._reject("classification_error", **decision_fields)
         if top is None:
             return self._reject("classification_unknown", **decision_fields)
-        if top.label in _UNKNOWN_LABELS:
-            return self._reject("classification_unknown", **decision_fields)
-        if top.label not in _MODEL_LABELS:
-            return self._reject("classification_invalid", **decision_fields)
-        if top.confidence <= self.config.min_confidence:
-            return self._reject("below_confidence", **decision_fields)
-        if top.label not in self.config.allowed_classes:
-            return self._reject("class_not_allowlisted", **decision_fields)
+        semantic_reason = legacy_policy.classification_reason(
+            top.label,
+            top.confidence,
+            allowed_classes=self.config.allowed_classes,
+            minimum_confidence=self.config.min_confidence,
+        )
+        if semantic_reason is not None:
+            return self._reject(semantic_reason, **decision_fields)
 
         now_monotonic = self._read_clock(self._monotonic_clock)
         if now_monotonic is None or not self._fresh(
@@ -1112,8 +1103,9 @@ class AutoFireService:
             return None, "target_not_confirmed"
         if not target.event_eligible:
             return None, "target_not_event_eligible"
-        if target.provisional_category == "person_sized":
-            return None, "person_sized_target"
+        category_reason = legacy_policy.target_category_reason(target.provisional_category)
+        if category_reason is not None:
+            return None, category_reason
         if not self._fresh(now_monotonic, target.observed_monotonic, self.config.target_max_age_seconds):
             return None, "stale_target"
         if not self._inside_box(target.pixel_x, target.pixel_y, target.bounding_box):
@@ -1198,11 +1190,9 @@ class AutoFireService:
     ) -> str | None:
         if not isinstance(result, ScenePersonSafetyResult):
             return "scene_safety_unavailable"
-        if not self._valid_scene_result_shape(result):
+        if not legacy_policy.valid_scene_result_shape(result):
             return "scene_safety_invalid"
-        if result.status == "person" or any(
-            detection.label in HUMAN_DENY_LABELS for detection in result.detections
-        ):
+        if legacy_policy.scene_has_person(result):
             self._latch_human(event_id)
             return "human_detected"
         if (
@@ -1212,12 +1202,9 @@ class AutoFireService:
             or result.coordinate_space != "native_full_frame"
         ):
             return "scene_safety_identity_mismatch"
-        if result.status != "clear":
-            return {
-                "ambiguous": "scene_safety_ambiguous",
-                "error": "scene_safety_error",
-                "unavailable": "scene_safety_unavailable",
-            }.get(result.status, "scene_safety_unavailable")
+        semantic_reason = legacy_policy.scene_status_reason(result)
+        if semantic_reason is not None:
+            return semantic_reason
         now = self._read_clock(self._monotonic_clock)
         if (
             now is None
@@ -1252,107 +1239,6 @@ class AutoFireService:
             ):
                 return "stale_scene_safety"
         return None
-
-    @staticmethod
-    def _valid_scene_result_shape(result: ScenePersonSafetyResult) -> bool:
-        """Defend the physical boundary even against bypassed/mutated dataclasses."""
-
-        try:
-            if not isinstance(result.detections, tuple):
-                return False
-            if (
-                result.status not in {"clear", "person", "ambiguous", "error", "unavailable"}
-                or not isinstance(result.request_id, str)
-                or not result.request_id
-                or not isinstance(result.event_id, str)
-                or not result.event_id
-                or isinstance(result.track_id, bool)
-                or not isinstance(result.track_id, int)
-                or result.track_id <= 0
-                or result.coordinate_space != "native_full_frame"
-                or (
-                    result.status in {"error", "unavailable", "ambiguous"}
-                    and (not isinstance(result.error, str) or not result.error)
-                )
-                or (result.status in {"clear", "person"} and result.error is not None)
-            ):
-                return False
-            if (
-                isinstance(result.completed_monotonic, bool)
-                or not isinstance(result.completed_monotonic, (int, float))
-                or not math.isfinite(float(result.completed_monotonic))
-                or result.completed_monotonic < 0.0
-            ):
-                return False
-            source_values = (
-                result.source_sequence,
-                result.source_received_monotonic,
-                result.frame_width,
-                result.frame_height,
-            )
-            if any(value is None for value in source_values):
-                return (
-                    all(value is None for value in source_values)
-                    and result.status in {"error", "unavailable"}
-                    and not result.detections
-                )
-            if (
-                isinstance(result.source_sequence, bool)
-                or not isinstance(result.source_sequence, int)
-                or result.source_sequence < 0
-                or isinstance(result.source_received_monotonic, bool)
-                or not isinstance(result.source_received_monotonic, (int, float))
-                or not math.isfinite(float(result.source_received_monotonic))
-                or result.source_received_monotonic < 0.0
-                or result.completed_monotonic < result.source_received_monotonic
-            ):
-                return False
-            if (
-                isinstance(result.frame_width, bool)
-                or not isinstance(result.frame_width, int)
-                or result.frame_width <= 0
-                or isinstance(result.frame_height, bool)
-                or not isinstance(result.frame_height, int)
-                or result.frame_height <= 0
-            ):
-                return False
-            for detection in result.detections:
-                if not isinstance(detection, SceneDetection):
-                    return False
-                if (
-                    not isinstance(detection.label, str)
-                    or not detection.label
-                    or detection.label != detection.label.strip().lower()
-                    or isinstance(detection.confidence, bool)
-                    or not isinstance(detection.confidence, (int, float))
-                    or not math.isfinite(float(detection.confidence))
-                    or not 0.0 <= detection.confidence <= 1.0
-                    or not isinstance(detection.bounding_box, tuple)
-                    or len(detection.bounding_box) != 4
-                    or any(
-                        isinstance(value, bool) or not isinstance(value, int)
-                        for value in detection.bounding_box
-                    )
-                ):
-                    return False
-                x, y, width, height = detection.bounding_box
-                if (
-                    x < 0
-                    or y < 0
-                    or width <= 0
-                    or height <= 0
-                    or x + width > result.frame_width
-                    or y + height > result.frame_height
-                ):
-                    return False
-            has_person = any(item.label == "person" for item in result.detections)
-            if (result.status == "person") != has_person and (
-                result.status == "person" or result.status == "clear"
-            ):
-                return False
-        except (AttributeError, TypeError, ValueError):
-            return False
-        return True
 
     @staticmethod
     def _scene_evidence(result: ScenePersonSafetyResult) -> dict[str, object]:
