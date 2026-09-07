@@ -141,7 +141,7 @@ def test_evidence_store_unifies_known_unknown_and_review_inside_event_folders(tm
 
     assert reviewed["classification_status"] == "known" and reviewed["display_label"] == "Car"
     assert reviewed["human_label"] == "car" and reviewed["label_source"] == "human"
-    assert reviewed["schema_version"] == 5
+    assert reviewed["schema_version"] == 6
     assert reviewed["training_label"] == "car" and reviewed["training_dataset_status"] == "included"
     assert (config.camera.output_directory / reviewed["training_sample_relative"]).is_file()
     assert store.training_summary()["labels"] == {"car": 1}
@@ -469,9 +469,9 @@ def test_prepare_canonicalizes_legacy_negative_training_labels(tmp_path: Path) -
     assert sample["label"] == "background_or_false_positive"
     assert sample["label_migrated_from"] == "background"
     assert classification["training_label"] == "background_or_false_positive"
-    assert classification["schema_version"] == 5
+    assert classification["schema_version"] == 6
     assert event["training_label"] == "background_or_false_positive"
-    assert [row["label"] for row in manifest] == ["background_or_false_positive"]
+    assert manifest == []  # Keep legacy review; exclude unverified source pixels.
 
 
 def test_legacy_classifier_evidence_is_copied_without_deleting_originals(tmp_path: Path) -> None:

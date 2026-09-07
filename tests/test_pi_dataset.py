@@ -89,6 +89,8 @@ def snapshot_fixture(tmp_path: Path) -> Path:
             "label": "squirrel",
             "human_verified": True,
             "training_eligible": True,
+            "source_media_role": "clean_authoritative",
+            "source_pixel_provenance": "shared_camera_raw_v1",
             "labeled_at": "2026-08-16T12:05:00-04:00",
             "source": {
                 "capture_method": "automatic_motion_event",

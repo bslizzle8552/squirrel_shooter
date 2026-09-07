@@ -531,7 +531,7 @@ def test_motion_holds_claimed_storage_lease_until_classifier_evidence_completion
             return True
 
     class Selector:
-        def select(self, _loader: object) -> object:
+        def select(self) -> object:
             return SimpleNamespace(
                 frame_number=3,
                 frame=np.zeros((20, 30, 3), dtype=np.uint8),

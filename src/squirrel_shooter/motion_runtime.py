@@ -1414,13 +1414,11 @@ class MotionProcessingService:
     ) -> bool:
         event_id = str(record.get("event_id", ""))
         selector = self._classifier_selectors.pop(event_id, None)
-        clip_offset = self._classifier_clip_offsets.pop(event_id, 0)
+        self._classifier_clip_offsets.pop(event_id, None)
         if selector is None or self._night_mode_paused:
             return False
-        clip_path = Path(str(record.get("clip_path", "")))
-        selected = selector.select(
-            lambda frame_number: self._load_event_clip_frame(clip_path, clip_offset + frame_number - 1)
-        )
+        # clip.avi is an annotated review product, never a raw-source fallback.
+        selected = selector.select()
         if selected is None:
             LOGGER.warning(
                 "No readable frame was available for event classification: %s",

@@ -20,6 +20,7 @@ class SelectedEventFrame:
     method: str
     bounding_box_area: int | None
     total_frames_considered: int
+    media_role: str = "clean_authoritative"
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class BestEventFrameSelector:
                     "middle_fallback",
                     None,
                     self.total_frames_considered,
+                    "unknown_legacy",  # Untyped decoder pixels cannot attest a clean source.
                 )
         if self._first is not None:
             return self._selected(self._first, "first_fallback")

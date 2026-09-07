@@ -28,6 +28,7 @@ from .performance import TimingDistribution
 from .legacy_mobilenet_policy import ScenePersonSafetyResult
 from .safety import SceneDetection, SceneFramePacket
 from .thread_names import set_current_thread_name
+from .media_roles import verified_classifier_source
 
 
 LOGGER = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ TRAINING_LABEL_SUGGESTIONS = (
 )
 SAFE_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
 SAFE_TRAINING_LABEL = re.compile(r"[a-z][a-z0-9_]{1,39}")
-CLASSIFICATION_SCHEMA_VERSION = 5
+CLASSIFICATION_SCHEMA_VERSION = 6
 DECISION_DISPATCH_START_WAIT_SECONDS = 0.50
 TRAINING_SAMPLE_SCHEMA_VERSION = 2
 CLASSIFICATION_FILENAME = "classification.json"
@@ -104,6 +105,7 @@ class ClassifierTask:
     target_confirmed: bool = False
     target_event_eligible: bool = False
     enqueued_monotonic: float | None = None
+    source_media_role: str = "clean_authoritative"  # submit's raw-frame input contract
 
 
 @dataclass(frozen=True)
@@ -420,11 +422,17 @@ class ClassifierEvidenceStore:
             "latency_ms": None if latency_ms is None else round(latency_ms, 2),
             "input_image_path": str(image_path),
             "input_image_role": "unannotated_target_crop",
+            "source_media_role": task.source_media_role if task.selection_method != "middle_fallback" else "unknown_legacy",
+            "source_pixel_provenance": (
+                "shared_camera_raw_v1" if task.source_media_role == "clean_authoritative" and task.selection_method != "middle_fallback" else None
+            ),
             "original_frame_path": None,
             "original_frame_role": "unannotated_full_resolution_context",
             "original_frame_error": None,
             "reviewed_at": None,
         }
+        if record["source_pixel_provenance"] is None:
+            record.update(input_image_role="unknown_legacy", original_frame_role="unknown_legacy")
         with self._lock:
             # Read finalized event metadata under the same lock used by the
             # completion reconciler. Whichever side wins the race therefore
@@ -751,6 +759,10 @@ class ClassifierEvidenceStore:
                     training_dataset_status="excluded_unknown",
                     training_sample_relative=None,
                 )
+            elif not verified_classifier_source(record):
+                self._exclude_training_sample(item_id, "unverified_media_source", reviewed_at)
+                record.update(training_label=training_label, training_dataset_status="excluded_unverified_media",
+                              training_sample_relative=None)
             else:
                 sample_relative = self._write_training_sample(
                     metadata_path,
@@ -778,6 +790,8 @@ class ClassifierEvidenceStore:
         label_action: str,
         labeled_at: str,
     ) -> str:
+        if not verified_classifier_source(record):
+            raise ValueError("Unverified or annotated pixels cannot become training source media")
         source_image = metadata_path.parent / CLASSIFIER_INPUT_FILENAME
         if not source_image.is_file():
             raise OSError(f"Classifier input is missing: {source_image}")
@@ -814,6 +828,9 @@ class ClassifierEvidenceStore:
             "image_relative_path": image_relative,
             "image_sha256": image_hash,
             "image_role": "unannotated_target_crop",
+            "source_media_role": "clean_authoritative",
+            "source_pixel_provenance": "shared_camera_raw_v1",
+            "image_media_role": "derived_crop",
             "original_frame_relative_path": original_frame_relative,
             "original_frame_sha256": original_frame_hash,
             "original_frame_role": "unannotated_full_resolution_context",
@@ -905,7 +922,9 @@ class ClassifierEvidenceStore:
         for path in self.training_samples_root.glob("*/sample.json"):
             try:
                 sample = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(sample, dict) and (not eligible_only or sample.get("training_eligible") is True):
+                if isinstance(sample, dict) and (not eligible_only or (
+                    sample.get("training_eligible") is True and verified_classifier_source(sample)
+                )):
                     samples.append(sample)
             except (OSError, json.JSONDecodeError):
                 continue
@@ -1146,6 +1165,7 @@ class EventClassifier:
         target_provisional_category: str | None = None,
         target_confirmed: bool = False,
         target_event_eligible: bool = False,
+        source_media_role: str = "clean_authoritative",
     ) -> bool:
         with self._lock:
             paused = self._paused
@@ -1174,6 +1194,7 @@ class EventClassifier:
             target_provisional_category=target_provisional_category,
             target_confirmed=target_confirmed,
             target_event_eligible=target_event_eligible,
+            source_media_role=source_media_role,
             enqueued_monotonic=monotonic(),
         )
         return self._enqueue(task)
@@ -1207,6 +1228,7 @@ class EventClassifier:
             ),
             original_image=original_image,
             context="retry",
+            source_media_role="clean_authoritative" if verified_classifier_source(record) else "unknown_legacy",
             enqueued_monotonic=monotonic(),
         )
         self.store.record_action("retry_requested", record)

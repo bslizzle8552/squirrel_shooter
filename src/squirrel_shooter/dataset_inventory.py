@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
+from .media_roles import media_role, verified_classifier_source
 
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
@@ -28,6 +29,10 @@ REVIEW_FIELDS = (
     "context_image_path",
     "video_path",
     "full_frame_video_path",
+    "image_media_role",
+    "context_media_role",
+    "video_media_role",
+    "full_frame_media_role",
     "day_night_state",
     "accepted_rejected_state",
     "shot_state",
@@ -172,13 +177,17 @@ def _event_row(event_path: Path, snapshot: Path, errors: list[str]) -> tuple[dic
         "context_image_path": _relative(context, snapshot) if context else "",
         "video_path": _relative(video, snapshot) if video else "",
         "full_frame_video_path": _relative(full_video, snapshot) if full_video else "",
+        "image_media_role": str(media_role(image.name, classification)) if image else "unknown_legacy",
+        "context_media_role": str(media_role(context.name, classification)) if context else "unknown_legacy",
+        "video_media_role": str(media_role(video.name, event)) if video else "unknown_legacy",
+        "full_frame_media_role": "unknown_legacy",  # Legacy FIRE identities remain readable; no new attestation.
         "day_night_state": _day_night(event, classification),
         "accepted_rejected_state": decision_state,
         "shot_state": _shot_state(event),
         "human_label": classification.get("human_label") or event.get("human_review_label") or "",
         "human_verified": bool(classification.get("human_verified", False)),
         "training_label": classification.get("training_label") or event.get("training_label") or "",
-        "training_eligible": classification.get("training_dataset_status") == "included",
+        "training_eligible": classification.get("training_dataset_status") == "included" and verified_classifier_source(classification),
         "classification_status": classification.get("classification_status") or "",
         "capture_method": event.get("capture_method") or event.get("event_type") or "",
         "target_x": target.get("x", event.get("target_pixel_x", "")),
@@ -202,6 +211,8 @@ def _training_row(sample_path: Path, snapshot: Path, errors: list[str]) -> tuple
     top = detections[0] if detections and isinstance(detections[0], dict) else {}
     row = {
         "record_kind": "training_sample",
+        "image_media_role": str(media_role("image.jpg", sample)),
+        "context_media_role": str(media_role("original-frame.jpg", sample)),
         "timestamp": sample.get("labeled_at") or source.get("event_start_timestamp") or _timestamp(sample),
         "source_path": _relative(sample_path, snapshot),
         "event_id": sample.get("event_id") or sample.get("sample_id") or directory.name,
@@ -218,7 +229,7 @@ def _training_row(sample_path: Path, snapshot: Path, errors: list[str]) -> tuple
         "human_label": sample.get("label") if sample.get("human_verified") else "",
         "human_verified": bool(sample.get("human_verified", False)),
         "training_label": sample.get("label") or "",
-        "training_eligible": bool(sample.get("training_eligible", False)),
+        "training_eligible": bool(sample.get("training_eligible", False)) and verified_classifier_source(sample),
         "classification_status": "human_verified" if sample.get("human_verified") else "",
         "capture_method": source.get("capture_method") or "",
         "target_x": "",
@@ -263,7 +274,7 @@ def _legacy_classifier_rows(project: Path, snapshot: Path, seen: set[Path], erro
             "human_label": record.get("human_label") or "",
             "human_verified": bool(record.get("human_verified", False)),
             "training_label": record.get("training_label") or "",
-            "training_eligible": record.get("training_dataset_status") == "included",
+            "training_eligible": record.get("training_dataset_status") == "included" and verified_classifier_source(record),
             "classification_status": record.get("classification_status") or "",
             "capture_method": record.get("capture_method") or "",
             "target_x": "",
@@ -280,22 +291,36 @@ def _legacy_classifier_rows(project: Path, snapshot: Path, seen: set[Path], erro
 
 def _standalone_rows(project: Path, snapshot: Path, seen: set[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    sessions: dict[Path, dict[str, Any]] = {}
     for path in project.rglob("*"):
         if not path.is_file() or path in seen or path.suffix.lower() not in IMAGE_SUFFIXES | VIDEO_SUFFIXES:
             continue
         is_image = path.suffix.lower() in IMAGE_SUFFIXES
+        if path.parent not in sessions:
+            try:
+                manifest = json.loads((path.parent / "session.json").read_text(encoding="utf-8"))
+                sessions[path.parent] = manifest if isinstance(manifest, dict) else {}
+            except (OSError, ValueError):
+                sessions[path.parent] = {}
+        session = sessions[path.parent]
+        segments = session.get("segments")
+        segment = next((s for s in segments if isinstance(s, dict) and s.get("file") == path.name), {}) if isinstance(segments, list) else {}
+        role = str(media_role(path.name, segment))
         rows.append({
-            "record_kind": "standalone_media",
+            "record_kind": "clean_recording_segment" if segment else "standalone_media",
             "timestamp": datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds"),
             "source_path": _relative(path, snapshot),
-            "event_id": path.stem,
+            "event_id": session.get("session_id", path.stem) if segment else path.stem,
             "tracker_id": "",
             "predicted_label": "",
             "confidence": "",
             "image_path": _relative(path, snapshot) if is_image else "",
             "context_image_path": "",
             "video_path": _relative(path, snapshot) if not is_image else "",
-            "full_frame_video_path": "",
+            "full_frame_video_path": _relative(path, snapshot) if segment and not is_image else "",
+            "image_media_role": role if is_image else "unknown_legacy",
+            "video_media_role": role if not is_image else "unknown_legacy",
+            "full_frame_media_role": role if segment and not is_image else "unknown_legacy",
             "day_night_state": "unknown",
             "accepted_rejected_state": "unclassified",
             "shot_state": "unknown",
@@ -308,7 +333,9 @@ def _standalone_rows(project: Path, snapshot: Path, seen: set[Path]) -> list[dic
             "target_x": "",
             "target_y": "",
             "detections_json": "[]",
-            "notes": "No event/classifier metadata was found beside this retained media file.",
+            "notes": (f"Recording session {session.get('session_id')}; segment status {segment.get('status')}; "
+                      "role from retained finalization metadata, not re-decoded or re-hashed by inventory."
+                      if segment else "No event/classifier metadata was found beside this retained media file."),
         })
     return rows
 
@@ -358,7 +385,7 @@ def _metadata_only_row(
         "human_label": record.get("human_label") or record.get("human_review_label") or "",
         "human_verified": bool(record.get("human_verified", False)),
         "training_label": record.get("training_label") or "",
-        "training_eligible": record.get("training_dataset_status") == "included",
+        "training_eligible": record.get("training_dataset_status") == "included" and verified_classifier_source(record),
         "classification_status": record.get("classification_status") or "",
         "capture_method": record.get("capture_method") or record.get("event_type") or "",
         "target_x": target.get("x", record.get("target_pixel_x", "")),
@@ -859,6 +886,9 @@ def build_inventory(snapshot: Path) -> dict[str, Any]:
             )
         )
     rows.extend(_standalone_rows(project, snapshot, referenced))
+    for row in rows:
+        for key in ("image_media_role", "context_media_role", "video_media_role", "full_frame_media_role"):
+            row.setdefault(key, "unknown_legacy")
     _correlate_shot_events(rows)
     rows.sort(key=lambda item: (str(item.get("timestamp") or ""), str(item.get("source_path") or "")))
 
