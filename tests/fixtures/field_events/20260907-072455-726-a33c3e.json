@@ -1,0 +1,81 @@
+{
+  "fixture_schema_version": 1,
+  "evidence_kind": "sanitized retained metadata and log trace; not camera, tracker, DNN or hardware replay",
+  "provenance": {
+    "field_reference_revision": "de2aee9c9c7b485f79c4c9ce36cc0a6a1cf23c85",
+    "revision_basis": "event/classification provenance, not an attestation of the later live process",
+    "sources": [
+      {
+        "artifact": "software_forensic_2026-09-07/20260907-072455-726-a33c3e_live_event.json",
+        "sha256": "b03fc12910cb1fb7651e5ab7bfd558f1210cf7203d3445f6e5cd53e2bee91dd1",
+        "fields_used": "historical event subset and reacquisition diagnostics"
+      },
+      {
+        "artifact": "software_forensic_2026-09-07/20260907-072455-726-a33c3e_live_classification.json",
+        "sha256": "75e45f0c238fe64dc1da257e2b943f2a539f4dfbb55d7b7659a3caf131c6b7d4",
+        "fields_used": "capture identity, source time, submission/completion times, model identity and recorded latency"
+      },
+      {
+        "artifact": "harvest_20260907/raw_copies/logs/squirrel-shooter-20260829-085929.jsonl",
+        "sha256": "101b9aa72b001a6e9ca398f814bb376fbe026123407bfd377a7ac16f185126b9",
+        "lines_used": [2005, 2006, 2007, 2008],
+        "fields_used": "coasting, timeout, classification persistence and rejected decision; full-precision classifier confidence"
+      }
+    ],
+    "sanitization": "No images, calibration, model bytes, host/user paths or unrelated log records retained. SHA-256 values identify the full original artifacts, not this reduced fixture."
+  },
+  "historical_event": {
+    "schema_version": 1,
+    "status": "complete",
+    "event_id": "20260907-072455-726-a33c3e",
+    "track_id": 483,
+    "capture_method": "automatic_motion_event",
+    "start_timestamp": "2026-09-07T07:24:55.824-04:00",
+    "end_timestamp": "2026-09-07T07:25:00.294-04:00",
+    "software_version": "0.3.0",
+    "git_commit_sha": "de2aee9c9c7b485f79c4c9ce36cc0a6a1cf23c85",
+    "provisional_category": "small_animal_candidate",
+    "predicted_class": "bird",
+    "prediction_confidence": 0.9979,
+    "human_review_label": "squirrel"
+  },
+  "observed": {
+    "classification": {
+      "model": "MobileNet-SSD VOC0712 bb17b6c",
+      "source_frame_sequence": 1567823,
+      "target_observed_monotonic": 57240.03219054,
+      "submitted_at": "2026-09-07T07:24:55.838-04:00",
+      "completed_at": "2026-09-07T07:24:57.533-04:00",
+      "persisted_log_at": "2026-09-07T11:24:57.572+00:00",
+      "latency_ms": 929.03,
+      "label": "bird",
+      "confidence_from_decision_log": 0.9979224801063538
+    },
+    "coasting": {
+      "timestamp": "2026-09-07T11:24:56.094+00:00",
+      "target_last_seen_monotonic": 57240.314709352,
+      "started_monotonic": 57240.434204088,
+      "grace_seconds": 0.9,
+      "last_centroid": [26, 483]
+    },
+    "timeout": {
+      "timestamp": "2026-09-07T11:24:57.108+00:00",
+      "failed_at_monotonic": 57241.439583024,
+      "candidate_count": 0,
+      "reason": "target_reacquisition_timeout"
+    },
+    "decision": {
+      "timestamp": "2026-09-07T11:24:57.577+00:00",
+      "accepted": false,
+      "reason": "target_reacquisition_timeout"
+    }
+  },
+  "derived_replay": {
+    "monotonic_origin": 100.0,
+    "result_delivery_seconds_after_recorded_timeout": 0.25,
+    "policy_min_confidence": 0.7,
+    "policy_allowed_classes": ["dog", "cat", "bird"],
+    "method": "Translate retained monotonic source/coasting/timeout offsets to origin 100; deliver semantics 0.25 seconds after timeout. Delivery time is synthetic and deliberately keeps classification younger than the unchanged 3-second bound. It is not reconstructed original completion monotonic time. The observed UTC ordering separately establishes that actual classification completed after timeout.",
+    "coverage": "Expired target association rejects an otherwise qualifying fresh legacy result before physical coordination or a durable actuation reservation. Also exercise expiry when the provider still exposes coasting. No person-clear result is fabricated."
+  }
+}
