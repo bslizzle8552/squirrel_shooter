@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "classes": [
+    "squirrel"
+  ],
+  "class_count": 1,
+  "input": {
+    "width": 416,
+    "height": 416,
+    "color_order": "BGR",
+    "resize": "aspect_ratio_min_floor_linear",
+    "letterbox": "top_left",
+    "fill": 114,
+    "layout": "CHW",
+    "dtype": "float32",
+    "scale": 1.0,
+    "mean": [
+      0,
+      0,
+      0
+    ],
+    "std": [
+      1,
+      1,
+      1
+    ],
+    "name": "in0"
+  },
+  "output": {
+    "name": "out0",
+    "shape": [
+      3549,
+      6
+    ],
+    "decoded": false,
+    "fields": [
+      "grid_x",
+      "grid_y",
+      "log_w",
+      "log_h",
+      "objectness",
+      "class_score"
+    ],
+    "strides": [
+      8,
+      16,
+      32
+    ],
+    "confidence": "objectness_times_class",
+    "nms": "class_agnostic_greedy",
+    "nms_iou": 0.65,
+    "box_coordinates": "native_xyxy_clipped"
+  },
+  "runtime": {
+    "backend": "ncnn",
+    "version": "1.0.20260526",
+    "precision": "fp32",
+    "device": "cpu"
+  },
+  "export_status": "PASS",
+  "equivalence_status": "PASS",
+  "intended_role": "control_incapable_collector",
+  "ready": true,
+  "model_id": "model_a_yolox_nano",
+  "model_version": "v3-epoch149-fp32-416-r1",
+  "source_training_run": "model_a_v3_yolox_nano_20260907T210507Z",
+  "source_checkpoint_sha256": "5d8b78244107302881477bda95353236f29356c23a2a10f61936225c4dfc4831",
+  "exported_at_utc": "2026-09-07T22:48:36.561858+00:00",
+  "export_tools": {
+    "python": "3.12.13 (main, Aug  7 2026, 02:26:41) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26100-SP0",
+    "torch": "2.8.0+cpu",
+    "ncnn": "1.0.20260526",
+    "numpy": "2.1.2",
+    "opencv": "4.10.0",
+    "pnnx": "20260526"
+  },
+  "equivalence_report_sha256": "7c1b3108a620a5b439af8ff93b5eb4f165d2fc5fad44c0acc3e62de338362439",
+  "artifacts": {
+    "param": {
+      "file": "model.ncnn.param",
+      "bytes": 24722,
+      "sha256": "18f83f0d8450e65f3adc131d2633036cef51a3d872b99058f6e284d2bce93620"
+    },
+    "bin": {
+      "file": "model.ncnn.bin",
+      "bytes": 3557264,
+      "sha256": "78e7c91742549a04ba05e306734e0e395b386d9709b8446eb5b0ba9112f4b939"
+    },
+    "equivalence": {
+      "file": "equivalence.json",
+      "bytes": 72485,
+      "sha256": "7c1b3108a620a5b439af8ff93b5eb4f165d2fc5fad44c0acc3e62de338362439"
+    }
+  }
+}

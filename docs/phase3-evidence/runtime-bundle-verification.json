@@ -1,0 +1,144 @@
+{
+  "status": "PASS",
+  "identity": {
+    "model_id": "model_a_yolox_nano",
+    "model_version": "v3-epoch149-fp32-416-r1",
+    "checkpoint_sha256": "5d8b78244107302881477bda95353236f29356c23a2a10f61936225c4dfc4831",
+    "manifest_sha256": "85d2f64c89f3e6c0499f594390b05fe509ec9934ea1c40d19ab4a6122db46501",
+    "param_sha256": "18f83f0d8450e65f3adc131d2633036cef51a3d872b99058f6e284d2bce93620",
+    "bin_sha256": "78e7c91742549a04ba05e306734e0e395b386d9709b8446eb5b0ba9112f4b939"
+  },
+  "images": [
+    {
+      "name": "garden_guard__00d97548c5dcfd49__6134854c.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "garden_guard__015e9dbf3a5a4d3d__d062892d.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "garden_guard__0179d8ac206bc5b2__7bb6c5f3.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "garden_guard__01d66b615adb4ea9__365b979e.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "garden_guard__004558b11242a155__e19960d3.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "garden_guard__017da2f052087061__174fb32f.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "garden_guard__0292948961567df8__475de5d5.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "garden_guard__02c4d68f747c3be1__862fa9a4.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__000e97bee03b0cc2__00a94c28.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__005e7d5b78079313__61005a69.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__034fd434e239277f__4db832ad.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__03c5473434f7f340__2b74827f.jpg",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__0099244e3143e184__3a14451c.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__00e6aec19f81868a__9960ebf2.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__012dd65b67f8cb51__27e17998.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "westley__0138d0e2dd64fc92__ade36724.jpg",
+      "count": 10,
+      "source_unchanged": true
+    },
+    {
+      "name": "local_v3__76707b65c773976b__20260825-093306-971-807e27.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "local_v3__bf025ece8d7ce13f__20260827-110529-361-c73371.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "local_v3__c80e6471624326fb__20260827-110405-575-59e647.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "local_v3__dc02cedad30491a6__20260827-110543-657-12e719.jpg",
+      "count": 1,
+      "source_unchanged": true
+    },
+    {
+      "name": "synthetic_empty_wide",
+      "count": 0,
+      "source_unchanged": true
+    },
+    {
+      "name": "synthetic_empty_tall",
+      "count": 0,
+      "source_unchanged": true
+    }
+  ],
+  "adapter_status": {
+    "enabled": true,
+    "configured": true,
+    "backend": "ncnn",
+    "manifest_status": "valid",
+    "artifact_hash_status": "valid",
+    "available": true,
+    "error": null,
+    "model_id": "model_a_yolox_nano",
+    "model_version": "v3-epoch149-fp32-416-r1",
+    "model_identity": {
+      "model_id": "model_a_yolox_nano",
+      "model_version": "v3-epoch149-fp32-416-r1",
+      "checkpoint_sha256": "5d8b78244107302881477bda95353236f29356c23a2a10f61936225c4dfc4831",
+      "manifest_sha256": "85d2f64c89f3e6c0499f594390b05fe509ec9934ea1c40d19ab4a6122db46501",
+      "param_sha256": "18f83f0d8450e65f3adc131d2633036cef51a3d872b99058f6e284d2bce93620",
+      "bin_sha256": "78e7c91742549a04ba05e306734e0e395b386d9709b8446eb5b0ba9112f4b939"
+    }
+  },
+  "fresh_manifest_reopen": true,
+  "note": "Windows CPU functional validation only; no Pi performance evidence."
+}

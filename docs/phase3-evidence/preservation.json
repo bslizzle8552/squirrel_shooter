@@ -1,0 +1,11 @@
+{
+  "status": "PASS",
+  "baseline": "2cc47887cbcca472a2b5cb9942a1afad4846ed66",
+  "all_old_yaml_values_preserved": true,
+  "existing_control_source_and_tests_unchanged": true,
+  "modified_existing_files": [
+    "config/default.yaml",
+    "pyproject.toml",
+    "src/squirrel_shooter/config.py"
+  ]
+}

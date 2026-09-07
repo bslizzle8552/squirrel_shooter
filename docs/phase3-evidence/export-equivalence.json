@@ -1,0 +1,1654 @@
+{
+  "status": "PASS",
+  "checkpoint_sha256": "5d8b78244107302881477bda95353236f29356c23a2a10f61936225c4dfc4831",
+  "artifact_hashes": {
+    "param": "18f83f0d8450e65f3adc131d2633036cef51a3d872b99058f6e284d2bce93620",
+    "bin": "78e7c91742549a04ba05e306734e0e395b386d9709b8446eb5b0ba9112f4b939"
+  },
+  "tolerance": {
+    "detection_count_must_match": true,
+    "maximum_confidence_absolute_delta": 0.0005,
+    "maximum_box_coordinate_absolute_delta_original_pixels": 1.0,
+    "minimum_corresponding_box_iou": 0.995,
+    "known_low_confidence_candidate_must_remain": true
+  },
+  "summary": {
+    "images": 22,
+    "all_counts_match": true,
+    "maximum_confidence_delta": 3.8743019104003906e-07,
+    "maximum_box_delta": 0.000152587890625,
+    "minimum_iou": 0.9999937510740341,
+    "no_detection_cases": 10,
+    "low_confidence_pairs": 9
+  },
+  "images": [
+    {
+      "name": "garden_guard__00d97548c5dcfd49__6134854c.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__00d97548c5dcfd49__6134854c.jpg",
+        "original_source": "images-74-_jpg.rf.cb7fe4aa6e3b86859b6f07832f50776b.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\images-74-_jpg.rf.cb7fe4aa6e3b86859b6f07832f50776b.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:images-74-_jpg.rf.cb7fe4aa6e3b86859b6f07832f50776b.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "00d97548c5dcfd49a176549284e9726bc9ab8a1b242a0603c8b62a47a2ff6d1c",
+        "packaged_sha256": "00d97548c5dcfd49a176549284e9726bc9ab8a1b242a0603c8b62a47a2ff6d1c",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-01067",
+        "native_or_visit_group": "garden_guard:images-74-_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__00d97548c5dcfd49__6134854c.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:images-74-_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "00d97548c5dcfd49a176549284e9726bc9ab8a1b242a0603c8b62a47a2ff6d1c",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 0.00013363361358642578,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "garden_guard__015e9dbf3a5a4d3d__d062892d.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__015e9dbf3a5a4d3d__d062892d.jpg",
+        "original_source": "42_jpg.rf.0c43c577f98919b70ce4102646142987.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\42_jpg.rf.0c43c577f98919b70ce4102646142987.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:42_jpg.rf.0c43c577f98919b70ce4102646142987.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "015e9dbf3a5a4d3d2705b269aa439021141a73c3d7b195c736492c78aae1b064",
+        "packaged_sha256": "015e9dbf3a5a4d3d2705b269aa439021141a73c3d7b195c736492c78aae1b064",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-00424",
+        "native_or_visit_group": "garden_guard:42_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__015e9dbf3a5a4d3d__d062892d.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:42_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "015e9dbf3a5a4d3d2705b269aa439021141a73c3d7b195c736492c78aae1b064",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 1.4722347259521484e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "garden_guard__0179d8ac206bc5b2__7bb6c5f3.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__0179d8ac206bc5b2__7bb6c5f3.jpg",
+        "original_source": "rabbit_1-250_jpg.rf.423b10a360a00d53ebb63bcb6a76e050.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\rabbit_1-250_jpg.rf.423b10a360a00d53ebb63bcb6a76e050.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:rabbit_1-250_jpg.rf.423b10a360a00d53ebb63bcb6a76e050.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "0179d8ac206bc5b2ee5ba80f46db0a11d9491bbd25457e2f6a7276c5318abdf2",
+        "packaged_sha256": "0179d8ac206bc5b2ee5ba80f46db0a11d9491bbd25457e2f6a7276c5318abdf2",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-01509",
+        "native_or_visit_group": "garden_guard:rabbit_1-250_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__0179d8ac206bc5b2__7bb6c5f3.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:rabbit_1-250_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "0179d8ac206bc5b2ee5ba80f46db0a11d9491bbd25457e2f6a7276c5318abdf2",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 7.867813110351562e-06,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "garden_guard__01d66b615adb4ea9__365b979e.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__01d66b615adb4ea9__365b979e.jpg",
+        "original_source": "images-57-_jpg.rf.a4a48491b774b80cf8a2d72aecb18c04.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\images-57-_jpg.rf.a4a48491b774b80cf8a2d72aecb18c04.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:images-57-_jpg.rf.a4a48491b774b80cf8a2d72aecb18c04.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "01d66b615adb4ea972a91aecd5eda2621e763a6cef7b543b1c2ebfa7b6138fba",
+        "packaged_sha256": "01d66b615adb4ea972a91aecd5eda2621e763a6cef7b543b1c2ebfa7b6138fba",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-01040",
+        "native_or_visit_group": "garden_guard:images-57-_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__01d66b615adb4ea9__365b979e.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:images-57-_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "01d66b615adb4ea972a91aecd5eda2621e763a6cef7b543b1c2ebfa7b6138fba",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 1.58846378326416e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "garden_guard__004558b11242a155__e19960d3.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__004558b11242a155__e19960d3.jpg",
+        "original_source": "Barrie-Wildlife-Control-Keeping-Squirrels-Away-From-Your-Home_jpg.rf.0aa2267021ff60d0b14ad4feec0ce2e6.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\Barrie-Wildlife-Control-Keeping-Squirrels-Away-From-Your-Home_jpg.rf.0aa2267021ff60d0b14ad4feec0ce2e6.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:Barrie-Wildlife-Control-Keeping-Squirrels-Away-From-Your-Home_jpg.rf.0aa2267021ff60d0b14ad4feec0ce2e6.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "004558b11242a1552b2f68cd262286d26672ac347cc6c36dc5fe00747dbbf568",
+        "packaged_sha256": "004558b11242a1552b2f68cd262286d26672ac347cc6c36dc5fe00747dbbf568",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-00581",
+        "native_or_visit_group": "garden_guard:Barrie-Wildlife-Control-Keeping-Squirrels-Away-From-Your-Home_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__004558b11242a155__e19960d3.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:Barrie-Wildlife-Control-Keeping-Squirrels-Away-From-Your-Home_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "004558b11242a1552b2f68cd262286d26672ac347cc6c36dc5fe00747dbbf568",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.8718881607055664,
+              "bbox_xyxy": [
+                8.467782974243164,
+                191.81561279296875,
+                495.09039306640625,
+                541.2338256835938
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                8.467806816101074,
+                191.81576538085938,
+                495.09027099609375,
+                541.2337646484375
+              ],
+              "confidence": 0.8718879818916321
+            },
+            "confidence_absolute_delta": 1.7881393432617188e-07,
+            "box_coordinate_absolute_deltas": [
+              2.384185791015625e-05,
+              0.000152587890625,
+              0.0001220703125,
+              6.103515625e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.000152587890625,
+            "box_iou": 0.999999088785703,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 1.2814998626708984e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "garden_guard__017da2f052087061__174fb32f.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__017da2f052087061__174fb32f.jpg",
+        "original_source": "d38c7fb7698f5f82_jpg.rf.88bd744b61aeaa0ac2cced00a44b0fda.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\d38c7fb7698f5f82_jpg.rf.88bd744b61aeaa0ac2cced00a44b0fda.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:d38c7fb7698f5f82_jpg.rf.88bd744b61aeaa0ac2cced00a44b0fda.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "017da2f052087061b952e41b4dd9bf47babb8737a4f6d92519a184d80ea0a47e",
+        "packaged_sha256": "017da2f052087061b952e41b4dd9bf47babb8737a4f6d92519a184d80ea0a47e",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-00895",
+        "native_or_visit_group": "garden_guard:d38c7fb7698f5f82_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__017da2f052087061__174fb32f.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:d38c7fb7698f5f82_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "017da2f052087061b952e41b4dd9bf47babb8737a4f6d92519a184d80ea0a47e",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.8721557259559631,
+              "bbox_xyxy": [
+                283.4308776855469,
+                269.682861328125,
+                359.1398010253906,
+                380.1903076171875
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                283.430908203125,
+                269.6828918457031,
+                359.1397705078125,
+                380.1902770996094
+              ],
+              "confidence": 0.8721556067466736
+            },
+            "confidence_absolute_delta": 1.1920928955078125e-07,
+            "box_coordinate_absolute_deltas": [
+              3.0517578125e-05,
+              3.0517578125e-05,
+              3.0517578125e-05,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.9999986415015071,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 1.704692840576172e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "garden_guard__0292948961567df8__475de5d5.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__0292948961567df8__475de5d5.jpg",
+        "original_source": "SquirrelTest9c_jpg.rf.5ada57dee6da9e13290e73de633260a2.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\SquirrelTest9c_jpg.rf.5ada57dee6da9e13290e73de633260a2.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:SquirrelTest9c_jpg.rf.5ada57dee6da9e13290e73de633260a2.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "0292948961567df8f4c3ee8f13913b6971aa12e8baf7ec074295ba89886b0fa3",
+        "packaged_sha256": "0292948961567df8f4c3ee8f13913b6971aa12e8baf7ec074295ba89886b0fa3",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-00843",
+        "native_or_visit_group": "garden_guard:SquirrelTest9c_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__0292948961567df8__475de5d5.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:SquirrelTest9c_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "0292948961567df8f4c3ee8f13913b6971aa12e8baf7ec074295ba89886b0fa3",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.9072942733764648,
+              "bbox_xyxy": [
+                254.2872314453125,
+                234.04734802246094,
+                353.9872741699219,
+                324.6925354003906
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                254.28721618652344,
+                234.04734802246094,
+                353.98724365234375,
+                324.6925354003906
+              ],
+              "confidence": 0.9072941541671753
+            },
+            "confidence_absolute_delta": 1.1920928955078125e-07,
+            "box_coordinate_absolute_deltas": [
+              1.52587890625e-05,
+              0.0,
+              3.0517578125e-05,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.9999995408591719,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 1.1682510375976562e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "garden_guard__02c4d68f747c3be1__862fa9a4.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/garden_guard__02c4d68f747c3be1__862fa9a4.jpg",
+        "original_source": "6da63341e9b2c298_jpg.rf.5ad5d10be1e5cb3cefb677bc94aac844.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\garden_guard\\extracted\\train\\6da63341e9b2c298_jpg.rf.5ad5d10be1e5cb3cefb677bc94aac844.jpg",
+        "source_dataset": "Garden Guard v2 via Roboflow Universe",
+        "original_identifier_event": "garden_guard:train:6da63341e9b2c298_jpg.rf.5ad5d10be1e5cb3cefb677bc94aac844.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "02c4d68f747c3be1ba4af9a5e567b5701cc6ddf474531d7d76c9238ef13d2687",
+        "packaged_sha256": "02c4d68f747c3be1ba4af9a5e567b5701cc6ddf474531d7d76c9238ef13d2687",
+        "width": "640",
+        "height": "640",
+        "duplicate_group": "DG-00501",
+        "native_or_visit_group": "garden_guard:6da63341e9b2c298_jpg.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/garden_guard__02c4d68f747c3be1__862fa9a4.jpg",
+        "root_event_id": "",
+        "root_visit_group": "garden_guard:6da63341e9b2c298_jpg.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "02c4d68f747c3be1ba4af9a5e567b5701cc6ddf474531d7d76c9238ef13d2687",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.8945658206939697,
+              "bbox_xyxy": [
+                274.0628967285156,
+                209.05419921875,
+                342.0597229003906,
+                331.8795166015625
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                274.0628967285156,
+                209.05416870117188,
+                342.0597229003906,
+                331.8795471191406
+              ],
+              "confidence": 0.8945656418800354
+            },
+            "confidence_absolute_delta": 1.7881393432617188e-07,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              3.0517578125e-05,
+              0.0,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.9999995030737374,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 1.284480094909668e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__000e97bee03b0cc2__00a94c28.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__000e97bee03b0cc2__00a94c28.jpg",
+        "original_source": "img00864_jpg.rf.8f1946525849d7c507e37bbacfa26666.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\train\\img00864_jpg.rf.8f1946525849d7c507e37bbacfa26666.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:train:img00864_jpg.rf.8f1946525849d7c507e37bbacfa26666.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "000e97bee03b0cc277eb249630aa82fd0d736846372420764885a0a22388da0b",
+        "packaged_sha256": "000e97bee03b0cc277eb249630aa82fd0d736846372420764885a0a22388da0b",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-03642",
+        "native_or_visit_group": "westley:img00864_jpg.rf.8f1946525849d7c507e37bbacfa26666.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__000e97bee03b0cc2__00a94c28.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:img00864_jpg.rf.8f1946525849d7c507e37bbacfa26666.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "000e97bee03b0cc277eb249630aa82fd0d736846372420764885a0a22388da0b",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 3.49879264831543e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__005e7d5b78079313__61005a69.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__005e7d5b78079313__61005a69.jpg",
+        "original_source": "videoplayback_mp4-0004_jpg.rf.659131bdc61fef654375fd06153f88a6.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\train\\videoplayback_mp4-0004_jpg.rf.659131bdc61fef654375fd06153f88a6.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:train:videoplayback_mp4-0004_jpg.rf.659131bdc61fef654375fd06153f88a6.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "005e7d5b78079313aeb87ae0d41523c86bcf43359e685b2a37df9137103b3dbe",
+        "packaged_sha256": "005e7d5b78079313aeb87ae0d41523c86bcf43359e685b2a37df9137103b3dbe",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-03741",
+        "native_or_visit_group": "westley:videoplayback_mp4-0004_jpg.rf.659131bdc61fef654375fd06153f88a6.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__005e7d5b78079313__61005a69.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:videoplayback_mp4-0004_jpg.rf.659131bdc61fef654375fd06153f88a6.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "005e7d5b78079313aeb87ae0d41523c86bcf43359e685b2a37df9137103b3dbe",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 7.802248001098633e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__034fd434e239277f__4db832ad.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__034fd434e239277f__4db832ad.jpg",
+        "original_source": "images79_jpg.rf.e5543b8e810bcfe3adec02d4b87d017b.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\train\\images79_jpg.rf.e5543b8e810bcfe3adec02d4b87d017b.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:train:images79_jpg.rf.e5543b8e810bcfe3adec02d4b87d017b.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "034fd434e239277f0cec073f2ba88332ababc5c7218d1a927e9d48d183cff8c9",
+        "packaged_sha256": "034fd434e239277f0cec073f2ba88332ababc5c7218d1a927e9d48d183cff8c9",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-03410",
+        "native_or_visit_group": "westley:images79_jpg.rf.e5543b8e810bcfe3adec02d4b87d017b.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__034fd434e239277f__4db832ad.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:images79_jpg.rf.e5543b8e810bcfe3adec02d4b87d017b.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "034fd434e239277f0cec073f2ba88332ababc5c7218d1a927e9d48d183cff8c9",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 4.096329212188721e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__03c5473434f7f340__2b74827f.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__03c5473434f7f340__2b74827f.jpg",
+        "original_source": "img00151_jpg.rf.360814a04034eaf9d1627b227ee717b8.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\valid\\img00151_jpg.rf.360814a04034eaf9d1627b227ee717b8.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:valid:img00151_jpg.rf.360814a04034eaf9d1627b227ee717b8.jpg",
+        "original_split": "valid",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "negative",
+        "annotation_count": "0",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "03c5473434f7f340059b08bb51f0cd1ebf6dbf5673eb3e0ebdef6534fb467ddf",
+        "packaged_sha256": "03c5473434f7f340059b08bb51f0cd1ebf6dbf5673eb3e0ebdef6534fb467ddf",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-04251",
+        "native_or_visit_group": "westley:img00151_jpg.rf.360814a04034eaf9d1627b227ee717b8.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__03c5473434f7f340__2b74827f.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:img00151_jpg.rf.360814a04034eaf9d1627b227ee717b8.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "03c5473434f7f340059b08bb51f0cd1ebf6dbf5673eb3e0ebdef6534fb467ddf",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 5.97834587097168e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__0099244e3143e184__3a14451c.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__0099244e3143e184__3a14451c.jpg",
+        "original_source": "S1677615915_jpg.rf.b35f177e4bef840467e6aa55c5c9b479.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\valid\\S1677615915_jpg.rf.b35f177e4bef840467e6aa55c5c9b479.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:valid:S1677615915_jpg.rf.b35f177e4bef840467e6aa55c5c9b479.jpg",
+        "original_split": "valid",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "0099244e3143e184b43e8c053bf52603983b8cd8d4fd0dfd530dec9e3effed90",
+        "packaged_sha256": "0099244e3143e184b43e8c053bf52603983b8cd8d4fd0dfd530dec9e3effed90",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-04187",
+        "native_or_visit_group": "westley:S1677615915_jpg.rf.b35f177e4bef840467e6aa55c5c9b479.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__0099244e3143e184__3a14451c.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:S1677615915_jpg.rf.b35f177e4bef840467e6aa55c5c9b479.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "0099244e3143e184b43e8c053bf52603983b8cd8d4fd0dfd530dec9e3effed90",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.7253556251525879,
+              "bbox_xyxy": [
+                560.9767456054688,
+                229.348388671875,
+                585.289306640625,
+                247.98275756835938
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                560.9767456054688,
+                229.348388671875,
+                585.289306640625,
+                247.98275756835938
+              ],
+              "confidence": 0.7253557443618774
+            },
+            "confidence_absolute_delta": 1.1920928955078125e-07,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0,
+            "box_iou": 1.0,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 2.5510787963867188e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__00e6aec19f81868a__9960ebf2.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__00e6aec19f81868a__9960ebf2.jpg",
+        "original_source": "youtube-10_jpg.rf.9ade48a25afed3485d922aed138675a6.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\train\\youtube-10_jpg.rf.9ade48a25afed3485d922aed138675a6.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:train:youtube-10_jpg.rf.9ade48a25afed3485d922aed138675a6.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "00e6aec19f81868ae72a559a890a12ba406d5dbc9a79cda4483ff8eda05fa4bf",
+        "packaged_sha256": "00e6aec19f81868ae72a559a890a12ba406d5dbc9a79cda4483ff8eda05fa4bf",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-03932",
+        "native_or_visit_group": "westley:youtube-10_jpg.rf.9ade48a25afed3485d922aed138675a6.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__00e6aec19f81868a__9960ebf2.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:youtube-10_jpg.rf.9ade48a25afed3485d922aed138675a6.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "00e6aec19f81868ae72a559a890a12ba406d5dbc9a79cda4483ff8eda05fa4bf",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.9053714275360107,
+              "bbox_xyxy": [
+                337.3464660644531,
+                344.6111755371094,
+                397.5908508300781,
+                420.3607482910156
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                337.3464660644531,
+                344.61114501953125,
+                397.5908508300781,
+                420.3606872558594
+              ],
+              "confidence": 0.9053714871406555
+            },
+            "confidence_absolute_delta": 5.960464477539063e-08,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              3.0517578125e-05,
+              0.0,
+              6.103515625e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 6.103515625e-05,
+            "box_iou": 0.9999987913767145,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 5.41219487786293e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__012dd65b67f8cb51__27e17998.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__012dd65b67f8cb51__27e17998.jpg",
+        "original_source": "PHQKL0PB33VS_jpg.rf.406f3658b6bdae41e2776257f6a40652.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\train\\PHQKL0PB33VS_jpg.rf.406f3658b6bdae41e2776257f6a40652.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:train:PHQKL0PB33VS_jpg.rf.406f3658b6bdae41e2776257f6a40652.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "012dd65b67f8cb5154cad8c48dc5dd5db2d54aef8bca778ce5255a64848b6b9f",
+        "packaged_sha256": "012dd65b67f8cb5154cad8c48dc5dd5db2d54aef8bca778ce5255a64848b6b9f",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-02982",
+        "native_or_visit_group": "westley:PHQKL0PB33VS_jpg.rf.406f3658b6bdae41e2776257f6a40652.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__012dd65b67f8cb51__27e17998.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:PHQKL0PB33VS_jpg.rf.406f3658b6bdae41e2776257f6a40652.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "012dd65b67f8cb5154cad8c48dc5dd5db2d54aef8bca778ce5255a64848b6b9f",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.9288082122802734,
+              "bbox_xyxy": [
+                125.2839584350586,
+                24.34532928466797,
+                482.5892333984375,
+                450.0812072753906
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                125.28395080566406,
+                24.345258712768555,
+                482.58917236328125,
+                450.0813293457031
+              ],
+              "confidence": 0.9288080930709839
+            },
+            "confidence_absolute_delta": 1.1920928955078125e-07,
+            "box_coordinate_absolute_deltas": [
+              7.62939453125e-06,
+              7.05718994140625e-05,
+              6.103515625e-05,
+              0.0001220703125
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0001220703125,
+            "box_iou": 0.9999993553347133,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 5.030632019042969e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "westley__0138d0e2dd64fc92__ade36724.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/westley__0138d0e2dd64fc92__ade36724.jpg",
+        "original_source": "PXL_20220821_160640303-MP_jpg.rf.91e1c0668e236ae6b1a10c14b7535170.jpg",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_external_datasets\\westley\\extracted\\train\\PXL_20220821_160640303-MP_jpg.rf.91e1c0668e236ae6b1a10c14b7535170.jpg",
+        "source_dataset": "Westley Squirrel Data v1 via Roboflow Universe",
+        "original_identifier_event": "westley:train:PXL_20220821_160640303-MP_jpg.rf.91e1c0668e236ae6b1a10c14b7535170.jpg",
+        "original_split": "train",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "CC BY 4.0",
+        "source_sha256": "0138d0e2dd64fc9265d7b7d08925e0473c048836590047e61cca747cf5e35c5c",
+        "packaged_sha256": "0138d0e2dd64fc9265d7b7d08925e0473c048836590047e61cca747cf5e35c5c",
+        "width": "640",
+        "height": "480",
+        "duplicate_group": "DG-00820",
+        "native_or_visit_group": "westley:PXL_20220821_160640303-MP_jpg.rf.91e1c0668e236ae6b1a10c14b7535170.jpg",
+        "contribution_class": "external_train_real",
+        "lineage_record_id": "V1BASE:dataset/train/images/westley__0138d0e2dd64fc92__ade36724.jpg",
+        "root_event_id": "",
+        "root_visit_group": "westley:PXL_20220821_160640303-MP_jpg.rf.91e1c0668e236ae6b1a10c14b7535170.jpg",
+        "root_visit_group_namespace": "external_curated_group",
+        "root_source_sha256": "0138d0e2dd64fc9265d7b7d08925e0473c048836590047e61cca747cf5e35c5c",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "phase5b_2b_curated_one_class_annotation",
+        "visual_review_status": "INHERITED_FROM_MODEL_A_V1_AUDITED_PACKAGE",
+        "ready_to_train": "true",
+        "boundary_evidence": "model_a_v1_boundary_audit_PASS"
+      },
+      "comparison": {
+        "reference_count": 10,
+        "candidate_count": 10,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.7470951080322266,
+              "bbox_xyxy": [
+                421.7171325683594,
+                198.0072021484375,
+                472.2057800292969,
+                213.0965118408203
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                421.7171325683594,
+                198.0072021484375,
+                472.2057800292969,
+                213.0965118408203
+              ],
+              "confidence": 0.7470951080322266
+            },
+            "confidence_absolute_delta": 0.0,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0,
+            "box_iou": 1.0,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.04373287037014961,
+              "bbox_xyxy": [
+                430.9700927734375,
+                200.26351928710938,
+                486.0540466308594,
+                210.28135681152344
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                430.9700927734375,
+                200.26353454589844,
+                486.0540466308594,
+                210.28138732910156
+              ],
+              "confidence": 0.04373279586434364
+            },
+            "confidence_absolute_delta": 7.450580596923828e-08,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              1.52587890625e-05,
+              0.0,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.999995430528033,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.043630167841911316,
+              "bbox_xyxy": [
+                472.1595764160156,
+                200.0605010986328,
+                537.7702026367188,
+                209.9625701904297
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                472.15966796875,
+                200.06048583984375,
+                537.7702026367188,
+                209.96253967285156
+              ],
+              "confidence": 0.043630294501781464
+            },
+            "confidence_absolute_delta": 1.2665987014770508e-07,
+            "box_coordinate_absolute_deltas": [
+              9.1552734375e-05,
+              1.52587890625e-05,
+              0.0,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 9.1552734375e-05,
+            "box_iou": 0.9999939817115178,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.04223877191543579,
+              "bbox_xyxy": [
+                421.4601745605469,
+                201.0457763671875,
+                468.0059509277344,
+                215.26461791992188
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                421.4601745605469,
+                201.04574584960938,
+                468.0059509277344,
+                215.2646026611328
+              ],
+              "confidence": 0.04223838448524475
+            },
+            "confidence_absolute_delta": 3.8743019104003906e-07,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              3.0517578125e-05,
+              0.0,
+              1.52587890625e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.999996780590826,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.032725460827350616,
+              "bbox_xyxy": [
+                564.5526123046875,
+                201.48976135253906,
+                613.64990234375,
+                211.90267944335938
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                564.5526123046875,
+                201.48976135253906,
+                613.64990234375,
+                211.90267944335938
+              ],
+              "confidence": 0.032725460827350616
+            },
+            "confidence_absolute_delta": 0.0,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0,
+            "box_iou": 1.0,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.021559765562415123,
+              "bbox_xyxy": [
+                496.1329650878906,
+                200.2632293701172,
+                555.3995971679688,
+                209.9869384765625
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                496.1329650878906,
+                200.2632293701172,
+                555.3995971679688,
+                209.9869384765625
+              ],
+              "confidence": 0.02155999280512333
+            },
+            "confidence_absolute_delta": 2.2724270820617676e-07,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0,
+            "box_iou": 1.0,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.02149980701506138,
+              "bbox_xyxy": [
+                570.8689575195312,
+                198.80091857910156,
+                612.537841796875,
+                211.1158905029297
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                570.8689575195312,
+                198.80091857910156,
+                612.537841796875,
+                211.1158905029297
+              ],
+              "confidence": 0.021499842405319214
+            },
+            "confidence_absolute_delta": 3.5390257835388184e-08,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0,
+            "box_iou": 1.0,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.01991930603981018,
+              "bbox_xyxy": [
+                521.387939453125,
+                200.59420776367188,
+                566.981201171875,
+                210.36148071289062
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                521.387939453125,
+                200.59417724609375,
+                566.981201171875,
+                210.3614501953125
+              ],
+              "confidence": 0.019919512793421745
+            },
+            "confidence_absolute_delta": 2.0675361156463623e-07,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              3.0517578125e-05,
+              0.0,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.9999937510740341,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.018104584887623787,
+              "bbox_xyxy": [
+                478.1235046386719,
+                198.59906005859375,
+                524.3861083984375,
+                209.67027282714844
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                478.1235656738281,
+                198.59906005859375,
+                524.3861694335938,
+                209.67027282714844
+              ],
+              "confidence": 0.018104640766978264
+            },
+            "confidence_absolute_delta": 5.587935447692871e-08,
+            "box_coordinate_absolute_deltas": [
+              6.103515625e-05,
+              0.0,
+              6.103515625e-05,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 6.103515625e-05,
+            "box_iou": 0.9999973613644384,
+            "pass": true
+          },
+          {
+            "reference": {
+              "confidence": 0.010113328695297241,
+              "bbox_xyxy": [
+                577.2000122070312,
+                200.38516235351562,
+                620.5404052734375,
+                211.74459838867188
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                577.2000122070312,
+                200.38519287109375,
+                620.5404052734375,
+                211.74462890625
+              ],
+              "confidence": 0.010113363154232502
+            },
+            "confidence_absolute_delta": 3.4458935260772705e-08,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              3.0517578125e-05,
+              0.0,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.9999946269346394,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 9.451806545257568e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "local_v3__76707b65c773976b__20260825-093306-971-807e27.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/local_v3__76707b65c773976b__20260825-093306-971-807e27.jpg",
+        "original_source": "field:20260825-093306-971-807e27",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\raw_copies\\events\\2026-08-25\\20260825-093306-971-807e27\\original-frame.jpg",
+        "source_dataset": "Approved banked native local squirrel evidence since Model A v2",
+        "original_identifier_event": "20260825-093306-971-807e27",
+        "original_split": "approved_future_training",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "user-owned field evidence; internal project use",
+        "source_sha256": "76707b65c773976b5747bb88d3f9e2013a82113768c5347143688e4f25e8f742",
+        "packaged_sha256": "76707b65c773976b5747bb88d3f9e2013a82113768c5347143688e4f25e8f742",
+        "width": "1280",
+        "height": "720",
+        "duplicate_group": "VISIT-20260825-01",
+        "native_or_visit_group": "VISIT-20260825-01",
+        "contribution_class": "local_post_v2_approved_positive",
+        "lineage_record_id": "V3ADD:20260825-093306-971-807e27",
+        "root_event_id": "20260825-093306-971-807e27",
+        "root_visit_group": "VISIT-20260825-01",
+        "root_visit_group_namespace": "authoritative_VISIT",
+        "root_source_sha256": "76707b65c773976b5747bb88d3f9e2013a82113768c5347143688e4f25e8f742",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\annotations\\NEW_CLEAN_SQUIRREL_BOXES.json",
+        "visual_review_status": "PASS_SECOND_RENDER_AND_CONTACT_SHEET_REVIEW",
+        "ready_to_train": "true",
+        "boundary_evidence": "v3_input_audit_PASS_exact_source_allowlist"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.8884703516960144,
+              "bbox_xyxy": [
+                535.3132934570312,
+                324.9048767089844,
+                635.5885620117188,
+                403.8474426269531
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                535.3132934570312,
+                324.9048767089844,
+                635.5885620117188,
+                403.8474426269531
+              ],
+              "confidence": 0.8884703516960144
+            },
+            "confidence_absolute_delta": 0.0,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0,
+            "box_iou": 1.0,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 0.00017261505126953125,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "local_v3__bf025ece8d7ce13f__20260827-110529-361-c73371.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/local_v3__bf025ece8d7ce13f__20260827-110529-361-c73371.jpg",
+        "original_source": "field:20260827-110529-361-c73371",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\raw_copies\\events\\2026-08-27\\20260827-110529-361-c73371\\original-frame.jpg",
+        "source_dataset": "Approved banked native local squirrel evidence since Model A v2",
+        "original_identifier_event": "20260827-110529-361-c73371",
+        "original_split": "approved_future_training",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "user-owned field evidence; internal project use",
+        "source_sha256": "bf025ece8d7ce13fead2b303117d608542a591d723440d3d7cd1fc7b4754e0d0",
+        "packaged_sha256": "bf025ece8d7ce13fead2b303117d608542a591d723440d3d7cd1fc7b4754e0d0",
+        "width": "1280",
+        "height": "720",
+        "duplicate_group": "VISIT-20260827-01",
+        "native_or_visit_group": "VISIT-20260827-01",
+        "contribution_class": "local_post_v2_approved_positive",
+        "lineage_record_id": "V3ADD:20260827-110529-361-c73371",
+        "root_event_id": "20260827-110529-361-c73371",
+        "root_visit_group": "VISIT-20260827-01",
+        "root_visit_group_namespace": "authoritative_VISIT",
+        "root_source_sha256": "bf025ece8d7ce13fead2b303117d608542a591d723440d3d7cd1fc7b4754e0d0",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\annotations\\NEW_CLEAN_SQUIRREL_BOXES.json",
+        "visual_review_status": "PASS_SECOND_RENDER_AND_CONTACT_SHEET_REVIEW",
+        "ready_to_train": "true",
+        "boundary_evidence": "v3_input_audit_PASS_exact_source_allowlist"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.8672782778739929,
+              "bbox_xyxy": [
+                1108.228271484375,
+                364.3255615234375,
+                1199.500244140625,
+                434.51422119140625
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                1108.228271484375,
+                364.3255920410156,
+                1199.500244140625,
+                434.5141906738281
+              ],
+              "confidence": 0.8672782778739929
+            },
+            "confidence_absolute_delta": 0.0,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              3.0517578125e-05,
+              0.0,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 3.0517578125e-05,
+            "box_iou": 0.9999991304128539,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 8.428096771240234e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "local_v3__c80e6471624326fb__20260827-110405-575-59e647.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/local_v3__c80e6471624326fb__20260827-110405-575-59e647.jpg",
+        "original_source": "field:20260827-110405-575-59e647",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\raw_copies\\events\\2026-08-27\\20260827-110405-575-59e647\\original-frame.jpg",
+        "source_dataset": "Approved banked native local squirrel evidence since Model A v2",
+        "original_identifier_event": "20260827-110405-575-59e647",
+        "original_split": "approved_future_training",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "user-owned field evidence; internal project use",
+        "source_sha256": "c80e6471624326fb0e7b5d3a64354716d35c53f2d5025ed66591df19f2f61248",
+        "packaged_sha256": "c80e6471624326fb0e7b5d3a64354716d35c53f2d5025ed66591df19f2f61248",
+        "width": "1280",
+        "height": "720",
+        "duplicate_group": "VISIT-20260827-01",
+        "native_or_visit_group": "VISIT-20260827-01",
+        "contribution_class": "local_post_v2_approved_positive",
+        "lineage_record_id": "V3ADD:20260827-110405-575-59e647",
+        "root_event_id": "20260827-110405-575-59e647",
+        "root_visit_group": "VISIT-20260827-01",
+        "root_visit_group_namespace": "authoritative_VISIT",
+        "root_source_sha256": "c80e6471624326fb0e7b5d3a64354716d35c53f2d5025ed66591df19f2f61248",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\annotations\\NEW_CLEAN_SQUIRREL_BOXES.json",
+        "visual_review_status": "PASS_SECOND_RENDER_AND_CONTACT_SHEET_REVIEW",
+        "ready_to_train": "true",
+        "boundary_evidence": "v3_input_audit_PASS_exact_source_allowlist"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.8600273132324219,
+              "bbox_xyxy": [
+                1141.6217041015625,
+                359.92437744140625,
+                1193.032470703125,
+                476.1610412597656
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                1141.621826171875,
+                359.9243469238281,
+                1193.0323486328125,
+                476.1610107421875
+              ],
+              "confidence": 0.8600274324417114
+            },
+            "confidence_absolute_delta": 1.1920928955078125e-07,
+            "box_coordinate_absolute_deltas": [
+              0.0001220703125,
+              3.0517578125e-05,
+              0.0001220703125,
+              3.0517578125e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 0.0001220703125,
+            "box_iou": 0.9999947260871519,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 7.130205631256104e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "local_v3__dc02cedad30491a6__20260827-110543-657-12e719.jpg",
+      "provenance": {
+        "packaged_filename": "dataset/train/images/local_v3__dc02cedad30491a6__20260827-110543-657-12e719.jpg",
+        "original_source": "field:20260827-110543-657-12e719",
+        "original_source_path": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\raw_copies\\events\\2026-08-27\\20260827-110543-657-12e719\\original-frame.jpg",
+        "source_dataset": "Approved banked native local squirrel evidence since Model A v2",
+        "original_identifier_event": "20260827-110543-657-12e719",
+        "original_split": "approved_future_training",
+        "curated_or_frozen_split": "train",
+        "final_model_a_role": "optimizer_train",
+        "squirrel_positive_vs_negative": "positive",
+        "annotation_count": "1",
+        "source_license": "user-owned field evidence; internal project use",
+        "source_sha256": "dc02cedad30491a66f8849da8d4f430dd94c110e8338188f52516e1607eee41e",
+        "packaged_sha256": "dc02cedad30491a66f8849da8d4f430dd94c110e8338188f52516e1607eee41e",
+        "width": "1280",
+        "height": "720",
+        "duplicate_group": "VISIT-20260827-01",
+        "native_or_visit_group": "VISIT-20260827-01",
+        "contribution_class": "local_post_v2_approved_positive",
+        "lineage_record_id": "V3ADD:20260827-110543-657-12e719",
+        "root_event_id": "20260827-110543-657-12e719",
+        "root_visit_group": "VISIT-20260827-01",
+        "root_visit_group_namespace": "authoritative_VISIT",
+        "root_source_sha256": "dc02cedad30491a66f8849da8d4f430dd94c110e8338188f52516e1607eee41e",
+        "parent_record_id": "",
+        "augmentation_family": "",
+        "transformation_json": "",
+        "target_visibility_fraction": "1.00000000",
+        "annotation_provenance": "D:\\Squirrel_Squirter_ML_Rebuild\\05_local_domain_expansion\\new_field_events_202608\\annotations\\NEW_CLEAN_SQUIRREL_BOXES.json",
+        "visual_review_status": "PASS_SECOND_RENDER_AND_CONTACT_SHEET_REVIEW",
+        "ready_to_train": "true",
+        "boundary_evidence": "v3_input_audit_PASS_exact_source_allowlist"
+      },
+      "comparison": {
+        "reference_count": 1,
+        "candidate_count": 1,
+        "count_match": true,
+        "pairs": [
+          {
+            "reference": {
+              "confidence": 0.8735471367835999,
+              "bbox_xyxy": [
+                971.3174438476562,
+                514.9784545898438,
+                1212.2662353515625,
+                598.6207885742188
+              ]
+            },
+            "candidate": {
+              "bbox_xyxy": [
+                971.3174438476562,
+                514.978515625,
+                1212.2662353515625,
+                598.6207275390625
+              ],
+              "confidence": 0.8735473155975342
+            },
+            "confidence_absolute_delta": 1.7881393432617188e-07,
+            "box_coordinate_absolute_deltas": [
+              0.0,
+              6.103515625e-05,
+              0.0,
+              6.103515625e-05
+            ],
+            "maximum_box_coordinate_absolute_delta": 6.103515625e-05,
+            "box_iou": 0.9999985405678359,
+            "pass": true
+          }
+        ],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 8.64863395690918e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "synthetic_empty_wide",
+      "provenance": {
+        "role": "synthetic"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 4.7206878662109375e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    },
+    {
+      "name": "synthetic_empty_tall",
+      "provenance": {
+        "role": "synthetic"
+      },
+      "comparison": {
+        "reference_count": 0,
+        "candidate_count": 0,
+        "count_match": true,
+        "pairs": [],
+        "appeared_or_disappeared": 0,
+        "pass": true
+      },
+      "raw_max_abs_delta": 3.200024366378784e-05,
+      "source_unchanged": true,
+      "preprocessing_exact": true
+    }
+  ],
+  "evaluated_at_utc": "2026-09-07T22:48:36.561858+00:00",
+  "environment": {
+    "python": "3.12.13 (main, Aug  7 2026, 02:26:41) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26100-SP0",
+    "torch": "2.8.0+cpu",
+    "ncnn": "1.0.20260526",
+    "numpy": "2.1.2",
+    "opencv": "4.10.0"
+  },
+  "boundaries": "Optimizer training samples only; no locked validation or Golden images; no model selection or threshold tuning.",
+  "low_confidence_edge_contract": "0.010000 included; 0.009995 excluded",
+  "source_config_sha256": "be94a079cd824112c64d110913e02a703a6a6e4e26e5d69fe01caa0d9466adb2"
+}
