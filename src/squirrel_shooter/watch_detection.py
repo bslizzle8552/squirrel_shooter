@@ -13,6 +13,8 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
+from .motion_categories import MotionCategory
+
 from .config import CandidateFilterConfig, ClassificationConfig, GroupingConfig, MotionConfig
 
 
@@ -68,7 +70,7 @@ class GroupedCandidate:
     coherent_motion: bool = False
     dispersed_motion: bool = False
     touched_zone_boundary: bool = False
-    provisional_category: str = "unclassified_motion"
+    provisional_category: str = MotionCategory.UNCLASSIFIED_MOTION
     movement_attributes: tuple[str, ...] = ()
     heuristic_score: float = 0.0
     event_eligible: bool = True
@@ -274,19 +276,19 @@ def classify_candidate(candidate: GroupedCandidate, frame_shape: tuple[int, int]
 
     height_percent = 100.0 * candidate.height / max(1, frame_shape[0])
     if candidate.dispersed_motion or (len(candidate.components) >= config.flicker_min_components and not candidate.coherent_motion):
-        category = "plant_or_shadow_flicker"
+        category = MotionCategory.PLANT_OR_SHADOW_FLICKER
     elif candidate.frame_percent <= config.tiny_max_frame_percent:
-        category = "tiny_motion"
+        category = MotionCategory.TINY_MOTION
     elif height_percent >= config.person_min_height_percent and candidate.aspect_ratio < 1.4:
-        category = "person_sized"
+        category = MotionCategory.PERSON_SIZED
     elif candidate.frame_percent >= config.large_object_min_frame_percent:
-        category = "large_object"
+        category = MotionCategory.LARGE_OBJECT
     elif candidate.frame_percent <= config.small_animal_max_frame_percent:
-        category = "small_animal_candidate"
+        category = MotionCategory.SMALL_ANIMAL_CANDIDATE
     elif candidate.frame_percent <= config.medium_animal_max_frame_percent:
-        category = "medium_animal_candidate"
+        category = MotionCategory.MEDIUM_ANIMAL_CANDIDATE
     else:
-        category = "unclassified_motion"
+        category = MotionCategory.UNCLASSIFIED_MOTION
 
     speed = candidate.average_speed
     if speed <= config.stationary_speed_pixels_per_second:
@@ -313,13 +315,13 @@ def evaluate_event_eligibility(candidate: GroupedCandidate, config: CandidateFil
             and candidate.localized_lighting_fraction >= config.localized_lighting_minimum_fraction
         ):
             reason = "localized_lighting_change"
-        elif config.ignore_tiny_motion and candidate.provisional_category == "tiny_motion":
+        elif config.ignore_tiny_motion and candidate.provisional_category == MotionCategory.TINY_MOTION:
             reason = "tiny_motion"
-        elif config.ignore_plant_or_shadow_flicker and candidate.provisional_category == "plant_or_shadow_flicker":
+        elif config.ignore_plant_or_shadow_flicker and candidate.provisional_category == MotionCategory.PLANT_OR_SHADOW_FLICKER:
             reason = "plant_or_shadow_flicker"
         elif candidate.frame_percent < config.minimum_frame_percent:
             reason = "below_minimum_frame_percent"
-        elif candidate.provisional_category == "small_animal_candidate":
+        elif candidate.provisional_category == MotionCategory.SMALL_ANIMAL_CANDIDATE:
             if config.require_coherent_small_motion and not candidate.coherent_motion:
                 reason = "small_motion_not_coherent"
             elif candidate.travel_distance < config.small_motion_minimum_travel_pixels:

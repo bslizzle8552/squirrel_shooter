@@ -6,6 +6,8 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Iterable, Literal
 
+from .motion_categories import MotionCategory, legacy_reacquisition_category_safe
+
 
 AssociationState = Literal["accepted", "ambiguous", "incompatible"]
 
@@ -68,7 +70,7 @@ class TargetObservation:
     velocity: tuple[float, float] = (0.0, 0.0)
     confirmed: bool = True
     event_eligible: bool = True
-    provisional_category: str = "small_animal_candidate"
+    provisional_category: str = MotionCategory.SMALL_ANIMAL_CANDIDATE
     grouping_confidence: float = 1.0
 
     def __post_init__(self) -> None:
@@ -199,11 +201,7 @@ def _candidate_evidence(
     previous_inside = _inside(previous.centroid, candidate.bounding_box)
     candidate_inside = _inside(candidate.centroid, previous.bounding_box)
     exact_identity = candidate.track_id == previous.track_id
-    category_safe = candidate.provisional_category not in {
-        "person_sized",
-        "large_object_candidate",
-        "lighting_change",
-    }
+    category_safe = legacy_reacquisition_category_safe(candidate.provisional_category)
     grouping_confident = candidate.grouping_confidence >= policy.minimum_grouping_confidence
     current = 0.0 <= elapsed <= policy.maximum_elapsed_seconds
     predicted_near = prediction_error <= allowance

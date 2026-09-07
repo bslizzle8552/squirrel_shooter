@@ -152,3 +152,33 @@ def test_policy_rejects_incoherent_relaxation_bounds() -> None:
         AssociationPolicy(ordinary_area_ratio=3.0, posture_change_area_ratio=2.9)
     with pytest.raises(ValueError, match="maximum_prediction_error_pixels"):
         AssociationPolicy(base_prediction_error_pixels=100.0, maximum_prediction_error_pixels=99.0)
+
+
+@pytest.mark.parametrize(
+    ("category", "allowed"),
+    [
+        ("large_object", False),
+        ("large_object_candidate", False),
+        ("person_sized", False),
+        ("lighting_change", False),
+        ("tiny_motion", True),
+        ("plant_or_shadow_flicker", True),
+        ("small_animal_candidate", True),
+        ("medium_animal_candidate", True),
+        ("unclassified_motion", True),
+        ("historical_other_category", True),
+    ],
+)
+def test_category_spelling_fix_preserves_other_legacy_reacquisition_decisions(
+    category: str, allowed: bool
+) -> None:
+    previous = TargetObservation(1, 10.0, (100.0, 100.0), (80, 80, 40, 40))
+    candidate = TargetObservation(
+        1, 10.1, (100.0, 100.0), (80, 80, 40, 40), provisional_category=category
+    )
+
+    decision = evaluate_reacquisition(previous, [candidate])
+
+    assert decision.evidence[0].category_safe is allowed
+    assert decision.state == ("accepted" if allowed else "incompatible")
+    assert decision.selected == (candidate if allowed else None)

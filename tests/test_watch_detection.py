@@ -8,6 +8,8 @@ import numpy as np
 
 from conftest import write_test_config
 from squirrel_shooter.config import MotionConfig, load_config
+from squirrel_shooter.motion_categories import MotionCategory
+from squirrel_shooter.target_association import TargetObservation, evaluate_reacquisition
 from squirrel_shooter.watch_detection import (
     MotionComponent,
     MotionWatcherDetector,
@@ -81,6 +83,31 @@ def test_nearby_person_fragments_group_as_one_large_object(tmp_path: Path) -> No
     classified = classify_candidate(replace(groups[0], persistence_count=3, coherent_motion=True, average_speed=50), (100, 100), config.classification)
     assert classified.provisional_category in {"large_object", "person_sized"}
     assert len(classified.components) == 3
+
+
+def test_emitted_large_object_category_cannot_reacquire_a_target(tmp_path: Path) -> None:
+    config = watch_config(tmp_path)
+    group = group_components([component(20, 30, 60, 20)], config.grouping, 10_000, 10_000)[0]
+    classified = classify_candidate(group, (100, 100), config.classification)
+    assert classified.provisional_category == MotionCategory.LARGE_OBJECT
+    assert classified.as_dict()["provisional_category"] == "large_object"
+
+    previous = TargetObservation(1, 10.0, classified.centroid, classified.bounding_box)
+    candidate = TargetObservation(
+        1,
+        10.1,
+        classified.centroid,
+        classified.bounding_box,
+        provisional_category=classified.provisional_category,
+    )
+    decision = evaluate_reacquisition(previous, [candidate])
+
+    # Geometry/identity would qualify; the producer's exact category is the veto.
+    assert decision.evidence[0].exact_tracker_identity is True
+    assert decision.evidence[0].intersection_over_union == 1.0
+    assert decision.evidence[0].reason == "candidate_not_confirmed_safe_and_eligible"
+    assert decision.evidence[0].category_safe is False
+    assert decision.state == "incompatible"
 
 
 def test_distant_simultaneous_blobs_remain_separate(tmp_path: Path) -> None:
