@@ -777,6 +777,8 @@ class CameraService:
                             self._next_buffer_monotonic += missed_slots * self._frame_buffer_interval
                     copy_started = perf_counter()
                     published_frame = frame.copy()
+                    # Raw camera evidence cannot be an overlay consumer's canvas.
+                    published_frame.flags.writeable = False
                     self._published_frame_copy_timer.add(perf_counter() - copy_started)
                     publish_started = perf_counter()
                     with self._condition:

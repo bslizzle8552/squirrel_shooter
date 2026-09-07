@@ -173,6 +173,26 @@ valve:
   gpio_pin: 24
   active_high: true
 
+# Phase 2 clean recording. No detector or FIRE callback is connected to it yet.
+# Segment duration follows the existing 60s event cap. The 10-minute logical
+# session cap and 1GiB admission budget are conservative policy defaults, not
+# measured Pi limits. All evidence is retained when the budget blocks recording.
+recording:
+  enabled: true
+  pre_roll_seconds: 2.0
+  manual_duration_seconds: 30.0
+  automatic_tail_seconds: 3.0
+  maximum_segment_seconds: 60.0
+  maximum_session_seconds: 600.0
+  observation_max_age_seconds: 3.0
+  target_fps: 12.0
+  codec: MJPG
+  queue_capacity: 8
+  shutdown_timeout_seconds: 2.0
+  minimum_free_megabytes: 256.0
+  storage_budget_megabytes: 1024.0
+  maximum_buffer_megabytes: 128.0
+
 motion:
   enabled: true
   processing_width: 640

@@ -20,6 +20,7 @@ from .diagnostics import configure_logging
 from .manual_control import ManualControlService, build_manual_control_service
 from .motion_runtime import MotionProcessingService
 from .runtime_provenance import build_runtime_provenance
+from .recording import RecordingService
 from .thread_names import set_current_thread_name
 from .web_dashboard import create_app, read_cpu_temperature
 
@@ -47,16 +48,17 @@ class ApplicationRuntime:
             shared_settings=config.shared_camera,
             jpeg_quality=config.dashboard.jpeg_quality,
             encode_jpeg=True,
-            frame_buffer_seconds=(
+            frame_buffer_seconds=max(config.recording.pre_roll_seconds if config.recording.enabled else 0.0, (
                 config.manual_control.recording.pre_roll_seconds
                 + config.manual_control.fire_pulse_seconds
                 + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
                 if config.manual_control.recording.enabled
                 else 0.0
-            ),
-            frame_buffer_fps=config.manual_control.recording.target_fps,
+            )),
+            frame_buffer_fps=max(config.manual_control.recording.target_fps, config.recording.target_fps if config.recording.enabled else 0.0),
         )
         self.manual_control = manual_control
+        self.recording = RecordingService(self.camera, config.recording, config.camera.output_directory / "recordings")
         self.motion = motion or MotionProcessingService(
             self.camera,
             config,
@@ -72,9 +74,11 @@ class ApplicationRuntime:
             self._started = True
         try:
             self.camera.start()
+            self.recording.start()
             self.motion.start()
         except Exception:
             _cleanup_manual_control(self.manual_control)
+            self.recording.stop()
             self.camera.stop(timeout=self.config.runtime.shutdown_timeout_seconds)
             with self._lock:
                 self._started = False
@@ -88,6 +92,7 @@ class ApplicationRuntime:
         timeout = self.config.runtime.shutdown_timeout_seconds
         self.motion.stop(timeout=timeout)
         _cleanup_manual_control(self.manual_control)
+        self.recording.stop()
         self.camera.stop(timeout=timeout)
 
     def status(self) -> dict[str, Any]:
@@ -172,14 +177,14 @@ def build_application_runtime(config: AppConfig) -> ApplicationRuntime:
         shared_settings=config.shared_camera,
         jpeg_quality=config.dashboard.jpeg_quality,
         encode_jpeg=True,
-        frame_buffer_seconds=(
+        frame_buffer_seconds=max(config.recording.pre_roll_seconds if config.recording.enabled else 0.0, (
             config.manual_control.recording.pre_roll_seconds
             + config.manual_control.fire_pulse_seconds
             + max(1.0, config.shared_camera.consumer_wait_timeout_seconds)
             if config.manual_control.recording.enabled
             else 0.0
-        ),
-        frame_buffer_fps=config.manual_control.recording.target_fps,
+        )),
+        frame_buffer_fps=max(config.manual_control.recording.target_fps, config.recording.target_fps if config.recording.enabled else 0.0),
     )
     manual_control = None
     if config.dashboard.enabled or config.auto_fire.enabled:
@@ -341,6 +346,7 @@ def run(config: AppConfig) -> int:
                 motion_service=runtime.motion,
                 manual_control_service=manual_control,
                 runtime_provenance=runtime.provenance,
+                recording_service=runtime.recording,
                 start_camera=False,
                 start_vision=False,
             )

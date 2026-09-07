@@ -22,6 +22,7 @@
   --radius: 8px;
   --radius-sm: 6px;
   --bar-h: 56px;
+  --recording-h: 96px;
   --row-h: 78px;
   --rail-w: 360px;
   --strip-h: 148px;
@@ -169,11 +170,27 @@ img { display: block; }
 .bar-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .bar-btn svg { width: 17px; height: 17px; }
 
+.recording-bar {
+  position: fixed;
+  top: var(--bar-h);
+  left: 0;
+  right: 0;
+  height: var(--recording-h);
+  padding: 8px 16px;
+  overflow: auto;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  z-index: 25;
+}
+.recording-bar button { padding: 4px 8px; border: 1px solid var(--border-strong); margin-right: 8px; }
+.recording-bar button:disabled { opacity: .45; cursor: default; }
+#record-status { display: block; overflow-wrap: anywhere; margin-top: 4px; font-size: 12px; }
+
 /* ---------- Layout: 12-col feel via grid ---------- */
 .layout {
   display: grid;
   height: 100vh;
-  padding-top: var(--bar-h);
+  padding-top: calc(var(--bar-h) + var(--recording-h));
   grid-template-columns: minmax(0, 1fr) var(--rail-w);
   grid-template-rows: minmax(0, 1fr) var(--strip-h);
   grid-template-areas:
@@ -815,6 +832,7 @@ body[data-pane="review"] .queue-panel { box-shadow: inset 3px 0 0 -2px var(--acc
 
 /* ---------- Mobile (toggled by JS under 900px) ---------- */
 body.mobile { overflow: auto; }
+body.mobile .recording-bar { position: static; height: auto; }
 body.mobile .statusbar {
   position: static;
   height: auto;

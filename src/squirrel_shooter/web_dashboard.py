@@ -35,6 +35,8 @@ from .manual_control import (
 )
 from .motion_runtime import MotionProcessingService
 from .runtime_provenance import build_runtime_provenance
+from .recording import RecordingService, RecordingError
+from .media_roles import media_role
 from .vision_service import VisionService, VisionStatus
 
 
@@ -263,6 +265,10 @@ def _review_item_payload(item: dict[str, Any]) -> dict[str, Any]:
         "human_verified": item.get("human_verified", False),
         "training_label": item.get("training_label"),
         "training_dataset_status": item.get("training_dataset_status"),
+        "image_media_role": str(media_role("classifier-input.jpg", item)),
+        "original_frame_media_role": str(media_role("original-frame.jpg", item)),
+        "snapshot_media_role": "annotated_review",
+        "clip_media_role": "annotated_review",
         "latency_ms": item.get("latency_ms"),
         "frame_number": item.get("frame_number"),
         "error": item.get("error"),
@@ -305,6 +311,7 @@ def create_app(
     motion_service: MotionProcessingService | None = None,
     manual_control_service: ManualControlService | None = None,
     runtime_provenance: dict[str, Any] | None = None,
+    recording_service: RecordingService | None = None,
     temperature_reader: Callable[[], float | None] = read_cpu_temperature,
     start_camera: bool = True,
     start_vision: bool = True,
@@ -362,6 +369,7 @@ def create_app(
         manual_control_service=manual_control,
         manual_control_token=manual_control_token,
         runtime_provenance=provenance,
+        recording_service=recording_service,
     )
 
     if start_camera:
@@ -529,6 +537,7 @@ def create_app(
             review_items=[_review_item_payload(item) for item in review_overview["review"][:REVIEW_QUEUE_INITIAL]],
             review_counts=review_counts,
             review_token=classifier_review_token,
+            recording_token=manual_control_token,
             demo_mode=demo_mode,
         )
 
@@ -589,6 +598,65 @@ def create_app(
         except Exception as exc:
             return manual_control_error(exc)
         return jsonify(control=manual_control_status())
+
+    @app.get("/api/recording")
+    def api_recording() -> Any:
+        return jsonify(recording=recording_status())
+
+    def recording_status() -> dict[str, Any]:
+        return recording_service.status() if recording_service is not None else {
+            "enabled": False, "ready": False, "active": False, "status": "unavailable",
+        }
+
+    @app.post("/api/recording/start")
+    def api_recording_start() -> Any:
+        require_manual_control_token()
+        if recording_service is None:
+            return jsonify(error="recording_unavailable", recording=recording_status()), 503
+        try:
+            return jsonify(recording=recording_service.record_manual())
+        except RecordingError as exc:
+            return jsonify(error=str(exc), recording=recording_status()), 409
+
+    @app.post("/api/recording/stop")
+    def api_recording_stop() -> Any:
+        require_manual_control_token()
+        if recording_service is None:
+            return jsonify(error="recording_unavailable", recording=recording_status()), 503
+        try:
+            return jsonify(recording=recording_service.stop_manual())
+        except RecordingError as exc:
+            return jsonify(error=str(exc), recording=recording_status()), 409
+
+    @app.get("/api/recordings/<session_id>")
+    def api_recording_manifest(session_id: str) -> Any:
+        if recording_service is None or len(session_id) != 32 or any(c not in "0123456789abcdef" for c in session_id):
+            abort(404)
+        path = _resolve_under(recording_service.directory, session_id + "/session.json")
+        if path is None:
+            abort(404)
+        return send_file(path, mimetype="application/json", max_age=0)
+
+    @app.get("/recordings/<session_id>/<filename>")
+    def recording_media(session_id: str, filename: str) -> Any:
+        if recording_service is None or len(session_id) != 32 or any(c not in "0123456789abcdef" for c in session_id):
+            abort(404)
+        path = _resolve_under(recording_service.directory, session_id + "/session.json")
+        if path is None:
+            abort(404)
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            allowed = any(s.get("file") == filename and s.get("status") in {"complete", "degraded"}
+                          and s.get("sha256") and s.get("file_role") == "clean_authoritative"
+                          for s in manifest.get("segments", []))
+        except (OSError, ValueError, TypeError, AttributeError):
+            allowed = False
+        if not allowed:
+            abort(404)
+        media = _resolve_under(recording_service.directory, session_id + "/" + filename)
+        if media is None:
+            abort(404)
+        return send_file(media, conditional=True)
 
     @app.post("/api/manual-control/aim")
     def api_manual_control_aim() -> Any:
@@ -884,6 +952,7 @@ def create_app(
         return jsonify(
             application_mode=APPLICATION_MODE,
             runtime_provenance=provenance,
+            clean_recording=recording_status(),
             application_uptime_seconds=round(uptime, 1),
             camera=camera_data,
             detector=detector,

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .manual_fire_recording import (
+    LegacyFireRecordingAdapter,
     ManualFireEvent,
     ManualFireRecorder,
     ManualFireRecordingConfig,
@@ -1678,7 +1679,9 @@ def build_manual_control_service(
     fire_recorder: ManualFireRecordingSink | None = None
     if control_config.recording.enabled:
         if camera_service is not None and output_directory is not None:
-            fire_recorder = ManualFireRecorder(camera_service, output_directory, control_config.recording)  # type: ignore[arg-type]
+            fire_recorder = LegacyFireRecordingAdapter(
+                ManualFireRecorder(camera_service, output_directory, control_config.recording)  # type: ignore[arg-type]
+            )
         else:
             LOGGER.warning("Manual fire recording is enabled but the shared camera/output directory was not provided")
     return ManualControlService(

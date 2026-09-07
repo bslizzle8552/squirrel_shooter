@@ -147,6 +147,27 @@ class ManualFireRecordingSink(Protocol):
         ...
 
 
+class LegacyFireRecordingAdapter:
+    """Phase 2 boundary preserving the accepted-shot recorder's exact contract.
+
+    FIRE retains its existing pre/post reservation, shot identity, clean full
+    frame and aim derivative behavior. It does not create a manual recording
+    reason or acquire another camera. Migrate this sink only with FIRE parity.
+    """
+
+    def __init__(self, sink: ManualFireRecordingSink) -> None:
+        self._sink = sink
+
+    def record(self, event: ManualFireEvent) -> None:
+        self._sink.record(event)
+
+    def close(self) -> None:
+        self._sink.close()
+
+    def status(self) -> dict[str, object]:
+        return self._sink.status()
+
+
 @dataclass
 class _RecordingReservation:
     event: ManualFireEvent

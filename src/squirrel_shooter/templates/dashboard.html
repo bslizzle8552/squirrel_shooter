@@ -74,6 +74,11 @@
       <button class="bar-btn" id="help-open" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><svg><use href="#i-help"/></svg></button>
       <button class="bar-btn" id="system-open" type="button" title="System details (S)" aria-label="System details"><svg><use href="#i-gear"/></svg></button>
     </header>
+    <section class="recording-bar" aria-label="Clean recording">
+      <button type="button" id="record-30">RECORD 30 SECONDS</button>
+      <button type="button" id="record-stop">STOP RECORDING</button>
+      <span id="record-status" role="status" aria-live="polite">Reading recording status…</span>
+    </section>
 
     <main id="layout" class="layout">
       <section id="stage" class="stage" aria-label="Live camera and event inspector">
@@ -270,6 +275,12 @@
           reviewPage: {{ url_for('classifier_review')|tojson }}
         },
         reviewToken: {{ review_token|tojson }},
+        recordingToken: {{ recording_token|tojson }},
+        recordingUrls: {
+          status: {{ url_for('api_recording')|tojson }},
+          start: {{ url_for('api_recording_start')|tojson }},
+          stop: {{ url_for('api_recording_stop')|tojson }}
+        },
         statusPollMs: 5000,
         eventsPollMs: 2000,
         reviewPollMs: {{ status_refresh_ms }},
@@ -278,5 +289,6 @@
       };
     </script>
     <script src="{{ url_for('static', filename='console.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='recording_controls.js') }}" defer></script>
   </body>
 </html>

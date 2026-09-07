@@ -13,6 +13,7 @@ from .auto_fire import AutoFireConfig, HUMAN_DENY_LABELS
 from .classifier_labels import VOC_LABELS
 from .manual_control import ManualControlConfig
 from .manual_fire_recording import ManualFireRecordingConfig
+from .recording import RecordingConfig
 from .pan_tilt import PanTiltConfig
 from .valve import ValveConfig
 
@@ -286,6 +287,7 @@ class AppConfig:
     source_path: Path
     # Exact bytes parsed by load_config, retained through dataclass overrides.
     source_sha256: str | None = None
+    recording: RecordingConfig = RecordingConfig()
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -685,6 +687,13 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         raise ConfigError(f"Could not read configuration: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError("Configuration must be a YAML mapping")
+    try:
+        recording_raw = raw.get("recording", {})
+        if not isinstance(recording_raw, dict):
+            raise ValueError("recording must be a mapping")
+        recording_config = RecordingConfig(**recording_raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Invalid recording configuration: {exc}") from exc
 
     camera = _mapping(raw, "camera")
     _required(camera, {"device_index", "requested_width", "requested_height", "requested_fps", "output_directory"}, "camera")
@@ -1043,4 +1052,5 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         ),
         source_path=config_path.resolve(),
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        recording=recording_config,
     )
