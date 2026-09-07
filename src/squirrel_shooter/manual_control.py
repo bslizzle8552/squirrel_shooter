@@ -685,6 +685,7 @@ class ManualControlService:
         self._clock = clock
         self._fire_recorder = fire_recorder
         self._lock = threading.Lock()
+        self._cleanup_started = False
         self._transient_state: ControlState | None = None
         self._pan = float(pan_tilt_config.pan_center)
         self._tilt = float(pan_tilt_config.tilt_center)
@@ -892,22 +893,6 @@ class ManualControlService:
         finally:
             self._lock.release()
 
-    def move_and_fire(self, pan: float, tilt: float) -> PanTiltPosition:
-        """Shared future pipeline: target, move, settle, fire, then park during cooldown."""
-
-        if self._pan_tilt is None:
-            raise ControlUnavailableError(self._servo_error or "Servo control is disabled")
-        if not self.valve_available:
-            raise ControlUnavailableError(self._valve_error or "Valve control is disabled")
-        target = PanTiltPosition(
-            clamp_angle(pan, self.pan_tilt_config.pan_min, self.pan_tilt_config.pan_max),
-            clamp_angle(tilt, self.pan_tilt_config.tilt_min, self.pan_tilt_config.tilt_max),
-        )
-        with self._lock:
-            position = self._move_locked(target)
-            self._fire_and_park_locked()
-            return position
-
     def automatic_engage(
         self,
         pixel_x: int,
@@ -990,6 +975,11 @@ class ManualControlService:
         park_attempted = False
         shot_attempted = False
         try:
+            if self._calibration_edit_active:
+                raise AutomaticEngagementError(
+                    "calibration_edit_active",
+                    "Automatic engagement is inhibited while calibration edit mode is active",
+                )
             if self._valve.state is not ValveState.CLOSED:
                 raise AutomaticEngagementError(
                     "safety_state_invalid",
@@ -1374,15 +1364,22 @@ class ManualControlService:
         # Serialize teardown with the same physical-control lock so valve,
         # servo, and recorder cleanup can never race an in-flight engagement.
         with self._lock:
+            if self._cleanup_started:
+                return
+            # Teardown is one-shot even on failure: a later cleanup must not
+            # authorize PARK from stale state after the GPIO output was released.
+            self._cleanup_started = True
             try:
                 self._valve.cleanup()
+                if self._valve.state is not ValveState.CLOSED:
+                    raise ControlError(
+                        "Servo cleanup skipped because valve safe-closed state was not established"
+                    )
+                if self._pan_tilt is not None:
+                    self._pan_tilt.cleanup()
             finally:
-                try:
-                    if self._pan_tilt is not None:
-                        self._pan_tilt.cleanup()
-                finally:
-                    if self._fire_recorder is not None:
-                        self._fire_recorder.close()
+                if self._fire_recorder is not None:
+                    self._fire_recorder.close()
 
     def _move_locked(self, target: PanTiltPosition, *, action: str = "manual") -> PanTiltPosition:
         if self._valve.state is ValveState.OPEN:

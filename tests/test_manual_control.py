@@ -743,7 +743,7 @@ def test_valve_hardware_error_does_not_create_successful_recording(tmp_path: Pat
     assert recorder.events == []
 
 
-def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:
+def test_manual_aim_then_fire_moves_settles_pulses_and_parks(tmp_path: Path) -> None:
     events: list[str] = []
     delays: list[float] = []
     service: ManualControlService
@@ -752,10 +752,16 @@ def test_control_pipeline_moves_settles_then_fires(tmp_path: Path) -> None:
         delays.append(seconds)
         events.append("settle" if seconds == 0.15 else "pulse")
 
-    service, _, _ = make_service(tmp_path, sleep=sleep, events=events)
-    result = service.move_and_fire(200, 60)
+    service, _, _ = make_service(
+        tmp_path,
+        sleep=sleep,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+    )
+    result = service.aim_at_pixel(150, 150)
+    service.fire()
 
-    assert result == PanTiltPosition(150, 70)
+    assert (result.pan, result.tilt) == (120, 90)
     assert events == ["move", "settle", "close", "open", "pulse", "close", "move", "settle"]
     assert delays == [0.15, 0.40, 0.15]
 
@@ -777,6 +783,7 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
         fire_recorder=recorder,
     )
     service.select_calibration_point_for_edit(5)
+    service.exit_calibration_edit_mode()
     events.clear()
     pan_tilt.moves.clear()
     guard_calls: list[str] = []
@@ -852,6 +859,74 @@ def test_automatic_engagement_rechecks_once_fires_records_and_parks(tmp_path: Pa
         service.fire()
     now[0] = 105.0
     service.fire()
+    assert service.cooldown_remaining_seconds() == 10.0
+
+
+@pytest.mark.parametrize("select_saved_point", [False, True])
+def test_calibration_edit_rejects_auto_before_movement_validation_or_reservation(
+    tmp_path: Path, select_saved_point: bool,
+) -> None:
+    events: list[str] = []
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        events=events,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    if select_saved_point:
+        service.select_calibration_point_for_edit(5)
+    else:
+        service.enter_calibration_edit_mode()
+    events.clear()
+    pan_tilt.moves.clear()
+
+    def forbidden_callback():
+        pytest.fail("An inhibited auto candidate reached final validation or reservation")
+
+    with pytest.raises(AutomaticEngagementError) as rejected:
+        service.automatic_engage(
+            150,
+            150,
+            frame_width=1280,
+            frame_height=720,
+            cooldown_seconds=5.0,
+            final_safety_check=forbidden_callback,
+            reserve_actuation=forbidden_callback,
+            post_reservation_safety_check=forbidden_callback,
+            evidence={},
+        )
+
+    assert rejected.value.reason == "calibration_edit_active"
+    assert rejected.value.shot_attempted is False
+    assert events == []
+    assert pan_tilt.moves == []
+    assert valve.state is ValveState.CLOSED
+    assert recorder.events == []
+    assert service.cooldown_remaining_seconds() == 0.0
+    assert service.status()["calibration_edit_active"] is True
+
+
+def test_calibration_interlock_keeps_manual_movement_save_and_fire_available(tmp_path: Path) -> None:
+    recorder = FakeFireRecorder()
+    service, pan_tilt, valve = make_service(
+        tmp_path,
+        calibration_points=complete_calibration_grid(),
+        fire_recorder=recorder,
+    )
+    service.enter_calibration_edit_mode()
+    service.select_calibration_point_for_edit(5)
+    position = service.move("left", 3)
+    saved = service.save_active_calibration_point()
+
+    assert saved.pan == position.pan
+    assert saved.tilt == position.tilt
+    assert service.fire() is True
+    assert pan_tilt.moves[-1] == position
+    assert valve.state is ValveState.CLOSED
+    assert len(recorder.events) == 1
+    assert recorder.events[0].event_type == "manual_fire"
+    assert service.status()["calibration_edit_active"] is True
     assert service.cooldown_remaining_seconds() == 10.0
 
 
@@ -1376,6 +1451,110 @@ def test_cleanup_waits_for_in_flight_automatic_engagement(tmp_path: Path) -> Non
     assert not cleanup.is_alive()
     assert valve.cleaned is True
     assert pan_tilt.cleaned is True
+    assert recorder.closed is True
+
+
+@pytest.mark.parametrize("initial_state", [ValveState.CLOSED, ValveState.OPEN, None])
+def test_cleanup_closes_valve_before_servo_teardown_and_runs_once(
+    tmp_path: Path, initial_state: ValveState | None,
+) -> None:
+    events: list[str] = []
+
+    class TeardownValve(FakeValve):
+        def cleanup(self) -> None:
+            events.append("valve-cleanup")
+            super().cleanup()
+
+    class ParkingPanTilt(FakePanTilt):
+        def cleanup(self) -> None:
+            assert valve.state is ValveState.CLOSED
+            events.append("servo-park")
+            super().cleanup()
+
+    class TeardownRecorder(FakeFireRecorder):
+        def close(self) -> None:
+            events.append("recorder-close")
+            super().close()
+
+    config = PanTiltConfig()
+    valve = TeardownValve(events)
+    valve._state = initial_state  # type: ignore[assignment]
+    pan_tilt = ParkingPanTilt(config, events)
+    recorder = TeardownRecorder()
+    service = ManualControlService(
+        config,
+        ManualControlConfig(calibration_file=tmp_path / "calibration.json"),
+        valve=valve,
+        pan_tilt=pan_tilt,
+        fire_recorder=recorder,
+    )
+
+    service.cleanup()
+    service.cleanup()
+
+    assert events == ["valve-cleanup", "close", "servo-park", "recorder-close"]
+    assert pan_tilt.cleaned and valve.cleaned and recorder.closed
+
+
+@pytest.mark.parametrize("reported_state", [ValveState.CLOSED, ValveState.OPEN, None])
+def test_valve_cleanup_exception_never_authorizes_servo_cleanup_or_retry(
+    tmp_path: Path, reported_state: ValveState | None,
+) -> None:
+    events: list[str] = []
+
+    class FailedTeardownValve(FakeValve):
+        def cleanup(self) -> None:
+            events.append("valve-cleanup-failed")
+            self._state = reported_state  # type: ignore[assignment]
+            raise OSError("GPIO cleanup failed")
+
+    service, pan_tilt, _ = make_service(tmp_path, fire_recorder=FakeFireRecorder())
+    service._valve = FailedTeardownValve()
+    with pytest.raises(OSError, match="GPIO cleanup failed"):
+        service.cleanup()
+    service.cleanup()
+
+    assert events == ["valve-cleanup-failed"]
+    assert pan_tilt.cleaned is False
+    assert pan_tilt.moves == []
+    assert service._fire_recorder.closed is True  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("reported_state", [ValveState.OPEN, None, "closed"])
+def test_cleanup_requires_exact_closed_state_before_servo_cleanup(
+    tmp_path: Path, reported_state: object,
+) -> None:
+    class UncertainValve(FakeValve):
+        def cleanup(self) -> None:
+            self._state = reported_state  # type: ignore[assignment]
+
+    recorder = FakeFireRecorder()
+    service, pan_tilt, _ = make_service(tmp_path, fire_recorder=recorder)
+    service._valve = UncertainValve()
+
+    with pytest.raises(ControlError, match="safe-closed state was not established"):
+        service.cleanup()
+    service.cleanup()
+
+    assert pan_tilt.cleaned is False
+    assert pan_tilt.moves == []
+    assert recorder.closed is True
+
+
+def test_cleanup_state_read_failure_never_authorizes_servo_cleanup(tmp_path: Path) -> None:
+    class UnreadableValve(FakeValve):
+        @property
+        def state(self) -> ValveState:
+            raise OSError("Valve state unavailable")
+
+    recorder = FakeFireRecorder()
+    service, pan_tilt, _ = make_service(tmp_path, fire_recorder=recorder)
+    service._valve = UnreadableValve()
+
+    with pytest.raises(OSError, match="Valve state unavailable"):
+        service.cleanup()
+
+    assert pan_tilt.cleaned is False
     assert recorder.closed is True
 
 
