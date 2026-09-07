@@ -206,6 +206,7 @@ class _SceneInferenceTask:
     deadline_monotonic: float
     enqueued_monotonic: float
     completed: threading.Event
+    expired: threading.Event
     result: ScenePersonSafetyResult | None = None
 
 
@@ -1253,6 +1254,7 @@ class EventClassifier:
             monotonic() + float(timeout_seconds),
             monotonic(),
             threading.Event(),
+            threading.Event(),
         )
         superseded: _SceneInferenceTask | None = None
         with self._scheduler_condition:
@@ -1270,6 +1272,7 @@ class EventClassifier:
             )
             superseded.completed.set()
         if not task.completed.wait(timeout=float(timeout_seconds)) or task.result is None:
+            task.expired.set()
             return self._scene_failure(
                 request_id,
                 event_id,
@@ -1713,6 +1716,17 @@ class EventClassifier:
         task: _SceneInferenceTask,
         result: ScenePersonSafetyResult,
     ) -> None:
+        if (
+            task.expired.is_set() or monotonic() >= task.deadline_monotonic
+        ) and result.status in {"clear", "person"}:
+            result = self._scene_failure(
+                task.request_id,
+                task.event_id,
+                task.track_id,
+                task.packet,
+                "unavailable",
+                "scene_inference_deadline_expired",
+            )
         task.result = result
         with self._lock:
             self._last_scene_result = result

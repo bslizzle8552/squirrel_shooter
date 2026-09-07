@@ -637,6 +637,12 @@ repository path. `manifest.jsonl` is the source of truth for training-eligible
 samples; do not train by blindly scanning every sample directory because excluded
 samples are intentionally retained for audit history.
 
+For a complete read-only pull of all retained captures, classifier evidence,
+logs, calibration, and state followed by a PC-side inventory, use
+[`docs/pi-dataset-collection.md`](docs/pi-dataset-collection.md). The utility is
+incremental across timestamped snapshots and never treats model predictions as
+human-verified training truth.
+
 On first start after upgrading, legacy `captures/classifier/pending`, `accepted`,
 and `rejected` records are copied into their matching event folders. Old files are
 not deleted. A previous classifier rejection becomes Unknown rather than being

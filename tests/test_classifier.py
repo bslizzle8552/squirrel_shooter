@@ -613,6 +613,57 @@ def test_full_frame_scene_dnn_failure_is_truthfully_unavailable_or_error(
     assert result.error
 
 
+def test_late_scene_inference_cannot_publish_or_return_clear(tmp_path: Path) -> None:
+    config = classifier_config(tmp_path)
+    store = ClassifierEvidenceStore(config)
+    inference_started = threading.Event()
+    release_inference = threading.Event()
+
+    class Detector:
+        model_name = "late-scene-detector"
+
+        def classify(self, _image: np.ndarray):
+            inference_started.set()
+            assert release_inference.wait(timeout=2)
+            return [], 1.0
+
+    worker = EventClassifier(config.classifier, store, detector_factory=Detector)  # type: ignore[arg-type]
+    worker.start()
+    try:
+        packet = SceneFramePacket(
+            17,
+            time.monotonic(),
+            np.zeros((40, 60, 3), dtype=np.uint8),
+        )
+        result = worker.classify_scene(
+            "late-request",
+            "late-event",
+            3,
+            packet,
+            timeout_seconds=0.02,
+        )
+        assert inference_started.is_set()
+        assert result.status == "unavailable"
+        assert result.error == "scene_inference_timeout"
+
+        release_inference.set()
+        deadline = time.monotonic() + 1.0
+        latest = worker.latest_scene_result()
+        while (
+            (latest is None or latest.request_id != "late-request")
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+            latest = worker.latest_scene_result()
+
+        assert latest is not None
+        assert latest.status == "unavailable"
+        assert latest.error == "scene_inference_deadline_expired"
+    finally:
+        release_inference.set()
+        worker.stop()
+
+
 def test_current_scene_preempts_queued_background_review_work(tmp_path: Path) -> None:
     config = classifier_config(tmp_path)
     store = ClassifierEvidenceStore(config)
