@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,8 @@ class NightModeConfig:
 
 @dataclass(frozen=True)
 class ClassifierConfig:
+    """LEGACY MobileNet/VOC options; not a future one-class detector contract."""
+
     enabled: bool
     model_definition: Path
     model_weights: Path
@@ -281,6 +284,8 @@ class AppConfig:
     logging: LoggingConfig
     health: HealthConfig
     source_path: Path
+    # Exact bytes parsed by load_config, retained through dataclass overrides.
+    source_sha256: str | None = None
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -357,6 +362,7 @@ def _optional_text_tuple(value: Any, field: str) -> tuple[str, ...]:
 
 
 def _auto_fire_config(raw: dict[str, Any]) -> AutoFireConfig:
+    # LEGACY MobileNet semantic options stay operational until detector migration.
     defaults = AutoFireConfig()
     allowed_classes = _optional_text_tuple(
         raw.get("allowed_classes", list(defaults.allowed_classes)),
@@ -673,7 +679,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     if not config_path.is_file():
         raise ConfigError(f"Configuration file not found: {config_path}")
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        source_bytes = config_path.read_bytes()
+        raw = yaml.safe_load(source_bytes.decode("utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"Could not read configuration: {exc}") from exc
     if not isinstance(raw, dict):
@@ -1035,4 +1042,5 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             _number(health.get("detector_stale_seconds"), "health.detector_stale_seconds", exclusive=True),
         ),
         source_path=config_path.resolve(),
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
     )

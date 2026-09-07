@@ -10,6 +10,7 @@ import math
 import os
 import secrets
 import threading
+from copy import deepcopy
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -33,6 +34,7 @@ from .manual_control import (
     display_click_to_frame_pixel,
 )
 from .motion_runtime import MotionProcessingService
+from .runtime_provenance import build_runtime_provenance
 from .vision_service import VisionService, VisionStatus
 
 
@@ -302,6 +304,7 @@ def create_app(
     vision_service: VisionService | None = None,
     motion_service: MotionProcessingService | None = None,
     manual_control_service: ManualControlService | None = None,
+    runtime_provenance: dict[str, Any] | None = None,
     temperature_reader: Callable[[], float | None] = read_cpu_temperature,
     start_camera: bool = True,
     start_vision: bool = True,
@@ -317,6 +320,11 @@ def create_app(
     if vision is None:
         raise ValueError("create_app requires the shared motion processor")
     camera = camera_service
+    # Cache the construction-time snapshot. GETs must not re-read a newer tree.
+    provenance = (
+        deepcopy(runtime_provenance)
+        if runtime_provenance is not None else build_runtime_provenance(app_config)
+    )
     classifier_store = (
         motion_service.classifier_store
         if motion_service is not None and hasattr(motion_service, "classifier_store")
@@ -353,6 +361,7 @@ def create_app(
         classifier_review_token=classifier_review_token,
         manual_control_service=manual_control,
         manual_control_token=manual_control_token,
+        runtime_provenance=provenance,
     )
 
     if start_camera:
@@ -874,6 +883,7 @@ def create_app(
         events = vision.recent_events()
         return jsonify(
             application_mode=APPLICATION_MODE,
+            runtime_provenance=provenance,
             application_uptime_seconds=round(uptime, 1),
             camera=camera_data,
             detector=detector,

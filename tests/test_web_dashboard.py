@@ -156,6 +156,26 @@ def test_dashboard_loads_when_camera_is_unavailable(
     assert vision.start_calls == 1
 
 
+def test_status_provenance_is_cached_and_read_only(
+    dashboard: tuple[Flask, Path, OfflineCameraService, StaticVisionService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _, camera, vision = dashboard
+    before = app.test_client().get("/api/status").json["runtime_provenance"]
+    monkeypatch.setattr(
+        web_dashboard, "build_runtime_provenance",
+        lambda *_args, **_kwargs: pytest.fail("GET must not rebuild startup identity"),
+    )
+    config = app.extensions["squirrel_config"]
+    config.source_path.write_bytes(config.source_path.read_bytes() + b"\n# later edit\n")
+
+    after = app.test_client().get("/api/status").json["runtime_provenance"]
+
+    assert after == before
+    assert after["schema_version"] == 1
+    assert camera.start_calls == vision.start_calls == 1
+
+
 def test_dashboard_prominently_reports_enabled_auto_fire_from_shared_runtime(tmp_path: Path) -> None:
     config = load_config(write_test_config(tmp_path))
     config = replace(

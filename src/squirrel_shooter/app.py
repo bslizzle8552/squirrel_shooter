@@ -19,6 +19,7 @@ from .config import AppConfig, ConfigError, DEFAULT_CONFIG_PATH, load_config
 from .diagnostics import configure_logging
 from .manual_control import ManualControlService, build_manual_control_service
 from .motion_runtime import MotionProcessingService
+from .runtime_provenance import build_runtime_provenance
 from .thread_names import set_current_thread_name
 from .web_dashboard import create_app, read_cpu_temperature
 
@@ -39,6 +40,7 @@ class ApplicationRuntime:
         manual_control: ManualControlService | None = None,
     ) -> None:
         self.config = config
+        self.provenance = build_runtime_provenance(config)
         cv2.setNumThreads(config.runtime.opencv_threads)
         self.camera = camera or CameraService(
             config.camera,
@@ -338,6 +340,7 @@ def run(config: AppConfig) -> int:
                 camera_service=runtime.camera,
                 motion_service=runtime.motion,
                 manual_control_service=manual_control,
+                runtime_provenance=runtime.provenance,
                 start_camera=False,
                 start_vision=False,
             )

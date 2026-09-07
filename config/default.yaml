@@ -47,7 +47,9 @@ night_mode:
   enter_consecutive_frames: 5
   exit_consecutive_frames: 10
 
-# One asynchronous classification per qualified event. It uses the best frame
+# LEGACY MobileNet/VOC: one asynchronous classification per qualified event.
+# These taxonomy/review options are not a future one-class squirrel contract.
+# It uses the best frame
 # after completion by default, or the qualified live frame when auto-fire is
 # explicitly enabled. The pinned MobileNet-SSD model is unchanged.
 classifier:
@@ -71,7 +73,9 @@ classifier:
   decision_queue_capacity: 2
   evidence_queue_capacity: 8
 
-# Computer-aided firing is explicitly armed here for the supervised field test.
+# LEGACY MobileNet autonomous policy is explicitly armed here as before.
+# Its current person checks remain operational until the one-class migration;
+# a separate person detector/veto is not an owner requirement for that future.
 # It reuses one already-qualified motion event, the existing
 # classifier worker, calibrated pixel interpolation, and the shared physical
 # coordinator. Only actual MobileNet-SSD VOC labels may be allowlisted.
@@ -91,7 +95,8 @@ auto_fire:
   classification_max_age_seconds: 3.0
   target_max_age_seconds: 0.75
   # After each settle, run the one shared DNN on a strictly newer native frame.
-  # Anything but a current, identity-matched clear result is a hard no-fire.
+  # Legacy-only person semantics: anything but a current, identity-matched
+  # clear result is a hard no-fire. Never synthesize this from squirrel output.
   scene_safety_max_age_seconds: 0.75
   scene_safety_timeout_seconds: 1.5
   # Small target motion may authorize directly. Larger but still compatible
