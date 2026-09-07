@@ -1172,14 +1172,18 @@ def test_failed_classification_can_retry_from_saved_input(tmp_path: Path) -> Non
             (20, 10, 20, 16),
         )
         deadline = time.monotonic() + 2
-        while not (event_directory / "classification.json").exists() and time.monotonic() < deadline:
+        # File creation precedes completion of the evidence write. Wait for the
+        # worker's published persistence completion before reading/retrying it.
+        while worker.status().completed < 1 and time.monotonic() < deadline:
             time.sleep(0.01)
+        assert worker.status().completed == 1
         assert store.get_record("retry-event")["classification_status"] == "unclassified"
         model_available = True
         assert worker.retry("retry-event")
         deadline = time.monotonic() + 2
-        while store.get_record("retry-event")["classification_status"] != "known" and time.monotonic() < deadline:
+        while worker.status().completed < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
+        assert worker.status().completed == 2
     finally:
         worker.stop()
 
