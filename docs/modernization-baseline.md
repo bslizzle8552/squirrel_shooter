@@ -72,3 +72,23 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 Use an external, unique `--basetemp` and `--junitxml` location when preserving
 validation evidence. The branch handoff records final commits, exact results,
 remaining phase boundaries, and rollback instructions.
+
+## Phase 0/1 completion
+
+The integrated offline suite passes **592 tests** (536 preserved baseline +56
+new cases). This includes cleanup exceptions/unknown valve state, backend
+calibration inhibition, canonical large-object association rejection, camera
+publication epochs, legacy semantic isolation, startup provenance, and the
+retained September 7 late-classification trace. One existing asynchronous retry
+test now waits for published persistence completion instead of file existence.
+
+The unsupported angle-based `move_and_fire` shortcut and unused `modes.py` enum
+were removed. Conditional legacy vision/detection/wrapper/diagnostic paths,
+historical prediction/review data and all operational configuration values
+remain. Runtime-health composition and generation-aware consumer invalidation
+are deferred as described in [runtime provenance](runtime-provenance.md).
+
+This is ready for the separately authorized Phase 2 recording work in this
+worktree. It is not a deployment or physical validation result. Continue to
+preserve current hardware values and the conservative pre-actuation ledger
+while designing recording changes.

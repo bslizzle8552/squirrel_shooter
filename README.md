@@ -1,17 +1,24 @@
 # Squirrel Squirter
 
-Squirrel Squirter's normal application is a Raspberry Pi garden watcher with a
-separately gated manual aiming and calibration page:
+Squirrel Squirter's normal application is a Raspberry Pi garden watcher with
+calibrated manual control and a legacy event-driven automatic firing path:
 
-**one shared USB camera -> motion groups -> one lightweight event classification -> private dashboard and manual controls**
+**one shared USB camera -> motion groups -> legacy event classification -> private dashboard and shared physical coordinator**
 
-The normal application does not recognize squirrels, translate camera pixels to
-servo angles, or automatically aim and fire. A small
-MobileNet-SSD stress test can label common VOC objects such as `person` and `car`,
-but those labels are not squirrel recognition. The manual page can command the
-bench-verified PCA9685 pan/tilt controller within its configured limits. A
-normally-closed solenoid GPIO driver also exists, but it stays disabled and LOW
-until an actual BCM pin is configured explicitly. No GPIO pin is guessed.
+The current MobileNet-SSD classifier emits VOC labels and does not recognize
+squirrels. The application can map native camera pixels through the saved
+nine-point calibration and automatically aim/fire when its legacy policy and
+physical checks permit. The checked-in configuration enables that legacy path,
+servos, and the valve on its explicitly configured GPIO. The configuration is
+operational, so starting the normal application is not an offline audit action.
+
+Modernization work is isolated on `squirrel-runtime-v2`; see the
+[baseline contract](docs/modernization-baseline.md) and
+[runtime provenance contract](docs/runtime-provenance.md). Phase 0/1 does not
+deploy this branch. The future one-class squirrel policy requires no separate
+person detector or veto; current MobileNet person checks remain legacy behavior
+until that migration. Calibration edit inhibits automatic engagement in the
+backend while manual calibration/aiming remains available.
 
 The motion watcher's labels remain size/movement heuristics. The optional object
 classifier is a separate record and never outputs a definitive `squirrel`
@@ -21,7 +28,7 @@ saved image and clip.
 ## One camera, two consumers
 
 `python -m squirrel_shooter.app` is the normal entry point. One lock-protected
-camera runtime opens `/dev/video*` exactly once, measures the negotiated stream,
+camera runtime owns one active capture handle, measures the negotiated stream,
 and publishes raw frames to the motion processor. The motion processor publishes
 annotated frames back to the same runtime for the dashboard's MJPEG stream.
 The dashboard stream waits for watcher-annotated frames rather than silently
@@ -61,8 +68,9 @@ stops the dashboard, and finally releases the sole camera handle.
   commanded-angle display, nine-point calibration records, and a separately
   gated valve test pulse.
 
-The camera currently delivers approximately 9.9-10 FPS at 1280x720. The watcher
-measures the real rate and uses monotonic elapsed time for warmup, cooldown,
+The configured source request is 1280x720 at 15 FPS; the watcher samples at its
+configured 10 FPS target. Actual capture rate and negotiated mode come from
+runtime telemetry. The watcher uses monotonic elapsed time for warmup, cooldown,
 recovery, event duration, pre-roll, and post-roll. Frame counts are used only for
 consecutive-frame persistence and the minimum warmup sample. It also works when
 the negotiated rate changes.
