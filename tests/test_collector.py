@@ -66,6 +66,23 @@ def test_collector_partial_start_unwinds_only_owned_resources(tmp_path,monkeypat
     with pytest.raises(RuntimeError,match='closed'): runtime.start()
 
 
+@pytest.mark.parametrize('threads', [1, 2])
+def test_collector_applies_opencv_budget_before_service_construction(tmp_path, monkeypatch, threads):
+    import squirrel_shooter.collector_app as collector
+    calls = []
+    config = load_config(write_test_config(tmp_path))
+    config = replace(config, runtime=replace(config.runtime, opencv_threads=threads))
+    monkeypatch.setattr(collector.cv2, 'setNumThreads', lambda value: calls.append(('threads', value)))
+    def camera_factory(*args, **kwargs):
+        assert calls == [('threads', threads)]
+        calls.append(('camera', None))
+        return SimpleNamespace(stop=lambda: None)
+    monkeypatch.setattr(collector, 'CameraService', camera_factory)
+    runtime = CollectorRuntime(config, detector=Detector(), recording=SimpleNamespace(stop=lambda: None))
+    runtime.stop()
+    assert calls == [('threads', threads), ('camera', None)]
+
+
 def test_collector_recording_and_detector_share_pristine_source(tmp_path,rig,monkeypatch):
     forbid_controls(monkeypatch)
     service=rig.build()

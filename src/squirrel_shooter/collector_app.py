@@ -10,6 +10,7 @@ import argparse
 import secrets
 from dataclasses import asdict
 
+import cv2
 from flask import Flask, abort, jsonify, render_template, request
 
 from .camera_service import CameraService
@@ -23,6 +24,7 @@ class CollectorRuntime:
     """Explicit dependencies; no physical controls or legacy application runtime."""
     def __init__(self, config, *, camera=None, detector=None, recording=None):
         self.config = config
+        cv2.setNumThreads(config.runtime.opencv_threads)
         self.camera = camera if camera is not None else CameraService(
             config.camera, shared_settings=config.shared_camera, encode_jpeg=False,
             frame_buffer_seconds=config.recording.pre_roll_seconds,
