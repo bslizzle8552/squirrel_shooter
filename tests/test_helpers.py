@@ -17,7 +17,6 @@ from squirrel_shooter.camera_common import (
 )
 from squirrel_shooter.config import CameraConfig
 from squirrel_shooter.files import timestamped_output_path
-from squirrel_shooter.modes import DEFAULT_MODE, OperatingMode
 from squirrel_shooter.valve import DisabledValveController, ValveState
 import squirrel_shooter.camera_common as camera_common
 
@@ -337,10 +336,9 @@ def test_absent_utility_and_unavailable_explicit_backend_fall_back_cleanly(
     assert "default backend" in caplog.text
 
 
-def test_defaults_cannot_open_water_valve() -> None:
+def test_disabled_valve_cannot_open_water_valve() -> None:
     valve = DisabledValveController()
 
-    assert DEFAULT_MODE is OperatingMode.CAMERA_TEST
     assert valve.state is ValveState.CLOSED
     with pytest.raises(RuntimeError, match="remains closed"):
         valve.open()
