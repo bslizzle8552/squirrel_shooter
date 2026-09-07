@@ -91,16 +91,24 @@ class CameraStatus:
     capture_backend: str = "unknown"
     source_mode_matches_request: bool = False
     source_mode_mismatch_fields: tuple[str, ...] = ()
+    frame_generation: int = 0
 
 
 @dataclass(frozen=True)
 class FramePacket:
-    """One raw frame published by the sole camera-reading thread."""
+    """One raw frame published by the sole camera-reading thread.
+
+    Sequence increases for this CameraService's lifetime, including reconnects.
+    Generation changes on a new capture handle or native frame-shape change.
+    Times describe receipt after read(), not a sensor exposure timestamp.
+    Borrowed pixels must not be mutated by consumers.
+    """
 
     sequence: int
     frame: np.ndarray
     received_at: str
     received_monotonic: float = 0.0
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -110,6 +118,7 @@ class BufferedFrameInfo:
     sequence: int
     received_at: str
     received_monotonic: float
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -118,6 +127,7 @@ class _BufferedRawFrame:
     frame: np.ndarray
     received_at: str
     received_monotonic: float
+    generation: int = 0
 
 
 class CameraService:
@@ -155,6 +165,7 @@ class CameraService:
         self._frame_buffer_fps = float(frame_buffer_fps)
         self._frame_buffer_interval = 1.0 / self._frame_buffer_fps
         self._condition = threading.Condition()
+        self._frame_generation = 0
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._mjpeg_thread: threading.Thread | None = None
@@ -358,6 +369,7 @@ class CameraService:
                 self._capture_backend,
                 self._source_mode_verified and not self._source_mode_mismatch_fields,
                 self._source_mode_mismatch_fields,
+                self._frame_generation,
             )
 
     def latest_frame(self, *, copy: bool = True) -> np.ndarray | None:
@@ -403,6 +415,7 @@ class CameraService:
                 frame,
                 self._last_frame_at,
                 self._last_frame_monotonic or monotonic(),
+                self._frame_generation,
             )
 
     def buffered_frame_metadata(
@@ -416,7 +429,7 @@ class CameraService:
 
         with self._condition:
             return [
-                BufferedFrameInfo(item.sequence, item.received_at, item.received_monotonic)
+                BufferedFrameInfo(item.sequence, item.received_at, item.received_monotonic, item.generation)
                 for item in self._frame_buffer
                 if item.received_monotonic >= since_monotonic
                 and (until_monotonic is None or item.received_monotonic <= until_monotonic)
@@ -445,7 +458,7 @@ class CameraService:
                 self._shared_frame_borrows += len(buffered)
         for item in buffered:
             frame = item.frame.copy() if copy else item.frame
-            yield FramePacket(item.sequence, frame, item.received_at, item.received_monotonic)
+            yield FramePacket(item.sequence, frame, item.received_at, item.received_monotonic, item.generation)
 
     def publish_annotated(self, source_sequence: int, frame: np.ndarray, *, copy: bool = True) -> bool:
         """Publish motion annotations without encoding work when nobody is viewing."""
@@ -684,7 +697,7 @@ class CameraService:
                     )
                 consecutive_failures = 0
                 previous_received_monotonic: float | None = None
-                physical_frame_mode_verified = False
+                previous_frame_shape: tuple[int, ...] | None = None
                 while not self._stop_event.is_set():
                     read_started = perf_counter()
                     ok, frame = capture.read()
@@ -707,8 +720,8 @@ class CameraService:
                         continue
                     consecutive_failures = 0
                     height, width = frame.shape[:2]
-                    if not physical_frame_mode_verified:
-                        physical_frame_mode_verified = True
+                    generation_changed = previous_frame_shape != frame.shape
+                    if generation_changed:
                         physical_mismatch_fields = source_mode_mismatches(
                             self.settings,
                             width,
@@ -722,7 +735,7 @@ class CameraService:
                                 LOGGER.warning if mismatch_fields else LOGGER.info
                             )
                             log_physical_mode(
-                                "First physical camera frame changed source-mode verification: %s",
+                                "Physical camera frame changed source-mode verification: %s",
                                 ",".join(mismatch_fields) or "matched",
                                 extra={
                                     "structured_data": {
@@ -767,6 +780,9 @@ class CameraService:
                     self._published_frame_copy_timer.add(perf_counter() - copy_started)
                     publish_started = perf_counter()
                     with self._condition:
+                        if generation_changed:
+                            self._frame_generation += 1
+                            previous_frame_shape = frame.shape
                         self._online = True
                         self._width = width
                         self._height = height
@@ -787,6 +803,7 @@ class CameraService:
                                     published_frame,
                                     received_at,
                                     received_monotonic,
+                                    self._frame_generation,
                                 )
                             )
                             cutoff = received_monotonic - self._frame_buffer_seconds
