@@ -195,3 +195,22 @@ def test_media_rejects_wrong_role_and_symlink(tmp_path):
     try:path.symlink_to(outside)
     except OSError:pytest.skip('host does not permit symlinks')
     with pytest.raises(ValueError):media.session(session)
+
+def test_preview_resize_is_presentation_only(tmp_path):
+    raw=np.full((180,320,3),71,np.uint8)
+    camera=CameraService(CameraConfig(0,320,180,30,tmp_path),
+        capture_factory=lambda _:ContinuousCapture(raw,threading.Event()),
+        platform_checker=lambda:True,preview_maximum_width=160)
+    camera.start();stream=None
+    try:
+        wait_until(lambda:camera.status().frames_received>0)
+        source=camera.wait_for_frame(-1,copy=False)
+        stream=camera.mjpeg_frames(maximum_fps=2,annotated_only=False)
+        data=next(stream).split(b'\r\n\r\n',1)[1]
+        decoded=cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
+        assert decoded.shape==(90,160,3)
+        assert source.frame.shape==(180,320,3) and np.all(source.frame==71)
+        assert not source.frame.flags.writeable
+    finally:
+        if stream:stream.close()
+        camera.stop()

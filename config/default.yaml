@@ -359,6 +359,7 @@ collector_preview:
   enabled: true
   maximum_fps: 2.0
   jpeg_quality: 65
+  maximum_width: 640
 
 automatic_recording:
   enabled: false

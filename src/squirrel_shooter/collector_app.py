@@ -30,6 +30,7 @@ class CollectorRuntime:
         self.camera = camera if camera is not None else CameraService(
             config.camera, shared_settings=config.shared_camera, encode_jpeg=config.collector_preview.enabled,
             jpeg_quality=config.collector_preview.jpeg_quality,
+            preview_maximum_width=config.collector_preview.maximum_width,
             frame_buffer_seconds=config.recording.pre_roll_seconds,
             frame_buffer_fps=config.recording.target_fps)
         self.detector = detector if detector is not None else NcnnSquirrelDetector(config.detector)

@@ -141,6 +141,7 @@ class CameraService:
         capture_factory: Callable[[CameraConfig], Any] = open_camera,
         platform_checker: Callable[[], bool] = is_raspberry_pi,
         jpeg_quality: int = 80,
+        preview_maximum_width: int = 0,
         encode_jpeg: bool = True,
         frame_buffer_seconds: float = 0.0,
         frame_buffer_fps: float = 12.0,
@@ -156,6 +157,9 @@ class CameraService:
         self._capture_factory = capture_factory
         self._platform_checker = platform_checker
         self._jpeg_quality = jpeg_quality
+        if type(preview_maximum_width) is not int or preview_maximum_width < 0:
+            raise ValueError('preview_maximum_width must be a nonnegative integer')
+        self._preview_maximum_width = preview_maximum_width
         self._encode_jpeg = encode_jpeg
         if frame_buffer_seconds < 0:
             raise ValueError("frame_buffer_seconds must be zero or greater")
@@ -561,6 +565,11 @@ class CameraService:
             encode_started = perf_counter()
             encode_error: str | None = None
             try:
+                # Presentation-only resize; the shared native frame stays read-only.
+                if self._preview_maximum_width and frame.shape[1] > self._preview_maximum_width:
+                    frame = cv2.resize(frame, (self._preview_maximum_width,
+                        max(1, round(frame.shape[0] * self._preview_maximum_width / frame.shape[1]))),
+                        interpolation=cv2.INTER_AREA)
                 encoded, jpeg = cv2.imencode(
                     ".jpg",
                     frame,

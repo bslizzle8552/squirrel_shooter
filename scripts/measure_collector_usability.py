@@ -104,6 +104,11 @@ def main():
         with urllib.request.urlopen(req,timeout=5) as response:result=json.load(response)
         event('manual_'+action,status=result)
         return result
+    def drain():
+        deadline=time.monotonic()+25
+        while runtime.recording.status(compact=True)['pending_sessions'] and time.monotonic()<deadline:
+            phase('finalization',2)
+        assert runtime.recording.status(compact=True)['pending_sessions']==0, 'finalization timeout'
     viewer_stop=threading.Event();viewer=None
     def view():
         try:
@@ -142,7 +147,9 @@ def main():
             assert not state['manual_remaining_seconds'] and state['session_id']==auto_session[0]
         phase('C_preview_auto_manual_overlap',14,[(2,check_auto),(4,join_manual),(6,stop_manual)])
         runtime.detector.infer=real_infer
+        drain()
         post('start');phase('C_preview_manual30',35)
+        drain()
         with urllib.request.urlopen(base+'/api/recordings',timeout=5) as response:listing=json.load(response)
         assert listing['recordings'] and any(row['clips'] for row in listing['recordings']),listing
         for row in listing['recordings']:
@@ -158,6 +165,7 @@ def main():
         if http.is_alive():server.shutdown();http.join(3)
         server.server_close()
         if viewer:viewer.join(3)
+        succeeded = succeeded and not runtime.recording.status(compact=True)['shutdown_timed_out']
         event('stopped',passed=succeeded,status=runtime.status(),audit=audit(),owners=command(['sudo','-n','fuser','-v','/dev/video0']))
         for name,data in [('samples',samples),('observations',observations),('events',events)]:
             (out/(name+'.json')).write_text(json.dumps(data,indent=2),encoding='utf-8')

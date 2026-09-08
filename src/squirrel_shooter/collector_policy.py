@@ -12,6 +12,7 @@ class CollectorPreviewConfig:
     enabled: bool = True
     maximum_fps: float = 2.0
     jpeg_quality: int = 65
+    maximum_width: int = 640
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
@@ -21,6 +22,8 @@ class CollectorPreviewConfig:
             raise ValueError('collector_preview.maximum_fps must be 1..5')
         if type(self.jpeg_quality) is not int or not 30 <= self.jpeg_quality <= 85:
             raise ValueError('collector_preview.jpeg_quality must be 30..85')
+        if type(self.maximum_width) is not int or not 160 <= self.maximum_width <= 1280:
+            raise ValueError('collector_preview.maximum_width must be 160..1280')
 
 
 @dataclass(frozen=True)
