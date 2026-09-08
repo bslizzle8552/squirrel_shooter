@@ -171,7 +171,7 @@ Session IDs and filenames are constrained; symlinks/path escapes are rejected. M
 - `5c3bf5d10f101641e5e8f4d36c3639ea86be02bb`: collector functionality, metadata, UI, tests and harness.
 - `dfe359907441c54aeb65e236e6c8bca19061fa7a`: smaller preview and completed finalization validation.
 
-Both source commits were pushed to `origin/squirrel-runtime-v2`. This handoff is a subsequent documentation-only commit. Final deployed source is **dfe359907441c54aeb65e236e6c8bca19061fa7a**. All 70 deployed source/package/template/config files match the receipt and corresponding committed bytes. Only minimal deltas were installed into the existing isolated snapshot, with backups. The final 8 FPS choice changes only isolated `collector.yaml`.
+Both source commits were pushed to `origin/squirrel-runtime-v2`. This handoff is a subsequent documentation-only commit. Final deployed source is **dfe359907441c54aeb65e236e6c8bca19061fa7a**. All 70 deployed source/package/template/config files match the final receipt. Sixty-seven match committed bytes exactly. Three inherited legacy static files (console.js, manual_control.js and recording_controls.js) retain their pre-existing CRLF endings; their LF-normalized hashes match Git. All Phase 4.6 changed files match committed bytes exactly. The legacy static files were preserved unchanged. Only minimal deltas were installed into the existing isolated snapshot, with backups. The final 8 FPS choice changes only isolated `collector.yaml`.
 
 Collector config SHA-256: `89675116feb1c763ef88868b047d9c1e85924466a5da51d7162fccd4cef3fa6b`.
 
@@ -219,3 +219,25 @@ Rollback means stop this collector and leave legacy services stopped. Backups: `
 The evidence root retains preflight/deployment/final receipts, threshold results, test XMLs, `initial_run/`, `recheck_run/`, `final_run/`, three result TARs, codec probe results, downloaded browser AVI, screenshots and `ARTIFACT_SHA256SUMS.txt`. Reproduction scripts accompany them. `final_run/ANALYSIS.json` and `MEDIA_VERIFICATION.json` distinguish performance, source identities and lossy decoded differences.
 
 This is a useful collection appliance, not a fidelity-perfect recorder or validated animal-visit classifier. Startup drops, held presentations, scene-dependent codec cost, finite quota, client playback speed, no reboot autostart and unproven long-duration thermals remain explicit. No firing threshold, aiming, water/servo values, GPIO, calibration, training promotion, model training or export was introduced. Stop this pass at usable data collection.
+
+
+## Identity appendix
+
+| Runtime file | Final SHA-256 |
+|---|---|
+| `src/squirrel_shooter/camera_service.py` | `ea4eab65a456094af40fa2cd2c55a50efbc512f8fc3f90e534cb7a046837d43c` |
+| `src/squirrel_shooter/collector_app.py` | `928bd969ce4887be20ab8093c5648e185957cbb1b248fe0cb3755f144ae242a8` |
+| `src/squirrel_shooter/collector_policy.py` | `47592d39ec7f2f06b0dcc6ac767abe944a3a1a0f2c3c2b969993eb22b4639413` |
+| `src/squirrel_shooter/collector_media.py` | `b20e627883cfb3c9c1701e19ac90ec016680bcdbbb2d508a8a516568009ace61` |
+| `src/squirrel_shooter/inference_worker.py` | `1ac37453e692733a39574c52148fdf3b3d0c44a3287204c5cff934cbcb0d3728` |
+| `src/squirrel_shooter/recording.py` | `dad1e94e035d450e658fd198796be5f8318339f8c238c095181f1230299abf4c` |
+| `src/squirrel_shooter/static/collector_player.js` | `b41e916a24c2582eabc697db7ae6e2c3cc59f0bb12511b71acc506085194e10a` |
+
+| Protected legacy file | Unchanged SHA-256 |
+|---|---|
+| `/home/bslizzle8552/squirrel_shooter/config/default.yaml` | `4ecbc395821cde56bb63add9a9eb72ccc1ad92f2e6eb16db3e26dc974a35dd52` |
+| `/home/bslizzle8552/squirrel_shooter/config/calibration_points.json` | `5ed23453e6e419fd13ae0e2ddaadc079494113aba98e5d8a8e5529f54ca26cab` |
+| `/home/bslizzle8552/squirrel_shooter/captures/auto-fire-rate-limit.json` | `36455fc7639120464a498a5fa377661d78ceda2c157ea25c5e89dbc80cfb5089` |
+| `/home/bslizzle8552/.config/systemd/user/squirrel-squirter.service` | `2847e1e7910436f3005fc93ceebf1729146299ceef9c861d34e78317c9533ba3` |
+
+The inherited line-ending distinction is recorded in `git_receipt_comparison.json` and `newline_audit.stdout`; it required no source change. Final no-viewer verification confirms zero further JPEG encodes while inference continues.
