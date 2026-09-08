@@ -30,9 +30,10 @@ class DetectorObservation:
 
 
 class LatestFrameInferenceWorker:
-    def __init__(self, camera, detector: SquirrelDetectorAdapter, config: DetectorConfig, *, clock=monotonic):
+    def __init__(self, camera, detector: SquirrelDetectorAdapter, config: DetectorConfig, *, clock=monotonic, observer=None):
         self.camera, self.detector, self.config = camera, detector, config
         self._clock = clock
+        self._observer = observer
         self._condition = threading.Condition()
         self._stop = threading.Event()
         self._pending = None
@@ -143,6 +144,13 @@ class LatestFrameInferenceWorker:
                 packet.frame.shape[0], packet.received_monotonic, packet.received_at, start, end, age, output, reason)
             if revision == self._revision and not self._stop.is_set():
                 self._result = observation
+                if self._observer is not None and output.available and not reason:
+                    # Brief in-memory policy callback under the source revision lock.
+                    # No disk/encoding work; source cannot change between validation and delivery.
+                    try:
+                        self._observer(observation)
+                    except Exception:
+                        self._counts['observer_error_count'] += 1
             self._state = 'stopped' if self._stop.is_set() else ('idle' if output.available else 'unavailable')
             self._counts['inference_count'] += 1
             self._condition.notify_all()
@@ -201,7 +209,7 @@ class LatestFrameInferenceWorker:
             counters = {name:self._counts[name] for name in (
                 'skipped_cadence_count', 'superseded_pending_count', 'stale_before_inference_count',
                 'stale_after_inference_count', 'error_unavailable_count', 'duplicate_or_regressed_count',
-                'source_change_count', 'inference_count')}
+                'source_change_count', 'inference_count', 'observer_error_count')}
             return dict(self._backend_status, **counters, worker_state=self._state,
                         nominal_cadence_hz=self.config.target_hz, in_flight=self._inflight,
                         pending_frame=self._pending is not None,

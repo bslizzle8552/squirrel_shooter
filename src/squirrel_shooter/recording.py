@@ -142,6 +142,11 @@ class _Session:
     pre_packets: deque = field(default_factory=deque)
     manifest_started: bool = False
     segments: list[dict[str, Any]] = field(default_factory=list)
+    observations: deque = field(default_factory=lambda: deque(maxlen=2048))
+    observation_count: int = 0
+    first_observation: dict | None = None
+    maximum_confidence: float | None = None
+    manual_requested: bool = False
 
 
 class RecordingService:
@@ -216,6 +221,7 @@ class RecordingService:
         with self._lock:
             session = self._ensure_session(now)
             session.manual_until = min(session.maximum_until, now + self.config.manual_duration_seconds)
+            session.manual_requested = True
             self._event(session, "manual_start_or_extend", now, deadline=session.manual_until)
         self._wake.set()
         return self.status()
@@ -231,7 +237,8 @@ class RecordingService:
         return self.status()
 
     def extend_automatic_recording(self, *, event_id: str, observed_monotonic: float,
-                                   reason: str, visit_id: str | None = None) -> dict[str, Any]:
+                                   reason: str, visit_id: str | None = None,
+                                   observation: dict | None = None, return_status: bool = True) -> dict[str, Any]:
         now = self._time()
         for value in (event_id, reason, visit_id if visit_id is not None else "unspecified"):
             if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value) is None:
@@ -243,6 +250,16 @@ class RecordingService:
         deadline = observed_monotonic + self.config.automatic_tail_seconds
         if deadline <= now:
             raise RecordingError("observation_tail_expired")
+        if observation is not None:
+            try:
+                encoded = json.dumps(observation, allow_nan=False)
+                confidence = observation['confidence']
+                if (len(encoded) > 4096 or isinstance(confidence, bool) or not 0 <= confidence <= 1
+                        or observation['source_monotonic'] != observed_monotonic):
+                    raise ValueError('invalid observation metadata')
+                observation = json.loads(encoded)  # Detached bounded metadata, never caller-owned.
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RecordingError('invalid_observation_metadata') from exc
         key = json.dumps([event_id, visit_id, reason])
         with self._lock:
             session = self._ensure_session(now)
@@ -255,9 +272,15 @@ class RecordingService:
                      "observed_monotonic": observed_monotonic, "until": min(deadline, session.maximum_until)}
             session.automatic[key] = entry
             session.identities[key] = entry
+            if observation is not None:
+                session.observations.append(observation)
+                session.observation_count += 1
+                if session.first_observation is None:
+                    session.first_observation = observation
+                session.maximum_confidence = max(session.maximum_confidence or 0, observation['confidence'])
             self._event(session, "automatic_extend", now, **entry)
         self._wake.set()
-        return self.status()
+        return self.status() if return_status else {'session_id': session.id}
 
     def _finish(self, session: _Session, reason: str, now: float) -> None:
         session.state, session.stop_reason = "finalizing", reason
@@ -285,7 +308,7 @@ class RecordingService:
             self._finish(session, "maximum_session" if now >= session.maximum_until else reason,
                          min(now, session.maximum_until, prior_deadline or now) if reason == "deadlines_expired" else now)
 
-    def _summary(self, session: _Session) -> dict[str, Any]:
+    def _summary(self, session: _Session, *, compact: bool = False) -> dict[str, Any]:
         return {"schema_version": 2, "session_id": session.id, "status": session.state,
                 "file_role": "clean_authoritative", "parent_session_id": None,
                 "start_monotonic": session.started, "start_wall": session.wall,
@@ -293,6 +316,16 @@ class RecordingService:
                 "automatic_reasons": list(session.automatic.values()), "source_identities": list(session.identities.values()),
                 "timeline": list(session.timeline), "timeline_omitted": session.timeline_omitted,
                 "start_reasons": session.start_reasons,
+                "manual_requested": session.manual_requested,
+                "squirrel_observations": [] if compact else list(session.observations),
+                "qualifying_observation_count": session.observation_count,
+                "observations_omitted": max(0, session.observation_count - len(session.observations)),
+                "first_qualifying_observation": session.first_observation,
+                "last_qualifying_observation": session.observations[-1] if session.observations else None,
+                "maximum_squirrel_confidence": session.maximum_confidence,
+                "extension_count": max(0, session.observation_count - 1),
+                "pre_roll_seconds": self.config.pre_roll_seconds,
+                "automatic_tail_seconds": self.config.automatic_tail_seconds,
                 "stop_reason": session.stop_reason, "error": session.error,
                 "end_monotonic": session.ended_monotonic,
                 "source_frames": session.source_frames, "written_frames": session.written_frames,
@@ -309,10 +342,13 @@ class RecordingService:
                 "retention_protected": True, "retention_policy": "no automatic deletion; quota admission",
                 "derivatives": [], "fire_recording": "legacy compatibility path unchanged"}
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, compact: bool = False) -> dict[str, Any]:
         with self._lock:
             session = self._active or (self._sessions[-1] if self._sessions else None)
-            result = deepcopy(self._summary(session) if session else self._last or {})
+            payload = self._summary(session, compact=compact) if session else self._last or {}
+            if compact:
+                payload = {k: v for k, v in payload.items() if k not in {"squirrel_observations", "timeline"}}
+            result = deepcopy(payload)
             result.update(enabled=self.config.enabled, ready=self._ready and not self._closed,
                           active=self._active is not None, queue_depth=self._queue.qsize(),
                           queue_capacity=self.config.queue_capacity, pending_sessions=len(self._sessions),
@@ -321,6 +357,7 @@ class RecordingService:
                           last_error=self._last_error, shutdown_timed_out=self._shutdown_timed_out)
             result["manual_remaining_seconds"] = max(0.0, (session.manual_until or 0) - self._clock()) if session else 0
             result["automatic_active"] = bool(session and session.automatic)
+            result['automatic_remaining_seconds'] = max(0, max((v['until'] for v in session.automatic.values()), default=0) - self._clock()) if session else 0
             return result
 
     def _admit(self, session: _Session, packet: Any, *, pre_roll: bool = False) -> None:

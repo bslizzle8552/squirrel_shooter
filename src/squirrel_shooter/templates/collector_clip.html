@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clean recording</title><style>body{font:16px system-ui;max-width:1000px;margin:2rem auto;padding:0 1rem;background:#14201b;color:#eef6ef}canvas{width:100%;background:#080d09}button{font:inherit;padding:.7rem;margin:.5rem}a{color:#b5e5c9}</style></head><body>
+<h1>Clean recording · {{ session_status|upper }}</h1><p>{{ session_id }} / {{ filename }}</p>
+<p>Native MJPEG evidence. Playback decodes in your browser; the Pi serves the original file.</p>
+<canvas id="video" width="{{ segment.width }}" height="{{ segment.height }}" aria-label="Recorded camera video"></canvas>
+<button id="play">Load and play</button><button id="pause" disabled>Pause</button><p id="message" role="status">{{ '%.1f'|format(segment.playback_duration_seconds) }} seconds · {{ segment.status|upper }}</p>
+<p><a href="{{ url_for('recording_file',session_id=session_id,filename=filename,download=1) }}">Download original AVI</a> · <a href="/">Collector</a></p>
+<script src="{{ url_for('static',filename='collector_player.js') }}"></script>
+<script>cleanAviPlayer({url:{{ url_for('recording_file',session_id=session_id,filename=filename)|tojson }},fps:{{ segment.target_fps|tojson }}});</script>
+</body></html>

@@ -1,30 +1,52 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Squirrel collector diagnostics</title>
-<style>body{font:16px system-ui;margin:2rem auto;padding:0 1rem;max-width:1000px;background:#14201b;color:#eef6ef}button{padding:.8rem;margin:.3rem;font:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#23342a;padding:1rem}h1{font-size:1.7rem}#message{min-height:1.5rem}</style></head>
-<body><h1>Squirrel collector diagnostics</h1>
-<p>Collector mode · Physical controls unavailable · Detection floor is diagnostic</p>
-<button id="record">Record 30 seconds</button><button id="stop">Stop recording</button>
-<p id="message" role="status"></p><pre id="status" aria-label="Collector status">Loading…</pre>
+<title>Squirrel data collector</title>
+<style>body{font:16px system-ui;margin:1.5rem auto;padding:0 1rem;max-width:1000px;background:#14201b;color:#eef6ef}button,a{font:inherit}button{padding:.8rem;margin:.3rem;border-radius:.4rem;cursor:pointer}a{color:#b5e5c9}h1{font-size:1.7rem}section{background:#23342a;padding:1rem;margin:1rem 0;border-radius:.5rem}#preview{width:100%;max-height:65vh;object-fit:contain;background:#0c120f}#message{min-height:1.5rem}.muted{color:#bbcbbf}.warning{color:#ffce80}article{border-top:1px solid #536158;padding:.8rem 0;overflow-wrap:anywhere}article a{display:inline-block;margin:.3rem .8rem .3rem 0}#session{overflow-wrap:anywhere}</style></head>
+<body><h1>Squirrel data collector</h1><p class="muted">Clean camera evidence · Physical controls unavailable</p>
+{% if preview_enabled %}<img id="preview" src="/preview.mjpg" alt="Live camera preview"><p id="preview-note" class="muted">Live presentation preview · 2 FPS maximum</p>{% else %}<p>Preview disabled in configuration.</p>{% endif %}
+<section aria-live="polite"><strong id="detector">Connecting to detector…</strong><p id="detection">Waiting for status</p><small id="policy"></small></section>
+<section><button id="record">Record 30 seconds</button><button id="stop">Stop recording</button><p id="recording">Connecting to recorder…</p><p id="session" class="muted"></p><p id="message" role="status"></p><small>Stop clears the manual request. Squirrel detections keep automatic recording active.</small></section>
+<section><h2>Recent recordings</h2><p class="muted">Clean native AVI segments. Degraded clips retain useful evidence and are marked below.</p><div id="recent">Loading recordings…</div></section>
+<p><a href="/api/status" target="_blank" rel="noopener">Full diagnostics</a></p>
 <script>
 const token = {{ recording_token|tojson }};
+const el = id => document.getElementById(id);
+const confidence = value => value == null ? 'none' : Number(value).toFixed(4);
 async function refresh() {
-  try {
-    const r = await fetch('/api/status');
-    if (!r.ok) throw new Error('Status unavailable');
-    document.getElementById('status').textContent = JSON.stringify(await r.json(), null, 2);
-  } catch (e) { document.getElementById('message').textContent = e.message; }
+ try {
+  const response=await fetch('/api/status'); if(!response.ok) throw Error('Status unavailable');
+  const s=await response.json(), d=s.detector, a=s.automatic_recording, r=s.recording;
+  el('detector').textContent = 'Detector: ' + (d.result_available ? 'RUNNING' : 'UNAVAILABLE') + (d.last_inference_latency_seconds == null ? '' : ' · ' + Math.round(d.last_inference_latency_seconds*1000) + ' ms inference');
+  el('detection').textContent = (a.detected_recently ? 'SQUIRREL DETECTED · ' : '') + 'Current confidence: ' + confidence(d.last_top_squirrel_confidence) + (a.last_observation ? ' · Last qualifying: ' + confidence(a.last_observation.confidence) + ' (' + a.last_seen_seconds.toFixed(1) + ' sec ago)' : ' · No qualifying squirrel seen');
+  el('policy').textContent='Automatic recording ' + (a.enabled ? 'ON' : 'OFF') + ' · RECORDING-ONLY threshold ' + a.squirrel_confidence + ' · Tail ' + a.tail_seconds + ' seconds';
+  const manual=r.manual_remaining_seconds>0, auto=r.automatic_active;
+  const remaining=Math.max(r.manual_remaining_seconds||0,r.automatic_remaining_seconds||0);
+  const degraded=(r.queue_dropped||0)>0 || r.status==='degraded';
+  el('recording').textContent=(r.active ? 'RECORDING · ' + (manual&&auto ? 'MANUAL + AUTO' : auto ? 'AUTO' : 'MANUAL') + ' · '+remaining.toFixed(1)+' sec remaining' : (r.status==='finalizing' ? 'FINALIZING' : 'Not recording')) + (degraded ? ' · DEGRADED ('+(r.queue_dropped||0)+' drops)' : '') + (r.last_error||r.error||a.error ? ' · ERROR: '+(r.last_error||r.error||a.error) : '');
+  el('recording').className=degraded||r.error||r.last_error||a.error?'warning':'';
+  el('session').textContent=r.session_id ? 'Session '+r.session_id : '';
+  el('record').disabled=!r.ready||!!r.last_error; el('stop').disabled=!manual;
+  if(el('preview-note')) el('preview-note').textContent='Live presentation preview · '+s.preview.maximum_fps+' FPS maximum · JPEG quality '+s.preview.jpeg_quality+(s.camera.online ? '' : ' · CAMERA OFFLINE');
+ } catch(e) {el('detector').textContent='Detector: CONNECTION LOST';el('message').textContent=e.message;}
 }
-async function record(action) {
-  try {
-    const r = await fetch('/api/recording/' + action, {method:'POST', headers:{'X-Recording-Token':token}});
-    const result = await r.json();
-    if (!r.ok) throw new Error(result.error || 'Recording unavailable');
-    document.getElementById('message').textContent = action === 'start' ? 'Recording requested' : 'Manual recording stopped';
-    await refresh();
-  } catch (e) { document.getElementById('message').textContent = e.message; }
+async function recent(){
+ try{
+  const response=await fetch('/api/recordings');if(!response.ok)throw Error('Recent recordings unavailable');
+  const rows=(await response.json()).recordings; const fragment=document.createDocumentFragment();
+  for(const r of rows){const item=document.createElement('article');const title=document.createElement('strong');
+   title.textContent=(r.start_wall?new Date(r.start_wall).toLocaleString():r.session_id)+' · '+(r.status||'unknown').toUpperCase();
+   if(r.status==='degraded'||r.status==='error')title.className='warning';item.append(title);
+   const detail=document.createElement('p');detail.textContent=(r.reason||'Unknown reason')+' · '+Number(r.duration_seconds||0).toFixed(1)+' sec'+(r.maximum_squirrel_confidence==null?'':' · Max confidence '+confidence(r.maximum_squirrel_confidence));item.append(detail);
+   for(const clip of r.clips){const base='/'+encodeURIComponent(r.session_id)+'/'+encodeURIComponent(clip.file);
+    for(const [label,url] of [['Play/Open '+clip.file,'/clips'+base],['Download','/recordings'+base+'?download=1']]){const link=document.createElement('a');link.textContent=label;link.href=url;link.target='_blank';link.rel='noopener';item.append(link);}}
+   if(!r.clips.length){const note=document.createElement('p');note.textContent=r.error||'No validated clip available yet.';item.append(note);}fragment.append(item);
+  }el('recent').replaceChildren(fragment);if(!rows.length)el('recent').textContent='No recordings yet.';
+ }catch(e){el('recent').textContent=e.message;}
 }
-document.getElementById('record').onclick = () => record('start');
-document.getElementById('stop').onclick = () => record('stop');
-refresh(); setInterval(refresh, 1000);
+async function record(action){try{const response=await fetch('/api/recording/'+action,{method:'POST',headers:{'X-Recording-Token':token}});const result=await response.json();if(!response.ok)throw Error(result.error||'Recording unavailable');el('message').textContent=action==='start'?'Recording requested':'Manual recording stopped';await refresh();}catch(e){el('message').textContent=e.message;}}
+el('record').onclick=()=>record('start');el('stop').onclick=()=>record('stop');
+// Recursive timers do not queue requests when the network is slow.
+async function poll(){await refresh();setTimeout(poll,1000);}async function pollRecent(){await recent();setTimeout(pollRecent,5000);}
+if(el('preview')){document.addEventListener('visibilitychange',()=>{el('preview').src=document.hidden?'':'/preview.mjpg';});el('preview').onerror=()=>{el('preview-note').textContent='Preview connection lost; retrying…';setTimeout(()=>{if(!document.hidden)el('preview').src='/preview.mjpg?t='+Date.now();},3000);};}
+poll();pollRecent();
 </script></body></html>

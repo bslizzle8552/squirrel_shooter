@@ -15,6 +15,7 @@ from .manual_control import ManualControlConfig
 from .manual_fire_recording import ManualFireRecordingConfig
 from .recording import RecordingConfig
 from .detector import DetectorConfig
+from .collector_policy import AutomaticRecordingConfig, CollectorPreviewConfig
 from .pan_tilt import PanTiltConfig
 from .valve import ValveConfig
 
@@ -290,6 +291,8 @@ class AppConfig:
     source_sha256: str | None = None
     recording: RecordingConfig = RecordingConfig()
     detector: DetectorConfig = DetectorConfig()
+    automatic_recording: AutomaticRecordingConfig = AutomaticRecordingConfig()
+    collector_preview: CollectorPreviewConfig = CollectorPreviewConfig()
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -704,6 +707,16 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"Invalid recording configuration: {exc}") from exc
 
+    try:
+        automatic_recording = AutomaticRecordingConfig(**raw.get('automatic_recording', {}))
+        collector_preview = CollectorPreviewConfig(**raw.get('collector_preview', {}))
+        if automatic_recording.enabled and (not detector_config.enabled or not recording_config.enabled):
+            raise ValueError('automatic recording requires enabled detector and recording')
+        if automatic_recording.enabled and automatic_recording.squirrel_confidence < detector_config.diagnostic_confidence_floor:
+            raise ValueError('recording confidence must not be below detector diagnostic floor')
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f'Invalid collector configuration: {exc}') from exc
+
     camera = _mapping(raw, "camera")
     _required(camera, {"device_index", "requested_width", "requested_height", "requested_fps", "output_directory"}, "camera")
     motion = _mapping(raw, "motion")
@@ -1063,4 +1076,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
         recording=recording_config,
         detector=detector_config,
+        automatic_recording=automatic_recording,
+        collector_preview=collector_preview,
     )

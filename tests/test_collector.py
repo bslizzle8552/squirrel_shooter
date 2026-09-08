@@ -41,7 +41,7 @@ def test_collector_constructs_default_services_without_controls(tmp_path,monkeyp
                    auto_fire=replace(config.auto_fire,enabled=legacy_controls_enabled))
     runtime=CollectorRuntime(config)  # Construction never starts a camera.
     try:
-        assert set(runtime.__dict__) == {'config','camera','detector','worker','recording','_closed'}
+        assert set(runtime.__dict__) == {'config','camera','detector','worker','recording','observer','media','_closed'}
         client=create_collector_app(runtime).test_client()
         state=client.get('/api/status').json
         assert state['physical_control_available'] is False

@@ -353,3 +353,14 @@ logging:
   sessions_directory: sessions
   maximum_active_log_megabytes: 100
   retained_log_rotations: 5
+
+# Used exclusively by the control-incapable collector entry point.
+collector_preview:
+  enabled: true
+  maximum_fps: 2.0
+  jpeg_quality: 65
+
+automatic_recording:
+  enabled: false
+  squirrel_confidence: 0.02 # RECORDING ONLY; not an engagement threshold.
+  tail_seconds: 10.0
