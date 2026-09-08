@@ -142,10 +142,11 @@ def test_preroll_precedes_live_packet_when_encoder_was_waiting(rig, monkeypatch)
         assert claimed.wait(3)
     finally:
         release.set()
-    wait_for(lambda: service.status().get('written_frames') == 3)
+    wait_for(lambda: service.status().get('unique_source_frames') == 3)
     service.stop_manual()
     status = finished(service)
-    assert [int(frame[0, 0, 0]) for frame in rig.frames] == [10, 20, 30]
+    assert [int(frame[0, 0, 0]) for frame in rig.frames] == [10] * 6 + [20] * 7 + [30]
+    assert status['unique_source_frames'] == 3 and status['repeated_presentation_frames'] == 11
     assert status['segments'][0]['first_capture_monotonic'] == 99.0
     assert status['segments'][0]['last_capture_monotonic'] == 100.1
     assert service._queue.unfinished_tasks == 0
@@ -478,9 +479,10 @@ def test_real_service_streams_synthetic_frames_and_validates_sidecar(rig):
         rig.clock.now += .1
     service.stop_manual()
     state = finished(service)
-    assert state["status"] == "complete" and state["written_frames"] == 5
+    assert state["status"] == "complete" and state["unique_source_frames"] == 5
+    assert state["written_frames"] == 6 and state["repeated_presentation_frames"] == 1
     segment = state["segments"][0]
-    assert len(segment["sha256"]) == 64 and segment["decoded_frames"] == 5
+    assert len(segment["sha256"]) == 64 and segment["decoded_frames"] == 6
     capture = cv2.VideoCapture(str(service.directory / state["session_id"] / segment["file"]))
     try:
         ok, pixels = capture.read()

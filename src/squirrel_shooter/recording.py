@@ -132,6 +132,8 @@ class _Session:
     source_skipped: int = 0
     source_frames: int = 0
     written_frames: int = 0
+    unique_source_frames: int = 0
+    repeated_presentation_frames: int = 0
     pre_roll_frames: int = 0
     last_sequence: int = -1
     read_sequence: int = -1
@@ -171,6 +173,8 @@ class RecordingService:
         self._writer: Any = None
         self._segment: dict[str, Any] | None = None
         self._segment_session: _Session | None = None
+        self._held_packet: tuple | None = None  # One accounted reference, never another pixel copy.
+        self._presentation: Any = None
 
     def start(self) -> None:
         with self._lock:
@@ -282,7 +286,7 @@ class RecordingService:
                          min(now, session.maximum_until, prior_deadline or now) if reason == "deadlines_expired" else now)
 
     def _summary(self, session: _Session) -> dict[str, Any]:
-        return {"schema_version": 1, "session_id": session.id, "status": session.state,
+        return {"schema_version": 2, "session_id": session.id, "status": session.state,
                 "file_role": "clean_authoritative", "parent_session_id": None,
                 "start_monotonic": session.started, "start_wall": session.wall,
                 "maximum_until": session.maximum_until, "manual_until": session.manual_until,
@@ -292,6 +296,12 @@ class RecordingService:
                 "stop_reason": session.stop_reason, "error": session.error,
                 "end_monotonic": session.ended_monotonic,
                 "source_frames": session.source_frames, "written_frames": session.written_frames,
+                "unique_source_frames": session.unique_source_frames,
+                "repeated_presentation_frames": session.repeated_presentation_frames,
+                "timing_representation": "source-time CFR slots; preceding observation held across empty slots",
+                "presentation_quantization_seconds": 1 / self.config.target_fps,
+                "repeat_observation_policy": "presentation repeats are not independent detector or training observations; use presentation provenance",
+                "queue_policy": "drop incoming eligible packet; never replace queued packets",
                 "queue_dropped": session.queue_dropped, "skipped_source_sequences": session.source_skipped,
                 "pre_roll_frames": session.pre_roll_frames, "segments": session.segments,
                 "target_fps": self.config.target_fps, "codec": self.config.codec,
@@ -340,6 +350,7 @@ class RecordingService:
                 session.pre_roll_frames += 1
             if self._buffered_bytes + image.nbytes > self.config.maximum_buffer_megabytes * 1024**2:
                 session.queue_dropped += 1
+                self._event(session, "admission_drop", packet.received_monotonic, sequence=packet.sequence, cause="byte_budget")
                 if pre_roll:
                     session.pre_roll_frames -= 1
                 return
@@ -357,6 +368,7 @@ class RecordingService:
                 self._buffered_bytes += private.nbytes
             except queue.Full:
                 session.queue_dropped += 1
+                self._event(session, "admission_drop", packet.received_monotonic, sequence=packet.sequence, cause="queue_full")
 
     def _collect_loop(self) -> None:
         while not self._stop.is_set():
@@ -440,37 +452,61 @@ class RecordingService:
                    "width": image.shape[1], "height": image.shape[0], "target_fps": self.config.target_fps,
                    "codec": self.config.codec, "first_source_sequence": seq, "last_source_sequence": seq,
                    "first_capture_monotonic": timestamp, "last_capture_monotonic": timestamp,
-                   "first_wall": wall, "last_wall": wall, "written_frames": 0, "parent_session_id": session.id}
+                   "first_wall": wall, "last_wall": wall, "written_frames": 0, "parent_session_id": session.id,
+                   "unique_source_frames": 0, "repeated_presentation_frames": 0,
+                   "maximum_source_gap_seconds": 0.0,
+                   "presentation_file": f"segment-{number:04d}.presentation.jsonl"}
         with self._lock:
             session.segments.append(segment)
         self._segment, self._segment_session = segment, session
         self._manifest(session)  # Durable identity precedes the first encoded byte.
+        self._presentation = (self.directory / session.id / segment["presentation_file"]).open("x", encoding="utf-8")
         self._writer = self._writer_factory(str(self.directory / session.id / name),
                                            cv2.VideoWriter_fourcc(*self.config.codec), self.config.target_fps,
                                            (segment["width"], segment["height"]))
         if not self._writer.isOpened():
             raise RecordingError("video_writer_unavailable")
 
-    def _close_segment(self, reason: str) -> None:
+    def _close_segment(self, reason: str, *, until: float | None = None) -> None:
         segment, session, writer = self._segment, self._segment_session, self._writer
-        self._segment = self._segment_session = self._writer = None
         if segment is None or session is None:
             return
         with self._lock:
             segment.update(status="finalizing", finalization_reason=reason)
         path = self.directory / session.id / segment["file"]
+        release_attempted = False
         try:
+            endpoint = until if until is not None else session.ended_monotonic
+            if endpoint is not None and self._held_packet is not None and not session.error:
+                # Stop at the segment bound even after a long source outage.
+                endpoint = min(endpoint, segment["first_capture_monotonic"] + self.config.maximum_segment_seconds)
+                count = math.ceil((endpoint - segment["first_capture_monotonic"]) * self.config.target_fps - 1e-7)
+                self._hold_until(count)
             if writer is not None:
+                release_attempted = True
                 writer.release()
+            if self._presentation is not None:
+                self._presentation.flush()
+                os.fsync(self._presentation.fileno())
+                self._presentation.close()
+            provenance = self.directory / session.id / segment["presentation_file"]
+            with provenance.open("rb") as stream:
+                provenance_hash = hashlib.file_digest(stream, "sha256").hexdigest()
             validation = self._validator(path, segment["width"], segment["height"], segment["written_frames"])
             capture_span = segment["last_capture_monotonic"] - segment["first_capture_monotonic"]
             encoded_span = max(0, segment["written_frames"] - 1) / self.config.target_fps
-            degraded = abs(capture_span - encoded_span) > max(0.5, 2 / self.config.target_fps)
+            tolerance = max(0.5, 2 / self.config.target_fps)
+            degraded = (abs(capture_span - encoded_span) > tolerance
+                        or segment["maximum_source_gap_seconds"] > tolerance
+                        or (segment["segment_index"] == 0
+                            and segment["first_capture_monotonic"] - session.started > tolerance))
             final = path.with_name(path.name.replace(".incomplete", ""))
             os.replace(path, final)
             with self._lock:
                 segment.update(validation)
                 segment.update(capture_span_seconds=capture_span, encoded_span_seconds=encoded_span,
+                               playback_duration_seconds=segment["written_frames"] / self.config.target_fps,
+                               presentation_sha256=provenance_hash,
                                status="degraded" if degraded else "complete", file=final.name)
         except Exception as exc:
             with self._lock:
@@ -480,7 +516,41 @@ class RecordingService:
                 session.error = session.error or segment["error"]
                 if session.state == "capturing":
                     self._finish(session, "validation_error", self._clock())
+        finally:
+            if writer is not None and not release_attempted:
+                try:
+                    writer.release()
+                except Exception:
+                    pass  # Preserve the initiating failure.
+            if self._presentation is not None and not self._presentation.closed:
+                self._presentation.close()
+            with self._lock:
+                if self._held_packet is not None:
+                    self._buffered_bytes -= self._held_packet[-1].nbytes
+            self._held_packet = self._presentation = None
+            self._segment = self._segment_session = self._writer = None
         self._manifest(session)
+
+    def _present(self, packet: tuple, *, repeated: bool) -> None:
+        session, seq, timestamp, wall, generation, image = packet
+        segment = self._segment
+        index = segment["written_frames"]
+        self._writer.write(image)
+        self._presentation.write(json.dumps({"output_index": index,
+            "presentation_monotonic": segment["first_capture_monotonic"] + index / self.config.target_fps,
+            "source_sequence": seq, "source_monotonic": timestamp, "source_wall": wall,
+            "generation": generation, "repeated": repeated}, allow_nan=False) + "\n")
+        with self._lock:
+            segment["written_frames"] += 1
+            session.written_frames += 1
+            key = "repeated_presentation_frames" if repeated else "unique_source_frames"
+            segment[key] += 1
+            setattr(session, key, getattr(session, key) + 1)
+
+    def _hold_until(self, output_count: int) -> None:
+        # Streaming repetition: constant RAM, no queued duplicate images.
+        while self._held_packet is not None and self._segment["written_frames"] < output_count:
+            self._present(self._held_packet, repeated=True)
 
     def _write_packet(self, packet: tuple) -> None:
         session, seq, timestamp, wall, generation, image = packet
@@ -492,17 +562,30 @@ class RecordingService:
                       "camera_generation_or_geometry" if generation != segment["generation"] or image.shape[:2] != (segment["height"], segment["width"]) else
                       "maximum_segment" if timestamp - segment["first_capture_monotonic"] >= self.config.maximum_segment_seconds else None)
             if reason:
-                self._close_segment(reason)
+                self._close_segment(reason, until=timestamp)
                 if session.error:
                     return
         if self._segment is None:
             self._open_segment(session, packet)
+        segment = self._segment
+        if self._held_packet is not None:
+            if seq <= self._held_packet[1] or timestamp <= self._held_packet[2]:
+                raise RecordingError("source_order_regressed")
+            gap = timestamp - self._held_packet[2]
+            with self._lock:
+                segment["maximum_source_gap_seconds"] = max(segment["maximum_source_gap_seconds"], gap)
+        slot = math.floor((timestamp - segment["first_capture_monotonic"]) * self.config.target_fps + 1e-7)
+        if slot < segment["written_frames"]:
+            raise RecordingError("source_sample_slot_regressed")
+        self._hold_until(slot)
         # No overlay, resize, crop, FIRE marker, or semantic label can reach here.
-        self._writer.write(image)
+        self._present(packet, repeated=False)
         with self._lock:
+            if self._held_packet is not None:
+                self._buffered_bytes -= self._held_packet[-1].nbytes
+            self._held_packet = packet
             self._segment.update(last_source_sequence=seq, last_capture_monotonic=timestamp, last_wall=wall,
-                                 written_frames=self._segment["written_frames"] + 1)
-            session.written_frames += 1
+                                 last_presentation_slot=slot)
 
     def _encode_loop(self) -> None:
         try:
@@ -549,7 +632,8 @@ class RecordingService:
                     finally:
                         with self._lock:
                             session.queued -= 1
-                            self._buffered_bytes -= packet[-1].nbytes
+                            if self._held_packet is not packet:
+                                self._buffered_bytes -= packet[-1].nbytes
                         if from_queue:
                             self._queue.task_done()
                 for session in sessions:
@@ -599,7 +683,7 @@ class RecordingService:
                         self._queue.task_done()
                     except queue.Empty:
                         break
-                self._buffered_bytes = 0
+                self._buffered_bytes = self._held_packet[-1].nbytes if self._held_packet is not None else 0
             # Best effort only; a failed disk must not block or affect control.
             try:
                 self._close_segment("storage_error")
