@@ -17,7 +17,7 @@ async function refresh() {
   const response=await fetch('/api/status'); if(!response.ok) throw Error('Status unavailable');
   const s=await response.json(), d=s.detector, a=s.automatic_recording, r=s.recording;
   el('detector').textContent = 'Detector: ' + (d.result_available ? 'RUNNING' : 'UNAVAILABLE') + (d.last_inference_latency_seconds == null ? '' : ' · ' + Math.round(d.last_inference_latency_seconds*1000) + ' ms inference');
-  el('detection').textContent = (a.detected_recently ? 'SQUIRREL DETECTED · ' : '') + 'Current confidence: ' + confidence(d.last_top_squirrel_confidence) + (a.last_observation ? ' · Last qualifying: ' + confidence(a.last_observation.confidence) + ' (' + a.last_seen_seconds.toFixed(1) + ' sec ago)' : ' · No qualifying squirrel seen');
+  el('detection').textContent = (a.detected_recently ? 'SQUIRREL DETECTED · ' : '') + 'Raw full-frame confidence: ' + confidence(d.last_top_squirrel_confidence) + (a.last_observation ? ' · Last qualifying: ' + confidence(a.last_observation.confidence) + ' (' + a.last_seen_seconds.toFixed(1) + ' sec ago)' : ' · No qualifying squirrel seen');
   el('policy').textContent='Automatic recording ' + (a.enabled ? 'ON' : 'OFF') + ' · RECORDING-ONLY threshold ' + a.squirrel_confidence + ' · Tail ' + a.tail_seconds + ' seconds';
   const manual=r.manual_remaining_seconds>0, auto=r.automatic_active;
   const remaining=Math.max(r.manual_remaining_seconds||0,r.automatic_remaining_seconds||0);
@@ -39,6 +39,7 @@ async function recent(){
    const detail=document.createElement('p');detail.textContent=(r.reason||'Unknown reason')+' · '+Number(r.duration_seconds||0).toFixed(1)+' sec'+(r.maximum_squirrel_confidence==null?'':' · Max confidence '+confidence(r.maximum_squirrel_confidence));item.append(detail);
    for(const clip of r.clips){const base='/'+encodeURIComponent(r.session_id)+'/'+encodeURIComponent(clip.file);
     for(const [label,url] of [['Play/Open '+clip.file,'/clips'+base],['Download','/recordings'+base+'?download=1']]){const link=document.createElement('a');link.textContent=label;link.href=url;link.target='_blank';link.rel='noopener';item.append(link);}}
+   if(r.peak_trip){const link=document.createElement('a');link.textContent='Exact peak trip frame ('+r.trip_count+' preserved)';link.href='/trip-evidence/'+encodeURIComponent(r.session_id)+'/'+encodeURIComponent(r.peak_trip);link.target='_blank';link.rel='noopener';item.append(link);}
    if(!r.clips.length){const note=document.createElement('p');note.textContent=r.error||'No validated clip available yet.';item.append(note);}fragment.append(item);
   }el('recent').replaceChildren(fragment);if(!rows.length)el('recent').textContent='No recordings yet.';
  }catch(e){el('recent').textContent=e.message;}

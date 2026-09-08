@@ -1,5 +1,6 @@
 """Read-only catalogue of recorder-validated clean files; no video decoding."""
 import heapq
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -41,6 +42,22 @@ class CollectorMedia:
             raise ValueError('recording file changed')
         return path, segment
 
+    def trip(self, session_id, filename):
+        if not re.fullmatch(r'trip-g[0-9]+-s[0-9]+\.png', filename):
+            raise ValueError('invalid trip filename')
+        session = self.session(session_id)
+        entry = next((v for v in session.get('squirrel_observations', []) if v.get('filename') == filename), None)
+        if not entry or entry.get('media_role') != 'clean_detector_evidence' or entry.get('session_id') != session_id:
+            raise ValueError('unattested trip')
+        folder = self.directory.resolve() / session_id
+        path = folder / filename
+        if path.is_symlink() or path.resolve().parent != folder or path.stat().st_size > 32*1024*1024:
+            raise ValueError('unsafe trip')
+        with path.open('rb') as stream:
+            if hashlib.file_digest(stream,'sha256').hexdigest() != entry['image_sha256']:
+                raise ValueError('trip image changed')
+        return path, entry
+
     def recent(self, limit=20):
         if not self.directory.exists():
             return []
@@ -62,7 +79,10 @@ class CollectorMedia:
                     r.get('action') == 'manual_start_or_extend' for r in data.get('start_reasons', []))
                 auto = bool(data.get('qualifying_observation_count')) or any(
                     r.get('reason') == 'squirrel_detection' for r in data.get('source_identities', []))
+                trips = [v for v in data.get('squirrel_observations', []) if v.get('media_role') == 'clean_detector_evidence']
+                peak = max(trips,key=lambda v:v['confidence']) if trips else None
                 rows.append(dict(session_id=folder.name, start_wall=data.get('start_wall'),
+                    peak_trip=peak.get('filename') if peak else None,trip_count=len(trips),
                     reason='manual + squirrel_detection' if manual and auto else 'squirrel_detection' if auto else 'manual' if manual else 'unknown',
                     duration_seconds=sum(c.get('playback_duration_seconds') or 0 for c in clips),
                     maximum_squirrel_confidence=data.get('maximum_squirrel_confidence'),

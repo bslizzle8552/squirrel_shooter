@@ -142,6 +142,7 @@ class CameraService:
         platform_checker: Callable[[], bool] = is_raspberry_pi,
         jpeg_quality: int = 80,
         preview_maximum_width: int = 0,
+        preview_overlay=None,
         encode_jpeg: bool = True,
         frame_buffer_seconds: float = 0.0,
         frame_buffer_fps: float = 12.0,
@@ -160,6 +161,7 @@ class CameraService:
         if type(preview_maximum_width) is not int or preview_maximum_width < 0:
             raise ValueError('preview_maximum_width must be a nonnegative integer')
         self._preview_maximum_width = preview_maximum_width
+        self._preview_overlay = preview_overlay
         self._encode_jpeg = encode_jpeg
         if frame_buffer_seconds < 0:
             raise ValueError("frame_buffer_seconds must be zero or greater")
@@ -570,6 +572,8 @@ class CameraService:
                     frame = cv2.resize(frame, (self._preview_maximum_width,
                         max(1, round(frame.shape[0] * self._preview_maximum_width / frame.shape[1]))),
                         interpolation=cv2.INTER_AREA)
+                if self._preview_overlay is not None:
+                    frame = self._preview_overlay(frame)
                 encoded, jpeg = cv2.imencode(
                     ".jpg",
                     frame,

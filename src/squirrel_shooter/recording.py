@@ -138,12 +138,14 @@ class _Session:
     last_sequence: int = -1
     read_sequence: int = -1
     next_sample: float = 0.0
+    sample_origin: float | None = None
     prepared: bool = False
     pre_packets: deque = field(default_factory=deque)
     manifest_started: bool = False
     segments: list[dict[str, Any]] = field(default_factory=list)
     observations: deque = field(default_factory=lambda: deque(maxlen=2048))
     observation_count: int = 0
+    evidence_pending: int = 0
     first_observation: dict | None = None
     maximum_confidence: float | None = None
     manual_requested: bool = False
@@ -238,7 +240,7 @@ class RecordingService:
 
     def extend_automatic_recording(self, *, event_id: str, observed_monotonic: float,
                                    reason: str, visit_id: str | None = None,
-                                   observation: dict | None = None, return_status: bool = True) -> dict[str, Any]:
+                                   observation: dict | None = None, return_status: bool = True, evidence_packet=None) -> dict[str, Any]:
         now = self._time()
         for value in (event_id, reason, visit_id if visit_id is not None else "unspecified"):
             if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value) is None:
@@ -268,6 +270,34 @@ class RecordingService:
                 raise RecordingError("duplicate_or_regressed_observation")
             if key not in session.identities and len(session.identities) >= 64:
                 raise RecordingError("source_identity_limit")
+            if evidence_packet is not None:
+                session.evidence_pending += 1
+        if evidence_packet is not None:
+            try:
+                from .trip_evidence import preserve_trip
+                self._storage_check()
+                observation = preserve_trip(self.directory, session.id, evidence_packet, observation,
+                    event_id=event_id, reason=reason, index=session.observation_count, previous_peak=session.maximum_confidence)
+            except Exception as exc:
+                with self._lock:
+                    session.evidence_pending -= 1
+                    session.error = 'trip_evidence_failed: ' + str(exc)
+                    self._event(session, 'trip_evidence_failed', self._clock(), error=session.error)
+                    if session.state == 'capturing':
+                        self._finish(session, 'trip_evidence_failed', self._clock())
+                raise RecordingError(session.error) from exc
+        with self._lock:
+            if evidence_packet is not None:
+                session.evidence_pending -= 1
+                if session.state != 'capturing':
+                    raise RecordingError('trip_session_closed_during_persistence')
+                if not 0 <= self._clock() - observed_monotonic <= self.config.observation_max_age_seconds or deadline <= self._clock():
+                    session.error = 'trip_persistence_exceeded_source_age'
+                    self._finish(session, session.error, self._clock())
+                    raise RecordingError(session.error)
+            previous = session.identities.get(key)
+            if previous and observed_monotonic <= previous['observed_monotonic']:
+                raise RecordingError('duplicate_or_regressed_observation')
             entry = {"event_id": event_id, "visit_id": visit_id, "reason": reason,
                      "observed_monotonic": observed_monotonic, "until": min(deadline, session.maximum_until)}
             session.automatic[key] = entry
@@ -280,7 +310,7 @@ class RecordingService:
                 session.maximum_confidence = max(session.maximum_confidence or 0, observation['confidence'])
             self._event(session, "automatic_extend", now, **entry)
         self._wake.set()
-        return self.status() if return_status else {'session_id': session.id}
+        return self.status() if return_status else {'session_id': session.id, 'evidence': observation if evidence_packet is not None else None}
 
     def _finish(self, session: _Session, reason: str, now: float) -> None:
         session.state, session.stop_reason = "finalizing", reason
@@ -291,7 +321,7 @@ class RecordingService:
 
     def _expire(self, now: float, reason: str = "deadlines_expired") -> None:
         session = self._active
-        if session is None:
+        if session is None or session.evidence_pending:
             return
         prior_deadline = max([session.manual_until or 0, *[v["until"] for v in session.automatic.values()]])
         if now < session.started:
@@ -319,6 +349,8 @@ class RecordingService:
                 "manual_requested": session.manual_requested,
                 "squirrel_observations": [] if compact else list(session.observations),
                 "qualifying_observation_count": session.observation_count,
+                "trip_evidence_pending": session.evidence_pending,
+                "trip_evidence_policy": "every accepted automatic source retained; 2048 maximum/session; no eviction",
                 "observations_omitted": max(0, session.observation_count - len(session.observations)),
                 "first_qualifying_observation": session.first_observation,
                 "last_qualifying_observation": session.observations[-1] if session.observations else None,
@@ -379,6 +411,8 @@ class RecordingService:
             if session.last_sequence >= 0:
                 session.source_skipped += max(0, packet.sequence - session.last_sequence - 1)
             session.last_sequence = packet.sequence
+            if session.sample_origin is None:
+                session.sample_origin = packet.received_monotonic
             interval = 1 / self.config.target_fps
             session.next_sample = (packet.received_monotonic + interval if session.next_sample == 0
                                    else session.next_sample + (math.floor((packet.received_monotonic - session.next_sample) / interval) + 1) * interval)
@@ -415,7 +449,7 @@ class RecordingService:
                 with self._lock:
                     self._expire(now)
                     session = self._active
-                if session is None:
+                if session is None or (session.evidence_pending and not session.automatic and session.manual_until is None):
                     self._wake.wait(0.05)
                     self._wake.clear()
                     continue
@@ -482,6 +516,8 @@ class RecordingService:
             raise RecordingError("segment_count_limit")
         self._storage_check()
         _, seq, timestamp, wall, generation, image = packet
+        origin = session.sample_origin if session.sample_origin is not None else timestamp
+        presentation_origin = origin + math.floor((timestamp - origin) * self.config.target_fps + 1e-7) / self.config.target_fps
         number = len(session.segments)
         name = f"segment-{number:04d}.incomplete.avi"
         segment = {"segment_index": number, "session_id": session.id, "file": name,
@@ -489,6 +525,7 @@ class RecordingService:
                    "width": image.shape[1], "height": image.shape[0], "target_fps": self.config.target_fps,
                    "codec": self.config.codec, "first_source_sequence": seq, "last_source_sequence": seq,
                    "first_capture_monotonic": timestamp, "last_capture_monotonic": timestamp,
+                   "presentation_origin_monotonic": presentation_origin,
                    "first_wall": wall, "last_wall": wall, "written_frames": 0, "parent_session_id": session.id,
                    "unique_source_frames": 0, "repeated_presentation_frames": 0,
                    "maximum_source_gap_seconds": 0.0,
@@ -516,8 +553,8 @@ class RecordingService:
             endpoint = until if until is not None else session.ended_monotonic
             if endpoint is not None and self._held_packet is not None and not session.error:
                 # Stop at the segment bound even after a long source outage.
-                endpoint = min(endpoint, segment["first_capture_monotonic"] + self.config.maximum_segment_seconds)
-                count = math.ceil((endpoint - segment["first_capture_monotonic"]) * self.config.target_fps - 1e-7)
+                endpoint = min(endpoint, segment["presentation_origin_monotonic"] + self.config.maximum_segment_seconds)
+                count = math.ceil((endpoint - segment["presentation_origin_monotonic"]) * self.config.target_fps - 1e-7)
                 self._hold_until(count)
             if writer is not None:
                 release_attempted = True
@@ -574,7 +611,7 @@ class RecordingService:
         index = segment["written_frames"]
         self._writer.write(image)
         self._presentation.write(json.dumps({"output_index": index,
-            "presentation_monotonic": segment["first_capture_monotonic"] + index / self.config.target_fps,
+            "presentation_monotonic": segment["presentation_origin_monotonic"] + index / self.config.target_fps,
             "source_sequence": seq, "source_monotonic": timestamp, "source_wall": wall,
             "generation": generation, "repeated": repeated}, allow_nan=False) + "\n")
         with self._lock:
@@ -597,9 +634,11 @@ class RecordingService:
         if segment is not None:
             reason = ("new_session" if self._segment_session is not session else
                       "camera_generation_or_geometry" if generation != segment["generation"] or image.shape[:2] != (segment["height"], segment["width"]) else
-                      "maximum_segment" if timestamp - segment["first_capture_monotonic"] >= self.config.maximum_segment_seconds else None)
+                      "maximum_segment" if timestamp - segment["presentation_origin_monotonic"] >= self.config.maximum_segment_seconds else None)
             if reason:
-                self._close_segment(reason, until=timestamp)
+                self._close_segment(reason, until=(self._segment_session.ended_monotonic if reason == "new_session"
+                    else segment["presentation_origin_monotonic"] + self.config.maximum_segment_seconds if reason == "maximum_segment"
+                    else timestamp))
                 if session.error:
                     return
         if self._segment is None:
@@ -611,7 +650,7 @@ class RecordingService:
             gap = timestamp - self._held_packet[2]
             with self._lock:
                 segment["maximum_source_gap_seconds"] = max(segment["maximum_source_gap_seconds"], gap)
-        slot = math.floor((timestamp - segment["first_capture_monotonic"]) * self.config.target_fps + 1e-7)
+        slot = math.floor((timestamp - segment["presentation_origin_monotonic"]) * self.config.target_fps + 1e-7)
         if slot < segment["written_frames"]:
             raise RecordingError("source_sample_slot_regressed")
         self._hold_until(slot)
@@ -638,9 +677,12 @@ class RecordingService:
                         self._manifest(session)
                         session.manifest_started = True
                 with self._lock:
-                    packet = next((s.pre_packets.popleft() for s in sessions if s.prepared and s.pre_packets), None)
+                    head = sessions[0] if sessions else None
+                    packet = head.pre_packets.popleft() if head and head.prepared and head.pre_packets else None
+                    # Finalize the oldest session before any newer pre-roll or live input.
+                    head_done = bool(head and head.state == "finalizing" and head.queued == 0)
                 from_queue = packet is None
-                if from_queue:
+                if from_queue and not head_done:
                     try:
                         packet = self._queue.get(timeout=0.05)
                     except queue.Empty:
@@ -651,7 +693,14 @@ class RecordingService:
                     # This transfers the single encoder-owned slot, not a copy.
                     with self._lock:
                         session = packet[0]
-                        if session.prepared and session.pre_packets:
+                        if head is not None and session is not head:
+                            # Queue is FIFO across sessions; this can only be a newly
+                            # created session after the earlier snapshot became stale.
+                            session.pre_packets.appendleft(packet)
+                            self._queue.task_done()
+                            packet = None
+                            from_queue = False
+                        elif session.prepared and session.pre_packets:
                             session.pre_packets.append(packet)
                             packet = session.pre_packets.popleft()
                             self._queue.task_done()
@@ -675,7 +724,7 @@ class RecordingService:
                             self._queue.task_done()
                 for session in sessions:
                     with self._lock:
-                        done = session.state == "finalizing" and session.queued == 0
+                        done = session.state == "finalizing" and session.queued == 0 and session.evidence_pending == 0
                     if done:
                         if self._segment_session is session:
                             self._close_segment(session.stop_reason or "finalized")

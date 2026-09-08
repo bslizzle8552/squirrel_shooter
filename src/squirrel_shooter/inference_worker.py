@@ -30,10 +30,11 @@ class DetectorObservation:
 
 
 class LatestFrameInferenceWorker:
-    def __init__(self, camera, detector: SquirrelDetectorAdapter, config: DetectorConfig, *, clock=monotonic, observer=None):
+    def __init__(self, camera, detector: SquirrelDetectorAdapter, config: DetectorConfig, *, clock=monotonic, observer=None, frame_observer=None):
         self.camera, self.detector, self.config = camera, detector, config
         self._clock = clock
         self._observer = observer
+        self._frame_observer = frame_observer
         self._condition = threading.Condition()
         self._stop = threading.Event()
         self._pending = None
@@ -144,11 +145,14 @@ class LatestFrameInferenceWorker:
                 packet.frame.shape[0], packet.received_monotonic, packet.received_at, start, end, age, output, reason)
             if revision == self._revision and not self._stop.is_set():
                 self._result = observation
-                if self._observer is not None and output.available and not reason:
-                    # Brief in-memory policy callback under the source revision lock.
-                    # No disk/encoding work; source cannot change between validation and delivery.
+                if (self._observer is not None or self._frame_observer is not None) and output.available and not reason:
+                    # The collector synchronously persists the exact in-flight frame before
+                    # accepting a trip. This bounded call retains the source revision guard.
                     try:
-                        self._observer(observation)
+                        if self._frame_observer is not None:
+                            self._frame_observer(observation, packet)
+                        else:
+                            self._observer(observation)
                     except Exception:
                         self._counts['observer_error_count'] += 1
             self._state = 'stopped' if self._stop.is_set() else ('idle' if output.available else 'unavailable')

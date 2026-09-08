@@ -15,6 +15,7 @@ from .manual_control import ManualControlConfig
 from .manual_fire_recording import ManualFireRecordingConfig
 from .recording import RecordingConfig
 from .detector import DetectorConfig
+from .watch_zone import WatchZoneConfig
 from .collector_policy import AutomaticRecordingConfig, CollectorPreviewConfig
 from .pan_tilt import PanTiltConfig
 from .valve import ValveConfig
@@ -293,6 +294,7 @@ class AppConfig:
     detector: DetectorConfig = DetectorConfig()
     automatic_recording: AutomaticRecordingConfig = AutomaticRecordingConfig()
     collector_preview: CollectorPreviewConfig = CollectorPreviewConfig()
+    watch_zone: WatchZoneConfig = WatchZoneConfig()
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -710,6 +712,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     try:
         automatic_recording = AutomaticRecordingConfig(**raw.get('automatic_recording', {}))
         collector_preview = CollectorPreviewConfig(**raw.get('collector_preview', {}))
+        watch_zone = WatchZoneConfig(**raw.get('watch_zone', {}))
         if automatic_recording.enabled and (not detector_config.enabled or not recording_config.enabled):
             raise ValueError('automatic recording requires enabled detector and recording')
         if automatic_recording.enabled and automatic_recording.squirrel_confidence < detector_config.diagnostic_confidence_floor:
@@ -1078,4 +1081,5 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         detector=detector_config,
         automatic_recording=automatic_recording,
         collector_preview=collector_preview,
+        watch_zone=watch_zone,
     )

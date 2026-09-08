@@ -31,16 +31,19 @@ class CollectorRuntime:
             config.camera, shared_settings=config.shared_camera, encode_jpeg=config.collector_preview.enabled,
             jpeg_quality=config.collector_preview.jpeg_quality,
             preview_maximum_width=config.collector_preview.maximum_width,
+            preview_overlay=config.watch_zone.overlay,
             frame_buffer_seconds=config.recording.pre_roll_seconds,
             frame_buffer_fps=config.recording.target_fps)
         self.detector = detector if detector is not None else NcnnSquirrelDetector(config.detector)
         self.recording = recording if recording is not None else RecordingService(
-            self.camera, replace(config.recording, automatic_tail_seconds=config.automatic_recording.tail_seconds),
+            self.camera, replace(config.recording, automatic_tail_seconds=config.automatic_recording.tail_seconds,
+                                 observation_max_age_seconds=config.detector.maximum_result_age_seconds),
             config.camera.output_directory / 'recordings')
         self.observer = SquirrelRecordingObserver(self.recording, config.automatic_recording,
-                                                  config.detector.maximum_result_age_seconds)
+                                                  config.detector.maximum_result_age_seconds, watch_zone=config.watch_zone,
+                                                  require_evidence=True)
         self.worker = LatestFrameInferenceWorker(self.camera, self.detector, config.detector,
-                                                 observer=self.observer.observe)
+                                                 frame_observer=self.observer.observe)
         self.media = CollectorMedia(config.camera.output_directory / 'recordings')
         self._closed = False
 
@@ -71,6 +74,7 @@ class CollectorRuntime:
         return dict(role='control_incapable_collector', physical_control_available=False,
                     automatic_recording_observer_connected=self.config.automatic_recording.enabled,
                     automatic_recording=self.observer.status(),
+                    watch_zone=dict(**asdict(self.config.watch_zone),sha256=self.config.watch_zone.sha256),
                     preview=asdict(self.config.collector_preview),
                     detector=self.worker.status(), recording=self.recording.status(compact=True),
                     camera=asdict(self.camera.status()))
@@ -111,6 +115,14 @@ def create_collector_app(runtime: CollectorRuntime):
         return send_file(path, conditional=True, etag=segment['sha256'],
                          as_attachment=request.args.get('download') == '1',
                          download_name=f'{session_id}-{filename}', mimetype='video/x-msvideo')
+
+    @app.get('/trip-evidence/<session_id>/<filename>')
+    def trip_file(session_id, filename):
+        try:
+            path, entry = runtime.media.trip(session_id,filename)
+        except (OSError, ValueError, TypeError, KeyError):
+            abort(404)
+        return send_file(path, mimetype='image/png', conditional=True, etag=entry['image_sha256'])
 
     @app.get('/clips/<session_id>/<filename>')
     def clip(session_id, filename):
