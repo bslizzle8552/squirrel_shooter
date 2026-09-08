@@ -525,6 +525,17 @@ class RecordingService:
                         packet = self._queue.get(timeout=0.05)
                     except queue.Empty:
                         packet = None
+                if packet and from_queue:
+                    # Pre-roll can become ready while get() waits for a live
+                    # packet. Keep that claimed packet behind its older frames.
+                    # This transfers the single encoder-owned slot, not a copy.
+                    with self._lock:
+                        session = packet[0]
+                        if session.prepared and session.pre_packets:
+                            session.pre_packets.append(packet)
+                            packet = session.pre_packets.popleft()
+                            self._queue.task_done()
+                            from_queue = False
                 if packet:
                     session = packet[0]
                     try:

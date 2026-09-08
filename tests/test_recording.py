@@ -118,6 +118,39 @@ def test_manual_thirty_uses_backend_deadline_and_reports_missing_tail(rig):
     assert any(x["action"] == "missing_tail" for x in result["timeline"])
 
 
+def test_preroll_precedes_live_packet_when_encoder_was_waiting(rig, monkeypatch):
+    import squirrel_shooter.recording as recording
+    original_queue = recording.queue.Queue
+    waiting, claimed, release = threading.Event(), threading.Event(), threading.Event()
+    class PausedQueue(original_queue):
+        def get(self, *args, **kwargs):
+            waiting.set()
+            packet = super().get(*args, **kwargs)
+            claimed.set()
+            assert release.wait(3)
+            return packet
+    monkeypatch.setattr(recording.queue, 'Queue', PausedQueue)
+    service = rig.build()
+    assert waiting.wait(3)
+    rig.camera.push(value=10, timestamp=99.0)
+    rig.camera.push(value=20, timestamp=99.5)
+    service.record_manual()
+    wait_for(lambda: service.status().get('pre_roll_frames') == 2)
+    rig.clock.now = 100.1
+    rig.camera.push(value=30)
+    try:
+        assert claimed.wait(3)
+    finally:
+        release.set()
+    wait_for(lambda: service.status().get('written_frames') == 3)
+    service.stop_manual()
+    status = finished(service)
+    assert [int(frame[0, 0, 0]) for frame in rig.frames] == [10, 20, 30]
+    assert status['segments'][0]['first_capture_monotonic'] == 99.0
+    assert status['segments'][0]['last_capture_monotonic'] == 100.1
+    assert service._queue.unfinished_tasks == 0
+
+
 def test_stop_manual_only_finishes_and_keeps_file(rig):
     service = rig.build()
     session = service.record_manual()["session_id"]
