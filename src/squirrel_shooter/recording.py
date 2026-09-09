@@ -168,6 +168,8 @@ class RecordingService:
         self._last: dict[str, Any] | None = None
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._idle_requested = False
+        self._idle_wake = threading.Event()
         self._collector: threading.Thread | None = None
         self._encoder: threading.Thread | None = None
         self._ready = False
@@ -191,6 +193,13 @@ class RecordingService:
             self._collector = threading.Thread(target=self._collect_loop, name="clean-record-collect", daemon=True)
             self._encoder.start()
             self._collector.start()
+
+    def set_idle_requested(self, idle: bool) -> None:
+        """Let existing reasons finish; sleep once idle instead of scanning storage."""
+        with self._lock:
+            self._idle_requested = idle
+        self._wake.set()
+        self._idle_wake.set()
 
     def _time(self) -> float:
         value = self._clock()
@@ -450,7 +459,7 @@ class RecordingService:
                     self._expire(now)
                     session = self._active
                 if session is None or (session.evidence_pending and not session.automatic and session.manual_until is None):
-                    self._wake.wait(0.05)
+                    self._wake.wait(1.0 if self._idle_requested and session is None else 0.05)
                     self._wake.clear()
                     continue
                 if not session.prepared:
@@ -672,6 +681,11 @@ class RecordingService:
             while True:
                 with self._lock:
                     sessions = list(self._sessions)
+                    idle = self._idle_requested and not sessions
+                if idle and not self._stop.is_set():
+                    self._idle_wake.wait(1.0)
+                    self._idle_wake.clear()
+                    continue
                 for session in sessions:
                     if not session.manifest_started:
                         self._manifest(session)
@@ -792,6 +806,7 @@ class RecordingService:
                 self._finish(self._active, "shutdown", self._clock())
         self._stop.set()
         self._wake.set()
+        self._idle_wake.set()
         deadline = monotonic() + self.config.shutdown_timeout_seconds
         for thread in (self._collector, self._encoder):
             if thread and thread is not threading.current_thread():

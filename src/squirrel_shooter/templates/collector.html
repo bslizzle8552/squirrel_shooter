@@ -5,7 +5,7 @@
 <body><h1>Squirrel data collector</h1><p class="muted">Clean camera evidence · Physical controls unavailable</p>
 {% if preview_enabled %}<img id="preview" src="/preview.mjpg" alt="Live camera preview"><p id="preview-note" class="muted">Live presentation preview · 2 FPS maximum</p>{% else %}<p>Preview disabled in configuration.</p>{% endif %}
 <section aria-live="polite"><strong id="detector">Connecting to detector…</strong><p id="detection">Waiting for status</p><small id="policy"></small></section>
-<section><button id="record">Record 30 seconds</button><button id="stop">Stop recording</button><p id="recording">Connecting to recorder…</p><p id="session" class="muted"></p><p id="message" role="status"></p><small>Stop clears the manual request. Squirrel detections keep automatic recording active.</small></section>
+<section><button id="record" disabled>Record 30 seconds</button><button id="stop">Stop recording</button><p id="recording">Connecting to recorder…</p><p id="session" class="muted"></p><p id="message" role="status"></p><small>Stop clears the manual request. Squirrel detections keep automatic recording active.</small></section>
 <section><h2>Recent recordings</h2><p class="muted">Clean native AVI segments. Degraded clips retain useful evidence and are marked below.</p><div id="recent">Loading recordings…</div></section>
 <p><a href="/api/status" target="_blank" rel="noopener">Full diagnostics</a></p>
 <script>
@@ -16,18 +16,26 @@ async function refresh() {
  try {
   const response=await fetch('/api/status'); if(!response.ok) throw Error('Status unavailable');
   const s=await response.json(), d=s.detector, a=s.automatic_recording, r=s.recording;
+  const night=s.night_mode, paused=night.paused;
   el('detector').textContent = 'Detector: ' + (d.result_available ? 'RUNNING' : 'UNAVAILABLE') + (d.last_inference_latency_seconds == null ? '' : ' · ' + Math.round(d.last_inference_latency_seconds*1000) + ' ms inference');
   el('detection').textContent = (a.detected_recently ? 'SQUIRREL DETECTED · ' : '') + 'Raw full-frame confidence: ' + confidence(d.last_top_squirrel_confidence) + (a.last_observation ? ' · Last qualifying: ' + confidence(a.last_observation.confidence) + ' (' + a.last_seen_seconds.toFixed(1) + ' sec ago)' : ' · No qualifying squirrel seen');
   el('policy').textContent='Automatic recording ' + (a.enabled ? 'ON' : 'OFF') + ' · RECORDING-ONLY threshold ' + a.squirrel_confidence + ' · Tail ' + a.tail_seconds + ' seconds';
+  if(paused){
+   el('detector').textContent=night.mode==='NIGHT'?'NIGHT MODE — DETECTION / RECORDING PAUSED':'Checking day/night image — detection / recording paused';
+   el('detection').textContent='Live preview remains available. Daytime processing resumes automatically after stable color returns.';
+   el('policy').textContent='Image-derived night state · '+night.settings.exit_seconds+' seconds of stable daytime color to resume';
+  }
   const manual=r.manual_remaining_seconds>0, auto=r.automatic_active;
   const remaining=Math.max(r.manual_remaining_seconds||0,r.automatic_remaining_seconds||0);
   const degraded=(r.queue_dropped||0)>0 || r.status==='degraded';
   el('recording').textContent=(r.active ? 'RECORDING · ' + (manual&&auto ? 'MANUAL + AUTO' : auto ? 'AUTO' : 'MANUAL') + ' · '+remaining.toFixed(1)+' sec remaining' : (r.status==='finalizing' ? 'FINALIZING' : 'Not recording')) + (degraded ? ' · DEGRADED ('+(r.queue_dropped||0)+' drops)' : '') + (r.last_error||r.error||a.error ? ' · ERROR: '+(r.last_error||r.error||a.error) : '');
   el('recording').className=degraded||r.error||r.last_error||a.error?'warning':'';
   el('session').textContent=r.session_id ? 'Session '+r.session_id : '';
-  el('record').disabled=!r.ready||!!r.last_error; el('stop').disabled=!manual;
+  el('record').disabled=paused||!r.ready||!!r.last_error; el('stop').disabled=!manual;
+  el('record').textContent=paused?'Recording unavailable — night mode':'Record 30 seconds';
+  el('record').title=paused?'Recording resumes automatically in daytime':'';
   if(el('preview-note')) el('preview-note').textContent='Live presentation preview · '+s.preview.maximum_fps+' FPS maximum · JPEG quality '+s.preview.jpeg_quality+(s.camera.online ? '' : ' · CAMERA OFFLINE');
- } catch(e) {el('detector').textContent='Detector: CONNECTION LOST';el('message').textContent=e.message;}
+ } catch(e) {el('record').disabled=true;el('detector').textContent='Detector: CONNECTION LOST';el('message').textContent=e.message;}
 }
 async function recent(){
  try{

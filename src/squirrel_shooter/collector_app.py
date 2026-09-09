@@ -20,6 +20,7 @@ from .inference_worker import LatestFrameInferenceWorker
 from .recording import RecordingError, RecordingService
 from .collector_policy import SquirrelRecordingObserver
 from .collector_media import CollectorMedia
+from .collector_night import NightVisionMonitor
 
 
 class CollectorRuntime:
@@ -43,9 +44,25 @@ class CollectorRuntime:
                                                   config.detector.maximum_result_age_seconds, watch_zone=config.watch_zone,
                                                   require_evidence=True)
         self.worker = LatestFrameInferenceWorker(self.camera, self.detector, config.detector,
-                                                 frame_observer=self.observer.observe)
+                                                 frame_observer=self.observer.observe,
+                                                 frame_monitor=self._monitor_frame if config.collector_night.enabled else None)
+        self.night = NightVisionMonitor(config.collector_night)
+        self.worker.set_paused(self.night.status()['paused'], self._night_transition)
         self.media = CollectorMedia(config.camera.output_directory / 'recordings')
         self._closed = False
+
+    def _night_transition(self, paused):
+        self.observer.set_paused(paused)
+        self.recording.set_idle_requested(paused)
+
+    def _monitor_frame(self, packet):
+        if not self.night.sample(packet):
+            return
+        paused = self.night.status()['paused']
+        self.worker.set_paused(paused, self._night_transition)
+        # Retain old pre-roll until any already-admitted session has drained.
+        recording = self.recording.status(compact=True)
+        self.camera.set_buffering_enabled(not paused or recording['active'] or recording['pending_sessions'] > 0)
 
     def start(self):
         if self._closed:
@@ -74,6 +91,7 @@ class CollectorRuntime:
         return dict(role='control_incapable_collector', physical_control_available=False,
                     automatic_recording_observer_connected=self.config.automatic_recording.enabled,
                     automatic_recording=self.observer.status(),
+                    night_mode=self.night.status(),
                     watch_zone=dict(**asdict(self.config.watch_zone),sha256=self.config.watch_zone.sha256),
                     preview=asdict(self.config.collector_preview),
                     detector=self.worker.status(), recording=self.recording.status(compact=True),
@@ -150,7 +168,7 @@ def create_collector_app(runtime: CollectorRuntime):
     def record_start():
         authorize()
         try:
-            return jsonify(runtime.recording.record_manual())
+            return jsonify(runtime.worker.while_unpaused(runtime.recording.record_manual))
         except RecordingError as exc:
             return jsonify(error=str(exc)), 409
 

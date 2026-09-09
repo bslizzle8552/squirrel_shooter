@@ -168,6 +168,7 @@ class CameraService:
         if frame_buffer_fps <= 0:
             raise ValueError("frame_buffer_fps must be greater than zero")
         self._frame_buffer_seconds = float(frame_buffer_seconds)
+        self._buffering_enabled = True
         self._frame_buffer_fps = float(frame_buffer_fps)
         self._frame_buffer_interval = 1.0 / self._frame_buffer_fps
         self._condition = threading.Condition()
@@ -383,6 +384,15 @@ class CameraService:
             if self._latest_frame is None:
                 return None
             return self._latest_frame.copy() if copy else self._latest_frame
+
+    def set_buffering_enabled(self, enabled: bool) -> None:
+        """Pause unused collector pre-roll without changing capture or preview."""
+        with self._condition:
+            if self._buffering_enabled == enabled:
+                return
+            self._buffering_enabled = enabled
+            self._frame_buffer.clear()
+            self._pre_roll_buffer_fps = 0.0
 
     def current_frame_sequence(self) -> int:
         """Return the latest raw-frame sequence under the camera publication lock."""
@@ -770,7 +780,7 @@ class CameraService:
                         )
                     previous_received_monotonic = received_monotonic
                     should_buffer = (
-                        self._frame_buffer_seconds > 0
+                        self._buffering_enabled and self._frame_buffer_seconds > 0
                         and (
                             self._next_buffer_monotonic is None
                             or received_monotonic >= self._next_buffer_monotonic
@@ -809,7 +819,7 @@ class CameraService:
                         self._last_frame_at = received_at
                         self._last_frame_monotonic = received_monotonic
                         self._frames_received += 1
-                        if self._frame_buffer_seconds > 0 and should_buffer:
+                        if self._buffering_enabled and self._frame_buffer_seconds > 0 and should_buffer:
                             self._pre_roll_frames_reused += 1
                             self._pre_roll_buffer_fps = self._pre_roll_meter.update(received_monotonic)
                             self._frame_buffer.append(

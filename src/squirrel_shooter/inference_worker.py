@@ -30,11 +30,13 @@ class DetectorObservation:
 
 
 class LatestFrameInferenceWorker:
-    def __init__(self, camera, detector: SquirrelDetectorAdapter, config: DetectorConfig, *, clock=monotonic, observer=None, frame_observer=None):
+    def __init__(self, camera, detector: SquirrelDetectorAdapter, config: DetectorConfig, *, clock=monotonic, observer=None, frame_observer=None, frame_monitor=None):
         self.camera, self.detector, self.config = camera, detector, config
         self._clock = clock
         self._observer = observer
         self._frame_observer = frame_observer
+        self._frame_monitor = frame_monitor
+        self._paused = False
         self._condition = threading.Condition()
         self._stop = threading.Event()
         self._pending = None
@@ -63,10 +65,31 @@ class LatestFrameInferenceWorker:
                                model_identity=self._backend_status.get('model_identity'),
                                dropped_reason=reason, observed_monotonic=now)
 
+    def set_paused(self, paused, on_change=None):
+        with self._condition:
+            if self._paused == paused:
+                return
+            self._paused = paused
+            self._revision += 1
+            self._pending = self._result = None
+            self._next_due = self._clock()
+            self._state = 'night_paused' if paused else ('idle' if self.config.enabled else 'disabled')
+            if on_change is not None:
+                on_change(paused)
+            self._condition.notify_all()
+
+    def while_unpaused(self, action):
+        """Serialize manual admission with night transition and result callbacks."""
+        with self._condition:
+            if self._paused:
+                from .recording import RecordingError
+                raise RecordingError('night_mode_recording_paused')
+            return action()
+
     def submit(self, packet):
         now = self._clock()
         with self._condition:
-            if self._stop.is_set() or not self.config.enabled:
+            if self._stop.is_set() or not self.config.enabled or self._paused:
                 return False
             if packet.sequence <= self._last_sequence or packet.generation < self._generation:
                 self._counts['duplicate_or_regressed_count'] += 1
@@ -103,7 +126,7 @@ class LatestFrameInferenceWorker:
         """Claim atomically, infer outside the lock; also used by deterministic tests."""
         with self._condition:
             now = self._clock()
-            if self._stop.is_set() or self._inflight or self._pending is None or now < self._next_due:
+            if self._stop.is_set() or self._paused or self._inflight or self._pending is None or now < self._next_due:
                 return False
             packet, self._pending = self._pending, None
             age = now - packet.received_monotonic
@@ -155,14 +178,14 @@ class LatestFrameInferenceWorker:
                             self._observer(observation)
                     except Exception:
                         self._counts['observer_error_count'] += 1
-            self._state = 'stopped' if self._stop.is_set() else ('idle' if output.available else 'unavailable')
+            self._state = 'stopped' if self._stop.is_set() else 'night_paused' if self._paused else ('idle' if output.available else 'unavailable')
             self._counts['inference_count'] += 1
             self._condition.notify_all()
         return True
 
     def start(self):
         with self._condition:
-            if self._threads or self._stop.is_set() or not self.config.enabled:
+            if self._threads or self._stop.is_set() or (not self.config.enabled and self._frame_monitor is None):
                 return
             self._threads = [threading.Thread(target=self._collect, daemon=True, name='detector-latest'),
                              threading.Thread(target=self._infer_loop, daemon=True, name='detector-infer')]
@@ -176,7 +199,12 @@ class LatestFrameInferenceWorker:
                 packet = self.camera.wait_for_frame(sequence, timeout=.1, copy=False)
                 if packet is not None:
                     sequence = max(sequence, packet.sequence)
-                    self.submit(packet)
+                    if self._frame_monitor is not None:
+                        self._frame_monitor(packet)
+                    if not self._paused:
+                        self.submit(packet)
+                if self._paused:
+                    self._stop.wait(1.0)
             except Exception:
                 with self._condition:
                     self._counts['error_unavailable_count'] += 1
@@ -187,7 +215,7 @@ class LatestFrameInferenceWorker:
         while not self._stop.is_set():
             if not self.run_once():
                 with self._condition:
-                    self._condition.wait(timeout=min(.1, max(.001, self._next_due-self._clock())))
+                    self._condition.wait(timeout=1.0 if self._paused or not self.config.enabled else min(.1, max(.001, self._next_due-self._clock())))
 
     def stop(self):
         self._stop.set()
@@ -215,6 +243,7 @@ class LatestFrameInferenceWorker:
                 'stale_after_inference_count', 'error_unavailable_count', 'duplicate_or_regressed_count',
                 'source_change_count', 'inference_count', 'observer_error_count')}
             return dict(self._backend_status, **counters, worker_state=self._state,
+                        paused=self._paused, worker_threads=[dict(name=t.name, alive=t.is_alive()) for t in self._threads],
                         nominal_cadence_hz=self.config.target_hz, in_flight=self._inflight,
                         pending_frame=self._pending is not None,
                         pending_sequence=self._pending.sequence if self._pending else None,

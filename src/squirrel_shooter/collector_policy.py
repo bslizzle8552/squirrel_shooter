@@ -59,6 +59,11 @@ class SquirrelRecordingObserver:
         self._last_identity = (-1, -1)
         self._count = 0
         self._error = None
+        self._paused = False
+
+    def set_paused(self, paused):
+        with self._lock:
+            self._paused = paused
 
     def observe(self, observation, packet=None):
         if not self.config.enabled:
@@ -69,6 +74,8 @@ class SquirrelRecordingObserver:
             return
         boxes = []
         with self._lock:
+            if self._paused:
+                return
             for d in observation.output.detections:
                 zone = self.watch_zone.test_box(d.xyxy, observation.native_width, observation.native_height)
                 self._raw.append(dict(confidence=d.confidence,native_box=list(d.xyxy),source_sequence=observation.source_sequence,
@@ -81,6 +88,8 @@ class SquirrelRecordingObserver:
             return
         identity = (observation.camera_generation, observation.source_sequence)
         with self._lock:
+            if self._paused:
+                return
             if identity <= self._last_identity:
                 return
             best = max(boxes, key=lambda d: d.confidence)
@@ -116,10 +125,11 @@ class SquirrelRecordingObserver:
         with self._lock:
             age = self._clock() - self._last['source_monotonic'] if self._last else None
             return dict(enabled=self.config.enabled, policy='RECORDING ONLY',
+                        paused=self._paused,
                         squirrel_confidence=self.config.squirrel_confidence,
                         tail_seconds=self.config.tail_seconds, qualifying_count=self._count,
                         last_observation=self._last, last_seen_seconds=age,
-                        detected_recently=age is not None and 0 <= age <= self.config.tail_seconds,
+                        detected_recently=not self._paused and age is not None and 0 <= age <= self.config.tail_seconds,
                         ignored_outside_count=self._outside, raw_diagnostics=list(self._raw),
                         trip_evidence_required=self.require_evidence, trip_save_latency_seconds=list(self._save_latencies),
                         error=self._error)
