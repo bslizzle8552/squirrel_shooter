@@ -1,0 +1,16 @@
+[Unit]
+Description=Phase 4.6 squirrel data collector
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/bslizzle8552/squirrel_collector_phase4_20260907
+Environment=PYTHONPATH=/home/bslizzle8552/squirrel_collector_phase4_20260907/source/src
+ExecStartPre=/home/bslizzle8552/squirrel_collector_phase4_20260907/.venv/bin/python -B -c "import socket; sock = socket.socket(); sock.bind(('100.110.85.40', 0)); sock.close()"
+ExecStart=/home/bslizzle8552/squirrel_collector_phase4_20260907/.venv/bin/python -B -m squirrel_shooter.collector_app --config /home/bslizzle8552/squirrel_collector_phase4_20260907/collector.yaml --host 100.110.85.40 --port 5094
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

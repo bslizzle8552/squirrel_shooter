@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ 'Dry aim test' if mode == 'test' else 'Calibrate nine targets' }} · Squirrel collector</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='collector_calibration.css') }}">
+</head>
+<body>
+<main>
+  <header>
+    <a href="/">← Collector</a>
+    <h1>{{ 'Dry aim test' if mode == 'test' else 'Calibrate nine targets' }}</h1>
+    {% if mode == 'test' %}
+    <p>Select a pixel between saved targets, then test the aim. Both dry tests keep water OFF.</p>
+    {% else %}
+    <p>Select a point, adjust the nozzle and press FIRE for a short water pulse. Observe, adjust and repeat. Once the water hits the intended spot, click that spot in the image and LOCK POINT to save its pixel and aim.</p>
+    {% endif %}
+  </header>
+  <p id="control-status" role="status">Connecting to physical control…</p>
+  <p id="map-status" role="status">Checking calibration and camera resolution…</p>
+  <p class="muted">Moving the camera or nozzle makes previous calibration stale. Measure all nine points again for the new location.</p>
+  <details><summary>Inspect saved points (native pixels and commanded angles)</summary><pre id="saved-points">No points loaded.</pre></details>
+  <div class="workspace">
+    <section class="camera-panel" aria-label="Target pixel selection">
+      {% if preview_enabled %}
+      <div id="camera-frame">
+        <img id="camera-preview" alt="Existing live camera view. Click a physical target to place the reticle." draggable="false">
+        <span id="reticle" hidden aria-hidden="true"></span>
+      </div>
+      {% else %}
+      <p class="notice">Camera preview is disabled in configuration. Reticle selection is unavailable.</p>
+      {% endif %}
+      <p id="camera-status">Waiting for native camera dimensions…</p>
+      <p class="readout">Reticle <strong id="pixel-position">not selected</strong></p>
+      <p class="muted">Clicking selects a pixel only. It never moves the nozzle or fires.</p>
+    </section>
+    <section class="controls" aria-label="{{ 'Dry tests' if mode == 'test' else 'Calibration controls' }}">
+      <div class="angles"><span>Commanded PAN <strong id="pan-angle">—</strong></span><span>Commanded TILT <strong id="tilt-angle">—</strong></span></div>
+      <p class="muted small">Commanded angles only; there is no servo position feedback.</p>
+      {% if mode != 'test' %}
+      <div class="point-heading"><strong id="selected-point">Point 1</strong><span id="point-count">0 / 9 locked</span></div>
+      <div id="point-grid" class="grid" role="group" aria-label="Nine physical targets, numbered left to right, top to bottom">
+        {% for point in range(1, 10) %}
+        <button type="button" data-point="{{ point }}" aria-pressed="{{ 'true' if point == 1 else 'false' }}" disabled>{{ point }} <span>—</span></button>
+        {% endfor %}
+      </div>
+      <p id="point-note" class="muted small">Number targets left to right, top to bottom. Selecting a locked point moves to its saved aim and holds.</p>
+      <label class="step-label" for="move-step">Movement step
+        <select id="move-step"><option value="5">5° · coarse</option><option value="3">3° · medium</option><option value="1" selected>1° · fine</option><option value="0.5">0.5° · trim</option></select>
+      </label>
+      <div class="dpad" role="group" aria-label="Move nozzle">
+        <button type="button" data-direction="up" class="up" disabled>↑ UP</button>
+        <button type="button" data-direction="left" class="left" disabled>← LEFT</button>
+        <button type="button" id="center" class="center" disabled>CENTER</button>
+        <button type="button" data-direction="right" class="right" disabled>RIGHT →</button>
+        <button type="button" data-direction="down" class="down" disabled>↓ DOWN</button>
+      </div>
+      <div class="actions"><button type="button" id="fire" class="fire" disabled>FIRE short pulse</button><button type="button" id="park" disabled>PARK</button></div>
+      <div class="actions"><button type="button" id="lock" class="primary" disabled>LOCK POINT</button><button type="button" id="relock" hidden disabled>RELOCK POINT…</button></div>
+      <button type="button" id="complete" class="primary wide" disabled>COMPLETE CALIBRATION</button>
+      <button type="button" id="reset" class="wide" hidden disabled>RESET incompatible calibration…</button>
+      {% else %}
+      <p id="calibration-status">Checking saved calibration…</p>
+      <button type="button" id="dry-aim" class="primary wide" disabled>DRY AIM · water OFF</button>
+      <button type="button" id="dry-sequence" class="wide" disabled>DRY SEQUENCE · water OFF</button>
+      <p class="muted small">Dry aim moves and holds. Dry sequence aims, settles, skips the water pulse, parks and waits through cooldown.</p>
+      <button type="button" id="fire" class="fire wide" disabled>FIRE short pulse</button>
+      <p class="muted small">Manual fire requires a successful dry aim at the selected pixel and water explicitly enabled in configuration.</p>
+      <button type="button" id="park" class="wide" disabled>PARK</button>
+      <p><a href="/">Done · return to collector</a></p>
+      {% endif %}
+      <p id="message" role="status" aria-live="polite"></p>
+      <p id="last-result" class="muted small"></p>
+    </section>
+  </div>
+</main>
+<script id="control-settings" type="application/json">{{ {'token': control_token, 'mode': mode}|tojson }}</script>
+<script src="{{ url_for('static', filename='collector_calibration.js') }}" defer></script>
+</body>
+</html>

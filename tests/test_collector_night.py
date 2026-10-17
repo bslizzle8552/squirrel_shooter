@@ -198,7 +198,7 @@ def test_existing_tail_finishes_without_extension_or_new_evidence(tmp_path, rig)
 def test_night_idle_skips_periodic_storage_work_and_wakes(rig, monkeypatch):
     service = rig.build()
     calls = []
-    monkeypatch.setattr(service, '_storage_check', lambda: calls.append(1))
+    monkeypatch.setattr(service, '_storage_check', lambda **kwargs: calls.append(1))
     service.set_idle_requested(True)
     time.sleep(.15)
     before = len(calls)

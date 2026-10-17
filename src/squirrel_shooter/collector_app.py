@@ -1,7 +1,7 @@
-"""Control-incapable composition. Never call app.build_application_runtime/create_app.
+"""Collector composition. Never call app.build_application_runtime/create_app.
 
-Only camera, detector, clean recording and a dedicated collector Flask app are
-constructed. Observations record evidence without asserting biological visits.
+Camera, detector and recording remain collector-owned. Optional physical control
+is separately enabled and consumes the existing detector observations.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from .collector_night import NightVisionMonitor
 
 
 class CollectorRuntime:
-    """Explicit dependencies; no physical controls or legacy application runtime."""
+    """Explicit dependencies; legacy application services are never constructed."""
     def __init__(self, config, *, camera=None, detector=None, recording=None):
         self.config = config
         cv2.setNumThreads(config.runtime.opencv_threads)
@@ -43,13 +43,28 @@ class CollectorRuntime:
         self.observer = SquirrelRecordingObserver(self.recording, config.automatic_recording,
                                                   config.detector.maximum_result_age_seconds, watch_zone=config.watch_zone,
                                                   require_evidence=True)
+        self.control = None
         self.worker = LatestFrameInferenceWorker(self.camera, self.detector, config.detector,
-                                                 frame_observer=self.observer.observe,
+                                                 frame_observer=self._observe if config.physical_control.enabled else self.observer.observe,
                                                  frame_monitor=self._monitor_frame if config.collector_night.enabled else None)
         self.night = NightVisionMonitor(config.collector_night)
         self.worker.set_paused(self.night.status()['paused'], self._night_transition)
+        if config.physical_control.enabled:
+            from .collector_control import CollectorControl
+            self.control = CollectorControl(config.physical_control, config.automatic_fire,
+                camera_status=self.camera.status, detector_status=self.worker.status,
+                watch_zone=config.watch_zone, maximum_age=config.detector.maximum_result_age_seconds,
+                recording=self.recording)
         self.media = CollectorMedia(config.camera.output_directory / 'recordings')
         self._closed = False
+
+    def _observe(self, observation, packet):
+        # Preserve exact-frame recording behavior; actuators only receive a small result copy.
+        try:
+            self.observer.observe(observation, packet)
+        finally:
+            if self.control is not None:
+                self.control.observe(observation)
 
     def _night_transition(self, paused):
         self.observer.set_paused(paused)
@@ -68,6 +83,8 @@ class CollectorRuntime:
         if self._closed:
             raise RuntimeError('collector already closed')
         try:
+            if self.control is not None:
+                self.control.start()
             self.camera.start()
             self.recording.start()
             self.worker.start()
@@ -80,15 +97,22 @@ class CollectorRuntime:
             return
         self._closed = True
         try:
-            self.worker.stop()
+            if self.control is not None:
+                self.control.stop()
         finally:
             try:
-                self.recording.stop()
+                self.worker.stop()
             finally:
-                self.camera.stop()
+                try:
+                    self.recording.stop()
+                finally:
+                    self.camera.stop()
 
     def status(self):
-        return dict(role='control_incapable_collector', physical_control_available=False,
+        control = self.control.status(compact=True) if self.control is not None else None
+        return dict(role='collector_with_optional_control' if control else 'control_incapable_collector',
+                    physical_control_available=bool(control and control['worker_alive'] and not control['error']),
+                    control=control,
                     automatic_recording_observer_connected=self.config.automatic_recording.enabled,
                     automatic_recording=self.observer.status(),
                     night_mode=self.night.status(),
@@ -102,11 +126,16 @@ def create_collector_app(runtime: CollectorRuntime):
     app = Flask(__name__)
     token = secrets.token_urlsafe(32)
     app.config['COLLECTOR_RECORDING_TOKEN'] = token
+    app.config['COLLECTOR_CONTROL_TOKEN'] = token
+    if runtime.control is not None:
+        from .collector_control_routes import register_control_routes
+        register_control_routes(app, runtime.control, token, runtime.config.collector_preview.enabled)
 
     @app.get('/')
     def index():
         return render_template('collector.html', recording_token=token,
-                               preview_enabled=runtime.config.collector_preview.enabled)
+                               preview_enabled=runtime.config.collector_preview.enabled,
+                               control_enabled=runtime.control is not None)
 
     @app.get('/preview.mjpg')
     def preview():

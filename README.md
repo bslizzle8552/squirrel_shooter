@@ -1,5 +1,15 @@
 # Squirrel Squirter
 
+## Final Pi deployment snapshot — October 17, 2026
+
+The `squirrel-runtime-v2` branch now preserves the last installed collector source
+from the field Pi. See [the final deployment record](docs/pi-final-2026-10-17/README.md)
+for source hashes, backup contents, service state, and verification limits.
+Both Squirrel services were stopped and disabled for repurposing the Pi.
+The historical application description below describes the legacy entrypoint;
+the final active service ran `squirrel_shooter.collector_app` with the external
+`collector.yaml` and v5 NCNN model recorded in the deployment manifest.
+
 Squirrel Squirter's normal application is a Raspberry Pi garden watcher with
 calibrated manual control and a legacy event-driven automatic firing path:
 

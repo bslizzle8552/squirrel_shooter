@@ -549,7 +549,7 @@ def test_periodic_storage_failure_reports_terminal_error_and_keeps_bytes(rig):
     service = rig.build()
     service.record_manual()
     captured(rig, service)
-    def unavailable():
+    def unavailable(**kwargs):
         raise OSError("injected storage accounting failure")
     service._storage_check = unavailable
     wait_for(lambda: service.status()["last_error"] is not None)

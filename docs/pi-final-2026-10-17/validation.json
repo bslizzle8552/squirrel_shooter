@@ -1,0 +1,30 @@
+{
+  "pytest": {
+    "tests": 1017,
+    "passed": 1014,
+    "failed": 2,
+    "skipped": 1,
+    "failures": [
+      {
+        "test": "tests.test_camera_contract::test_latest_frame_skips_unconsumed_sources_and_preserves_receipt_identity",
+        "message": "assert [1] == [1, 2, 3]\n  \n  Right contains 2 more items, first extra item: 2\n  Use -v to get more diff"
+      },
+      {
+        "test": "tests.test_collector_night::test_runtime_night_blocks_manual_auto_evidence_preview_works_and_resumes",
+        "message": "assert 'NIGHT MODE \u2014 DETECTION / RECORDING PAUSED' in '<!doctype html>\\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initi....hidden)el(\\'preview\\').src=\\'/preview.mjpg?t=\\'+Date.now();},3000);};}\\npoll();pollRecent();\\n</script></body></html>'"
+      }
+    ],
+    "skips": [
+      {
+        "test": "tests.test_collector_usability::test_media_rejects_wrong_role_and_symlink",
+        "reason": "host does not permit symlinks"
+      }
+    ]
+  },
+  "javascript": {
+    "passed": 9,
+    "failed": 0
+  },
+  "source_files_matching_deployment": 82,
+  "production_source_modified_for_test_results": false
+}

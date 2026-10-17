@@ -2,49 +2,120 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Squirrel data collector</title>
 <style>body{font:16px system-ui;margin:1.5rem auto;padding:0 1rem;max-width:1000px;background:#14201b;color:#eef6ef}button,a{font:inherit}button{padding:.8rem;margin:.3rem;border-radius:.4rem;cursor:pointer}a{color:#b5e5c9}h1{font-size:1.7rem}section{background:#23342a;padding:1rem;margin:1rem 0;border-radius:.5rem}#preview{width:100%;max-height:65vh;object-fit:contain;background:#0c120f}#message{min-height:1.5rem}.muted{color:#bbcbbf}.warning{color:#ffce80}article{border-top:1px solid #536158;padding:.8rem 0;overflow-wrap:anywhere}article a{display:inline-block;margin:.3rem .8rem .3rem 0}#session{overflow-wrap:anywhere}</style></head>
-<body><h1>Squirrel data collector</h1><p class="muted">Clean camera evidence · Physical controls unavailable</p>
-{% if preview_enabled %}<img id="preview" src="/preview.mjpg" alt="Live camera preview"><p id="preview-note" class="muted">Live presentation preview · 2 FPS maximum</p>{% else %}<p>Preview disabled in configuration.</p>{% endif %}
-<section aria-live="polite"><strong id="detector">Connecting to detector…</strong><p id="detection">Waiting for status</p><small id="policy"></small></section>
-<section><button id="record" disabled>Record 30 seconds</button><button id="stop">Stop recording</button><p id="recording">Connecting to recorder…</p><p id="session" class="muted"></p><p id="message" role="status"></p><small>Stop clears the manual request. Squirrel detections keep automatic recording active.</small></section>
-<section><h2>Recent recordings</h2><p class="muted">Clean native AVI segments. Degraded clips retain useful evidence and are marked below.</p><div id="recent">Loading recordings…</div></section>
+<body><h1>Squirrel data collector</h1><p class="muted">Clean camera evidence{% if not control_enabled %} Â· Physical controls unavailable{% endif %}</p>
+{% if control_enabled %}<p id="control-summary" class="muted">Reading control statusâ€¦</p><p><a id="calibration-link" href="/calibration" hidden>Complete calibration</a></p>{% endif %}
+{% if control_enabled %}<section aria-label="Water supply test"><button id="water-test" type="button" disabled style="background:#b4231c;color:white;border:2px solid #ff827c;font-weight:700;min-width:140px">Test fire</button><span id="water-test-status">Checking valve…</span><p class="muted">One <span id="water-test-pulse">short</span> pulse in the current direction to check the nozzle and water supply. No aiming needed.</p><p id="water-test-result" role="status" aria-live="polite"></p></section>{% endif %}
+{% if preview_enabled %}<img id="preview" src="/preview.mjpg" alt="Live camera preview"><p id="preview-note" class="muted">Live presentation preview Â· 2 FPS maximum</p>{% else %}<p>Preview disabled in configuration.</p>{% endif %}
+<section aria-live="polite"><strong id="detector">Connecting to detectorâ€¦</strong><p id="detection">Waiting for status</p><small id="policy"></small></section>
+{% if control_enabled %}<section aria-label="Firing history"><h2>Firing history</h2><strong id="shot-count">Loading firing historyâ€¦</strong><p id="last-shot"></p><p id="shot-history-note" class="muted"></p><div id="shot-history"></div><p><a href="/api/control/history/export">Download complete firing history</a></p><small>Shots count successful valve-open commands, not measured water flow. History survives restarts; earlier shots cannot be reconstructed.</small></section>{% endif %}
+<section><button id="record" disabled>Record 30 seconds</button><button id="stop">Stop recording</button><p id="recording">Connecting to recorderâ€¦</p><p id="storage" class="muted"></p><p id="session" class="muted"></p><p id="message" role="status"></p><small>Stop clears the manual request. Squirrel detections keep automatic recording active.</small></section>
+<section><h2>Recent recordings</h2><p class="muted">Clean native AVI segments. Degraded clips retain useful evidence and are marked below.</p><div id="recent">Loading recordingsâ€¦</div></section>
 <p><a href="/api/status" target="_blank" rel="noopener">Full diagnostics</a></p>
 <script>
 const token = {{ recording_token|tojson }};
 const el = id => document.getElementById(id);
 const confidence = value => value == null ? 'none' : Number(value).toFixed(4);
+let waterTestPending=false, waterTestSubmitted=false, controlRevision=0;
+function waterTestStatus(c){
+ if(!el('water-test'))return;
+ if(waterTestPending && waterTestSubmitted && !c.busy){
+  waterTestPending=false;waterTestSubmitted=false;
+  const result=c.last_result;
+  el('water-test-result').textContent=result?.action==='water_test'
+   ? (result.error || (result.outcome==='manual_pulse_closed'?'Test pulse complete. Valve closed.':'Test did not complete; check firing history.'))
+   : 'Could not confirm the test result; check firing history.';
+ }
+ const seconds=Math.ceil(c.cooldown_remaining_seconds||0);
+ el('water-test').disabled=waterTestPending || !c.enabled || !c.valve_enabled || !c.worker_alive || !!c.error || c.busy || seconds>0;
+ el('water-test').textContent=waterTestPending?'Firing…':seconds>0?'Wait '+seconds+'s':'Test fire';
+ el('water-test-status').textContent=c.error || (!c.enabled||!c.valve_enabled?'Water control disabled':!c.worker_alive?'Control worker unavailable':waterTestPending?'Test pulse in progress…':c.busy?'Control busy':seconds>0?'Cooldown: '+seconds+'s':'Ready');
+ if(c.pulse_seconds!=null)el('water-test-pulse').textContent=c.pulse_seconds+'s';
+}
+async function waterTest(){
+ if(waterTestPending || el('water-test').disabled)return;
+ waterTestPending=true;waterTestSubmitted=false;controlRevision++;
+ el('water-test').disabled=true;el('water-test').textContent='Firing…';
+ el('water-test-status').textContent='Requesting test pulse…';el('water-test-result').textContent='';
+ const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),15000);
+ try{
+  const response=await fetch('/api/control/action',{method:'POST',headers:{'Content-Type':'application/json','X-Control-Token':token},body:JSON.stringify({action:'water_test'}),signal:controller.signal});
+  const result=await response.json();
+  if(!response.ok){waterTestPending=false;throw Error(result.error||'Test fire rejected');}
+  waterTestSubmitted=true;controlRevision++;waterTestStatus(result);
+ }catch(e){
+  el('water-test-result').textContent=waterTestPending?'Could not confirm the test pulse. Check the nozzle and firing history before trying again.':e.message;
+  waterTestPending=false;waterTestSubmitted=false;controlRevision++;
+  el('water-test').textContent='Test fire';el('water-test-status').textContent='Checking valve…';
+ }finally{clearTimeout(timeout);}
+}
+if(el('water-test'))el('water-test').onclick=waterTest;
+function firingHistory(c){
+ if(!el('shot-count'))return;
+ const h=c.firing_history;
+ if(!h?.available){el('shot-count').textContent='Firing history unavailable';el('shot-history-note').textContent=h?.error||'History is not initialized';return;}
+ el('shot-count').textContent=h.shots+' shot command'+(h.shots===1?'':'s')+' Â· '+h.attempts+' attempts Â· Firing threshold '+confidence(c.firing_minimum_confidence);
+ el('last-shot').textContent=h.last_shot?'Last shot: '+new Date(h.last_shot.opened_at||h.last_shot.started_at).toLocaleString()+' Â· '+h.last_shot.action:'No shot commands recorded since history began.';
+ el('shot-history-note').textContent='History began '+new Date(h.since).toLocaleString()+' Â· Latest 20 attempts'+(h.error?' Â· ERROR: '+h.error:'');
+ const fragment=document.createDocumentFragment();
+ for(const r of h.recent){
+  const item=document.createElement('article'), title=document.createElement('strong'), detail=document.createElement('p');
+  const pulse=r.valve_open_returned?'SHOT COMMANDED':r.pulse_evidence==='open_intent_only'||r.pulse_evidence==='open_not_confirmed'?'SHOT UNCERTAIN':r.outcome==='in_progress'?'IN PROGRESS':r.dry_run&&r.outcome==='dry_run'?'DRY RUN':'NO SHOT';
+  title.textContent=new Date(r.started_at).toLocaleString()+' Â· '+pulse+' Â· '+r.action;
+  if(r.error||pulse==='SHOT UNCERTAIN')title.className='warning';
+  detail.textContent=r.outcome+(r.confidence==null?'':' Â· Confidence '+confidence(r.confidence))+(r.valve_open_returned?' Â· '+r.requested_pulse_seconds+' sec requested Â· '+(r.valve_close_returned?'Close command succeeded':'Closure unconfirmed'):'')+(r.error?' Â· '+r.error:'');
+  item.append(title,detail);
+  if(r.recording?.error){const note=document.createElement('p');note.className='warning';note.textContent='Recording: '+r.recording.error;item.append(note);}
+  if(/^\/recordings\/[a-f0-9]{32}\/segment-[0-9]{4}\.avi\?download=1$/.test(r.recording?.video_url||'')){const link=document.createElement('a');link.href=r.recording.video_url;link.textContent='Download shot video (available after recording finishes)';item.append(link);}
+  fragment.append(item);
+ }el('shot-history').replaceChildren(fragment);
+}
 async function refresh() {
+ const revision=controlRevision;
  try {
   const response=await fetch('/api/status'); if(!response.ok) throw Error('Status unavailable');
   const s=await response.json(), d=s.detector, a=s.automatic_recording, r=s.recording;
+  if(s.control && revision===controlRevision && (!waterTestPending||waterTestSubmitted))waterTestStatus(s.control);
+  if(s.control)firingHistory(s.control);
+  if(el('control-summary') && s.control){const c=s.control;el('control-summary').textContent='Calibration '+(c.calibration.complete?'complete':'incomplete')+' Â· Physical control '+(c.enabled?'enabled':'disabled')+' Â· Water '+(c.valve_enabled?'enabled':'OFF')+' Â· Auto '+(c.automatic_fire_enabled?(c.dry_run?'DRY RUN':'enabled'):'disabled')+' Â· '+c.state+(c.error?' Â· '+c.error:'');el('calibration-link').hidden=!c.calibration_mode;}
   const night=s.night_mode, paused=night.paused;
-  el('detector').textContent = 'Detector: ' + (d.result_available ? 'RUNNING' : 'UNAVAILABLE') + (d.last_inference_latency_seconds == null ? '' : ' · ' + Math.round(d.last_inference_latency_seconds*1000) + ' ms inference');
-  el('detection').textContent = (a.detected_recently ? 'SQUIRREL DETECTED · ' : '') + 'Raw full-frame confidence: ' + confidence(d.last_top_squirrel_confidence) + (a.last_observation ? ' · Last qualifying: ' + confidence(a.last_observation.confidence) + ' (' + a.last_seen_seconds.toFixed(1) + ' sec ago)' : ' · No qualifying squirrel seen');
-  el('policy').textContent='Automatic recording ' + (a.enabled ? 'ON' : 'OFF') + ' · RECORDING-ONLY threshold ' + a.squirrel_confidence + ' · Tail ' + a.tail_seconds + ' seconds';
+  el('detector').textContent = 'Detector: ' + (d.result_available ? 'RUNNING' : 'UNAVAILABLE') + (d.last_inference_latency_seconds == null ? '' : ' Â· ' + Math.round(d.last_inference_latency_seconds*1000) + ' ms inference');
+  el('detection').textContent = (a.detected_recently ? 'SQUIRREL DETECTED Â· ' : '') + 'Raw full-frame confidence: ' + confidence(d.last_top_squirrel_confidence) + (a.last_observation ? ' Â· Last qualifying: ' + confidence(a.last_observation.confidence) + ' (' + a.last_seen_seconds.toFixed(1) + ' sec ago)' : ' Â· No qualifying squirrel seen');
+  el('policy').textContent='Automatic recording ' + (a.enabled ? 'ON' : 'OFF') + ' Â· RECORDING-ONLY threshold ' + a.squirrel_confidence + ' Â· Tail ' + a.tail_seconds + ' seconds';
   if(paused){
-   el('detector').textContent=night.mode==='NIGHT'?'NIGHT MODE — DETECTION / RECORDING PAUSED':'Checking day/night image — detection / recording paused';
+   el('detector').textContent=night.mode==='NIGHT'?'NIGHT MODE â€” DETECTION / RECORDING PAUSED':'Checking day/night image â€” detection / recording paused';
    el('detection').textContent='Live preview remains available. Daytime processing resumes automatically after stable color returns.';
-   el('policy').textContent='Image-derived night state · '+night.settings.exit_seconds+' seconds of stable daytime color to resume';
+   el('policy').textContent='Image-derived night state Â· '+night.settings.exit_seconds+' seconds of stable daytime color to resume';
   }
   const manual=r.manual_remaining_seconds>0, auto=r.automatic_active;
-  const remaining=Math.max(r.manual_remaining_seconds||0,r.automatic_remaining_seconds||0);
+  const firing=r.firing_remaining_seconds>0;
+  const remaining=Math.max(r.manual_remaining_seconds||0,r.automatic_remaining_seconds||0,r.firing_remaining_seconds||0);
   const degraded=(r.queue_dropped||0)>0 || r.status==='degraded';
-  el('recording').textContent=(r.active ? 'RECORDING · ' + (manual&&auto ? 'MANUAL + AUTO' : auto ? 'AUTO' : 'MANUAL') + ' · '+remaining.toFixed(1)+' sec remaining' : (r.status==='finalizing' ? 'FINALIZING' : 'Not recording')) + (degraded ? ' · DEGRADED ('+(r.queue_dropped||0)+' drops)' : '') + (r.last_error||r.error||a.error ? ' · ERROR: '+(r.last_error||r.error||a.error) : '');
-  el('recording').className=degraded||r.error||r.last_error||a.error?'warning':'';
-  el('session').textContent=r.session_id ? 'Session '+r.session_id : '';
+  const storage=r.storage, quotaRecovered=storage?.recovery_state==='recovered';
+  const observerError=quotaRecovered && a.error==='RecordingError: recording_storage_budget_exhausted' ? null : a.error;
+  const currentError=r.last_error || (r.pending_sessions ? r.error : null) || observerError;
+  el('recording').textContent=(r.active ? 'RECORDING Â· ' + (firing ? 'SHOT + AFTERMATH' : manual&&auto ? 'MANUAL + AUTO' : auto ? 'AUTO' : 'MANUAL') + ' Â· '+remaining.toFixed(1)+' sec remaining' : (r.pending_sessions ? 'FINALIZING' : r.ready ? 'Ready Â· Not recording' : 'Recording unavailable')) + (r.active&&degraded ? ' Â· DEGRADED ('+(r.queue_dropped||0)+' drops)' : '') + (currentError ? ' Â· ERROR: '+currentError : '');
+  el('recording').className=(r.active&&degraded)||currentError?'warning':'';
+  if(storage){
+   const used=storage.bytes==null?'not measured':(storage.bytes/1024**3).toFixed(2)+' GiB';
+   const age=storage.measurement_age_seconds==null?'no measurement':storage.measurement_age_seconds.toFixed(1)+' seconds ago';
+   const recovery={idle:'',waiting_for_finalization:'Waiting for recording finalization before recovery',checking:'Checking storage for recovery',waiting_for_space:'Last check was over quota; rechecking every '+storage.recheck_seconds+' seconds',waiting_for_free_space:'Waiting for filesystem free space',restarting:'Restarting recording worker',recovered:'Recording worker recovered after quota exhaustion',blocked:'Automatic recovery blocked'}[storage.recovery_state]||'';
+   el('storage').textContent='Storage last measured: '+used+' / '+(storage.budget_bytes/1024**3).toFixed(2)+' GiB Â· '+age+(storage.measurement_stale?' (stale; current usage unverified)':'')+' Â· '+storage.root+(storage.quota_error_state==='historical'?' Â· Previous quota error is historical':'')+(recovery?' Â· '+recovery:'')+(storage.recovery_error||storage.measurement_error?' Â· '+(storage.recovery_error||storage.measurement_error):'');
+  }
+  el('session').textContent=r.session_id ? (r.pending_sessions?'Session ':'Last session ')+r.session_id+(!r.pending_sessions&&r.error?' Â· Previous session error: '+r.error:'') : '';
   el('record').disabled=paused||!r.ready||!!r.last_error; el('stop').disabled=!manual;
-  el('record').textContent=paused?'Recording unavailable — night mode':'Record 30 seconds';
+  el('record').textContent=paused?'Recording unavailable â€” night mode':'Record 30 seconds';
   el('record').title=paused?'Recording resumes automatically in daytime':'';
-  if(el('preview-note')) el('preview-note').textContent='Live presentation preview · '+s.preview.maximum_fps+' FPS maximum · JPEG quality '+s.preview.jpeg_quality+(s.camera.online ? '' : ' · CAMERA OFFLINE');
- } catch(e) {el('record').disabled=true;el('detector').textContent='Detector: CONNECTION LOST';el('message').textContent=e.message;}
+  if(el('preview-note')) el('preview-note').textContent='Live presentation preview Â· '+s.preview.maximum_fps+' FPS maximum Â· JPEG quality '+s.preview.jpeg_quality+(s.camera.online ? '' : ' Â· CAMERA OFFLINE');
+ } catch(e) {el('record').disabled=true;el('detector').textContent='Detector: CONNECTION LOST';el('message').textContent=e.message;if(el('water-test') && revision===controlRevision){el('water-test').disabled=true;el('water-test-status').textContent='Control status unavailable';}}
 }
 async function recent(){
  try{
   const response=await fetch('/api/recordings');if(!response.ok)throw Error('Recent recordings unavailable');
   const rows=(await response.json()).recordings; const fragment=document.createDocumentFragment();
   for(const r of rows){const item=document.createElement('article');const title=document.createElement('strong');
-   title.textContent=(r.start_wall?new Date(r.start_wall).toLocaleString():r.session_id)+' · '+(r.status||'unknown').toUpperCase();
+   title.textContent=(r.start_wall?new Date(r.start_wall).toLocaleString():r.session_id)+' Â· '+(r.status||'unknown').toUpperCase();
    if(r.status==='degraded'||r.status==='error')title.className='warning';item.append(title);
-   const detail=document.createElement('p');detail.textContent=(r.reason||'Unknown reason')+' · '+Number(r.duration_seconds||0).toFixed(1)+' sec'+(r.maximum_squirrel_confidence==null?'':' · Max confidence '+confidence(r.maximum_squirrel_confidence));item.append(detail);
+   const detail=document.createElement('p');detail.textContent=(r.reason||'Unknown reason')+' Â· '+Number(r.duration_seconds||0).toFixed(1)+' sec'+(r.maximum_squirrel_confidence==null?'':' Â· Max confidence '+confidence(r.maximum_squirrel_confidence));item.append(detail);
    for(const clip of r.clips){const base='/'+encodeURIComponent(r.session_id)+'/'+encodeURIComponent(clip.file);
     for(const [label,url] of [['Play/Open '+clip.file,'/clips'+base],['Download','/recordings'+base+'?download=1']]){const link=document.createElement('a');link.textContent=label;link.href=url;link.target='_blank';link.rel='noopener';item.append(link);}}
    if(r.peak_trip){const link=document.createElement('a');link.textContent='Exact peak trip frame ('+r.trip_count+' preserved)';link.href='/trip-evidence/'+encodeURIComponent(r.session_id)+'/'+encodeURIComponent(r.peak_trip);link.target='_blank';link.rel='noopener';item.append(link);}
@@ -56,6 +127,6 @@ async function record(action){try{const response=await fetch('/api/recording/'+a
 el('record').onclick=()=>record('start');el('stop').onclick=()=>record('stop');
 // Recursive timers do not queue requests when the network is slow.
 async function poll(){await refresh();setTimeout(poll,1000);}async function pollRecent(){await recent();setTimeout(pollRecent,5000);}
-if(el('preview')){document.addEventListener('visibilitychange',()=>{el('preview').src=document.hidden?'':'/preview.mjpg';});el('preview').onerror=()=>{el('preview-note').textContent='Preview connection lost; retrying…';setTimeout(()=>{if(!document.hidden)el('preview').src='/preview.mjpg?t='+Date.now();},3000);};}
+if(el('preview')){document.addEventListener('visibilitychange',()=>{el('preview').src=document.hidden?'':'/preview.mjpg';});el('preview').onerror=()=>{el('preview-note').textContent='Preview connection lost; retryingâ€¦';setTimeout(()=>{if(!document.hidden)el('preview').src='/preview.mjpg?t='+Date.now();},3000);};}
 poll();pollRecent();
 </script></body></html>

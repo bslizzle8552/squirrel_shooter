@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import shutil
+import stat
 import threading
 import uuid
 from collections import deque
@@ -75,6 +76,10 @@ class RecordingError(RuntimeError):
     pass
 
 
+_QUOTA_ERROR = "RecordingError: recording_storage_budget_exhausted"
+_QUOTA_RECHECK_SECONDS = 10.0
+
+
 def _utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
@@ -118,6 +123,9 @@ class _Session:
     wall: str
     maximum_until: float
     manual_until: float | None = None
+    firing_until: float | None = None
+    firing_events: list[dict[str, Any]] = field(default_factory=list)
+    evidence_warnings: int = 0
     automatic: dict[str, dict[str, Any]] = field(default_factory=dict)
     identities: dict[str, dict[str, Any]] = field(default_factory=dict)
     timeline: deque = field(default_factory=lambda: deque(maxlen=128))
@@ -159,7 +167,7 @@ class RecordingService:
                  writer_factory: Callable[..., Any] = cv2.VideoWriter,
                  validator: Callable[..., dict[str, Any]] = validate_video,
                  disk_usage: Callable[..., Any] = shutil.disk_usage) -> None:
-        self.camera, self.config, self.directory = camera, config, directory
+        self.camera, self.config, self.directory = camera, config, directory.absolute()
         self._clock, self._writer_factory, self._validator, self._disk_usage = clock, writer_factory, validator, disk_usage
         self._lock = threading.Lock()
         self._queue: queue.Queue = queue.Queue(maxsize=config.queue_capacity)
@@ -177,6 +185,18 @@ class RecordingService:
         self._last_error: str | None = None
         self._shutdown_timed_out = False
         self._storage_bytes = 0
+        self._storage_scan_lock = threading.Lock()
+        self._storage_directories: dict[Path, int] | None = None
+        self._storage_dirty: set[Path] = set()
+        self._storage_snapshot: dict[str, Any] | None = None
+        self._storage_measurement_error: str | None = None
+        self._quota_recovery_lock = threading.Lock()
+        self._quota_recovery_state = "idle"
+        self._quota_recovery_error: str | None = None
+        self._last_quota_error: dict[str, Any] | None = None
+        self._next_quota_recheck = 0.0
+        self._quota_recovery_count = 0
+        self._evidence_inflight = 0
         self._buffered_bytes = 0
         self._recovered_count = 0
         self._writer: Any = None
@@ -247,6 +267,37 @@ class RecordingService:
         self._wake.set()
         return self.status()
 
+    def record_firing(self, attempt_id: str, event: str, details: dict) -> dict[str, Any]:
+        """Reserve video through an attempt and ten seconds after closure.
+
+        Only bounded in-memory work here; never disk I/O on the actuator thread.
+        Readiness is checked before opening, not while the valve is open.
+        """
+        if re.fullmatch(r'[a-f0-9]{32}', attempt_id) is None:
+            raise RecordingError('invalid_firing_identity')
+        now = self._time()
+        with self._lock:
+            session = self._ensure_session(now)
+            tail = max(10.0, self.config.automatic_tail_seconds)
+            if session.maximum_until - now < tail + 1:
+                raise RecordingError('recording_session_near_limit')
+            if event in ('pulse_intent', 'before_open'):
+                if (self._segment_session is not session or self._segment is None
+                        or not 0 <= now - self._segment['last_capture_monotonic'] <= .5):
+                    raise RecordingError('firing_video_not_current')
+            if len(session.firing_events) >= 256:
+                raise RecordingError('firing_recording_event_limit')
+            session.firing_until = min(session.maximum_until, now + tail + 1)
+            fields = {k: details[k] for k in ('opened_at', 'closed_at', 'outcome', 'source_sequence',
+                       'source_generation', 'source_wall_time', 'valve_open_returned', 'valve_close_returned') if k in details}
+            session.firing_events.append(dict(attempt_id=attempt_id, event=event, monotonic=now, wall=_utc(), **fields))
+            self._event(session, 'firing_recording', now, attempt_id=attempt_id, event=event)
+            segment_name = (session.segments[-1]['file'].replace('.incomplete', '')
+                            if session.segments else 'segment-0000.avi')
+        self._wake.set()
+        return dict(session_id=session.id, post_fire_seconds=tail,
+                    video_url=f'/recordings/{session.id}/{segment_name}?download=1')
+
     def extend_automatic_recording(self, *, event_id: str, observed_monotonic: float,
                                    reason: str, visit_id: str | None = None,
                                    observation: dict | None = None, return_status: bool = True, evidence_packet=None) -> dict[str, Any]:
@@ -281,35 +332,47 @@ class RecordingService:
                 raise RecordingError("source_identity_limit")
             if evidence_packet is not None:
                 session.evidence_pending += 1
+                self._evidence_inflight += 1
         if evidence_packet is not None:
             try:
                 from .trip_evidence import preserve_trip
-                self._storage_check()
+                self._storage_check(incremental=True)
                 observation = preserve_trip(self.directory, session.id, evidence_packet, observation,
                     event_id=event_id, reason=reason, index=session.observation_count, previous_peak=session.maximum_confidence)
             except Exception as exc:
                 with self._lock:
                     session.evidence_pending -= 1
-                    session.error = 'trip_evidence_failed: ' + str(exc)
-                    self._event(session, 'trip_evidence_failed', self._clock(), error=session.error)
-                    if session.state == 'capturing':
+                    self._evidence_inflight -= 1
+                    if self._last_error == _QUOTA_ERROR and not (
+                            isinstance(exc, RecordingError) and str(exc) == "recording_storage_budget_exhausted"):
+                        self._quota_recovery_error = type(exc).__name__ + ": " + str(exc)
+                    error = 'trip_evidence_failed: ' + str(exc)
+                    self._event(session, 'trip_evidence_failed', self._clock(), error=error)
+                    session.evidence_warnings += 1
+                    if session.state == 'capturing' and not (session.automatic or session.manual_until or session.firing_until):
+                        session.error = error
                         self._finish(session, 'trip_evidence_failed', self._clock())
-                raise RecordingError(session.error) from exc
+                raise RecordingError(error) from exc
         with self._lock:
             if evidence_packet is not None:
                 session.evidence_pending -= 1
+                self._evidence_inflight -= 1
                 if session.state != 'capturing':
                     raise RecordingError('trip_session_closed_during_persistence')
-                if not 0 <= self._clock() - observed_monotonic <= self.config.observation_max_age_seconds or deadline <= self._clock():
-                    session.error = 'trip_persistence_exceeded_source_age'
-                    self._finish(session, session.error, self._clock())
-                    raise RecordingError(session.error)
+                if self._clock() - observed_monotonic > self.config.observation_max_age_seconds:
+                    # It was fresh at admission. Slow disk persistence must not
+                    # destroy already queued video or the shot's independent tail.
+                    session.evidence_warnings += 1
+                    self._event(session, 'trip_persistence_delayed', self._clock(),
+                                source_sequence=observation['source_sequence'],
+                                age_seconds=self._clock() - observed_monotonic)
             previous = session.identities.get(key)
             if previous and observed_monotonic <= previous['observed_monotonic']:
                 raise RecordingError('duplicate_or_regressed_observation')
             entry = {"event_id": event_id, "visit_id": visit_id, "reason": reason,
                      "observed_monotonic": observed_monotonic, "until": min(deadline, session.maximum_until)}
-            session.automatic[key] = entry
+            if deadline > self._clock():
+                session.automatic[key] = entry
             session.identities[key] = entry
             if observation is not None:
                 session.observations.append(observation)
@@ -332,18 +395,20 @@ class RecordingService:
         session = self._active
         if session is None or session.evidence_pending:
             return
-        prior_deadline = max([session.manual_until or 0, *[v["until"] for v in session.automatic.values()]])
+        prior_deadline = max([session.manual_until or 0, session.firing_until or 0, *[v["until"] for v in session.automatic.values()]])
         if now < session.started:
             session.error = "monotonic_clock_regressed"
             self._finish(session, session.error, now)
             return
         if session.manual_until is not None and now >= session.manual_until:
             session.manual_until = None
+        if session.firing_until is not None and now >= session.firing_until:
+            session.firing_until = None
             self._event(session, "manual_deadline", now)
         for key in list(session.automatic):
             if now >= session.automatic[key]["until"]:
                 self._event(session, "automatic_deadline", now, **session.automatic.pop(key))
-        if now >= session.maximum_until or (session.manual_until is None and not session.automatic):
+        if now >= session.maximum_until or (session.manual_until is None and session.firing_until is None and not session.automatic):
             self._finish(session, "maximum_session" if now >= session.maximum_until else reason,
                          min(now, session.maximum_until, prior_deadline or now) if reason == "deadlines_expired" else now)
 
@@ -352,6 +417,8 @@ class RecordingService:
                 "file_role": "clean_authoritative", "parent_session_id": None,
                 "start_monotonic": session.started, "start_wall": session.wall,
                 "maximum_until": session.maximum_until, "manual_until": session.manual_until,
+                "firing_until": session.firing_until, "firing_events": list(session.firing_events),
+                "evidence_delay_count": session.evidence_warnings,
                 "automatic_reasons": list(session.automatic.values()), "source_identities": list(session.identities.values()),
                 "timeline": list(session.timeline), "timeline_omitted": session.timeline_omitted,
                 "start_reasons": session.start_reasons,
@@ -394,9 +461,11 @@ class RecordingService:
                           active=self._active is not None, queue_depth=self._queue.qsize(),
                           queue_capacity=self.config.queue_capacity, pending_sessions=len(self._sessions),
                           storage_bytes=self._storage_bytes, recovered_sessions=self._recovered_count,
+                          storage=self._storage_status_locked(),
                           buffered_bytes=self._buffered_bytes, maximum_buffer_bytes=int(self.config.maximum_buffer_megabytes * 1024**2),
                           last_error=self._last_error, shutdown_timed_out=self._shutdown_timed_out)
             result["manual_remaining_seconds"] = max(0.0, (session.manual_until or 0) - self._clock()) if session else 0
+            result['firing_remaining_seconds'] = max(0.0, (session.firing_until or 0) - self._clock()) if session else 0
             result["automatic_active"] = bool(session and session.automatic)
             result['automatic_remaining_seconds'] = max(0, max((v['until'] for v in session.automatic.values()), default=0) - self._clock()) if session else 0
             return result
@@ -454,11 +523,12 @@ class RecordingService:
         while not self._stop.is_set():
             session = None
             try:
+                self._maybe_recover_storage_quota()
                 now = self._time()
                 with self._lock:
                     self._expire(now)
                     session = self._active
-                if session is None or (session.evidence_pending and not session.automatic and session.manual_until is None):
+                if session is None or (session.evidence_pending and not session.automatic and session.manual_until is None and session.firing_until is None):
                     self._wake.wait(1.0 if self._idle_requested and session is None else 0.05)
                     self._wake.clear()
                     continue
@@ -475,7 +545,7 @@ class RecordingService:
                 if packet is not None:
                     with self._lock:
                         current = self._active is session
-                        deadline = max([session.manual_until or 0, *[v["until"] for v in session.automatic.values()]])
+                        deadline = max([session.manual_until or 0, session.firing_until or 0, *[v["until"] for v in session.automatic.values()]])
                     if current and packet.received_monotonic <= deadline:
                         self._admit(session, packet)
             except Exception as exc:
@@ -494,13 +564,166 @@ class RecordingService:
         path = self.directory / session.id
         path.mkdir(parents=True, exist_ok=True)
         _atomic_json(path / "session.json", payload)
+        with self._lock:
+            self._storage_dirty.add(path)
 
-    def _storage_check(self) -> None:
-        self._storage_bytes = sum(p.stat().st_size for p in self.directory.rglob("*") if p.is_file())
-        if self._storage_bytes >= self.config.storage_budget_megabytes * 1024**2:
+    def _storage_check(self, *, incremental: bool = False) -> None:
+        # Serialize scans, not writes. Never hold the session lock during disk I/O.
+        with self._storage_scan_lock:
+            try:
+                with self._lock:
+                    dirty = set(self._storage_dirty)
+                    self._storage_dirty.clear()
+                    active_dirs = {self.directory / s.id for s in self._sessions}
+                # Finalized session files are immutable to this service. Reuse
+                # their totals during recording; fully reconcile when idle and
+                # at startup/recovery. Historical file count cannot stall video.
+                partial = incremental and self._storage_directories is not None
+                sizes = dict(self._storage_directories) if partial else {}
+                roots = active_dirs | dirty if partial else {self.directory}
+                if partial:
+                    # Root-level/orphan files and newly introduced directories
+                    # still count immediately without statting historical media.
+                    root_bytes = 0
+                    with os.scandir(self.directory) as entries:
+                        for entry in entries:
+                            if entry.is_dir(follow_symlinks=False):
+                                if Path(entry.path) not in sizes:
+                                    roots.add(Path(entry.path))
+                            else:
+                                try:
+                                    info = entry.stat()
+                                except FileNotFoundError:
+                                    continue
+                                if stat.S_ISREG(info.st_mode):
+                                    root_bytes += info.st_size
+                    sizes[self.directory] = root_bytes
+                def unreadable(exc):
+                    raise exc  # An unreadable/missing root must not look empty.
+                for root in roots:
+                    if partial and not root.exists():
+                        sizes.pop(root, None)
+                        continue
+                    for parent, _, names in os.walk(root, onerror=unreadable):
+                        subtotal = 0
+                        for name in names:
+                            try:
+                                info = (Path(parent) / name).stat()
+                            except FileNotFoundError:
+                                continue
+                            if stat.S_ISREG(info.st_mode):
+                                subtotal += info.st_size
+                        sizes[Path(parent)] = subtotal
+                total = sum(sizes.values())
+                self._storage_directories = sizes
+                budget = self.config.storage_budget_megabytes * 1024**2
+                free = self._disk_usage(self.directory).free if total < budget else None
+                snapshot = dict(bytes=total, free_bytes=free, measured_at=_utc(),
+                                measured_monotonic=monotonic(), quota_exhausted=total >= budget,
+                                scan_mode='active_directories' if partial else 'full_tree')
+            except Exception as exc:
+                with self._lock:
+                    self._storage_dirty.update(dirty)
+                    self._storage_measurement_error = type(exc).__name__ + ": " + str(exc)
+                raise
+            with self._lock:
+                self._storage_snapshot = snapshot
+                self._storage_bytes = total  # Backward-compatible last successful measurement.
+                self._storage_measurement_error = None
+        if total >= budget:
             raise RecordingError("recording_storage_budget_exhausted")
-        if self._disk_usage(self.directory).free < self.config.minimum_free_megabytes * 1024**2:
+        if free < self.config.minimum_free_megabytes * 1024**2:
             raise RecordingError("insufficient_free_disk")
+
+    def _quota_quiescent_locked(self) -> bool:
+        return (self._encoder is not None and not self._encoder.is_alive()
+                and not self._sessions and self._active is None and not self._evidence_inflight
+                and self._queue.empty() and self._buffered_bytes == 0
+                and all(value is None for value in (self._writer, self._segment, self._segment_session,
+                                                    self._held_packet, self._presentation)))
+
+    def _storage_status_locked(self) -> dict[str, Any]:
+        snapshot = self._storage_snapshot or {}
+        measured = snapshot.get("measured_monotonic")
+        age = max(0.0, monotonic() - measured) if measured is not None else None
+        stale = age is None or age >= _QUOTA_RECHECK_SECONDS or self._storage_measurement_error is not None
+        latched = self._last_error == _QUOTA_ERROR
+        quota_error_state = ("none" if self._last_quota_error is None else "historical" if not latched else
+                             "unverified" if stale else
+                             "current" if latched and snapshot.get("quota_exhausted") else "historical")
+        state = "blocked" if self._quota_recovery_error else self._quota_recovery_state
+        return dict(root=str(self.directory.absolute()), basis="apparent_file_bytes",
+                    bytes=snapshot.get("bytes"), budget_bytes=int(self.config.storage_budget_megabytes * 1024**2),
+                    free_bytes=snapshot.get("free_bytes"), minimum_free_bytes=int(self.config.minimum_free_megabytes * 1024**2),
+                    measured_at=snapshot.get("measured_at"), measurement_age_seconds=age,
+                    scan_mode=snapshot.get('scan_mode'),
+                    measurement_stale=stale, measurement_error=self._storage_measurement_error,
+                    quota_exhausted=snapshot.get("quota_exhausted"), quota_error_state=quota_error_state,
+                    last_quota_error=deepcopy(self._last_quota_error), recovery_state=state,
+                    recovery_error=self._quota_recovery_error, recovery_count=self._quota_recovery_count,
+                    recheck_seconds=_QUOTA_RECHECK_SECONDS,
+                    recovery_eligible=bool(latched and not self._closed and not stale and not self._quota_recovery_error
+                        and self._quota_recovery_state not in {"checking", "restarting"}
+                        and self._quota_quiescent_locked() and not snapshot.get("quota_exhausted", True)
+                        and snapshot.get("free_bytes", 0) is not None
+                        and snapshot.get("free_bytes", 0) >= self.config.minimum_free_megabytes * 1024**2))
+
+    def _maybe_recover_storage_quota(self) -> None:
+        with self._lock:
+            if (self._last_error != _QUOTA_ERROR or self._quota_recovery_error or self._closed
+                    or monotonic() < self._next_quota_recheck):
+                return
+            self._next_quota_recheck = monotonic() + _QUOTA_RECHECK_SECONDS
+        self.recover_storage_quota()
+
+    def recover_storage_quota(self) -> bool:
+        """Request a fresh quota check and encoder replacement after complete cleanup.
+
+        The surviving collector invokes this at most once per ten seconds. Direct
+        calls are deliberate rechecks; status reads never scan or restart workers.
+        True means a replacement was launched, not that its startup has completed.
+        """
+        if not self._quota_recovery_lock.acquire(blocking=False):
+            return False
+        try:
+            with self._lock:
+                if self._last_error != _QUOTA_ERROR or self._closed or self._quota_recovery_error:
+                    return False
+                self._next_quota_recheck = monotonic() + _QUOTA_RECHECK_SECONDS
+                if not self._quota_quiescent_locked():
+                    self._quota_recovery_state = "waiting_for_finalization"
+                    return False
+                self._quota_recovery_state = "checking"
+            try:
+                self._storage_check()  # Never authorize recovery using the status cache.
+            except Exception as exc:
+                with self._lock:
+                    if isinstance(exc, RecordingError) and str(exc) in {
+                            "recording_storage_budget_exhausted", "insufficient_free_disk"}:
+                        self._quota_recovery_state = ("waiting_for_space" if str(exc) == "recording_storage_budget_exhausted"
+                                                      else "waiting_for_free_space")
+                    else:
+                        self._quota_recovery_error = type(exc).__name__ + ": " + str(exc)
+                        self._quota_recovery_state = "blocked"
+                return False
+            with self._lock:
+                # stop() or an in-flight evidence failure may have raced the scan.
+                if self._closed or self._last_error != _QUOTA_ERROR or self._quota_recovery_error:
+                    return False
+                if not self._quota_quiescent_locked():
+                    self._quota_recovery_state = "waiting_for_finalization"
+                    return False
+                self._quota_recovery_state = "restarting"
+                self._encoder = threading.Thread(target=self._encode_loop, name="clean-record-encode", daemon=True)
+                try:
+                    self._encoder.start()
+                except Exception as exc:
+                    self._quota_recovery_error = type(exc).__name__ + ": " + str(exc)
+                    self._quota_recovery_state = "blocked"
+                    return False
+            return True
+        finally:
+            self._quota_recovery_lock.release()
 
     def _recover(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -523,7 +746,7 @@ class RecordingService:
     def _open_segment(self, session: _Session, packet: tuple) -> None:
         if len(session.segments) >= 128:
             raise RecordingError("segment_count_limit")
-        self._storage_check()
+        self._storage_check(incremental=True)
         _, seq, timestamp, wall, generation, image = packet
         origin = session.sample_origin if session.sample_origin is not None else timestamp
         presentation_origin = origin + math.floor((timestamp - origin) * self.config.target_fps + 1e-7) / self.config.target_fps
@@ -592,6 +815,9 @@ class RecordingService:
                                presentation_sha256=provenance_hash,
                                status="degraded" if degraded else "complete", file=final.name)
         except Exception as exc:
+            if self._last_error == _QUOTA_ERROR:
+                with self._lock:
+                    self._quota_recovery_error = type(exc).__name__ + ": " + str(exc)
             with self._lock:
                 segment.update(status="error", error=type(exc).__name__ + ": " + str(exc))
                 # Preserve the initiating write failure; validation may only be
@@ -603,8 +829,9 @@ class RecordingService:
             if writer is not None and not release_attempted:
                 try:
                     writer.release()
-                except Exception:
-                    pass  # Preserve the initiating failure.
+                except Exception as exc:
+                    with self._lock:
+                        self._quota_recovery_error = type(exc).__name__ + ": " + str(exc)
             if self._presentation is not None and not self._presentation.closed:
                 self._presentation.close()
             with self._lock:
@@ -676,6 +903,10 @@ class RecordingService:
         try:
             self._recover()
             with self._lock:
+                if self._quota_recovery_state == "restarting":
+                    self._last_error = None  # Only after replacement startup revalidates disk.
+                    self._quota_recovery_state = "recovered"
+                    self._quota_recovery_count += 1
                 self._ready = True
             checkpoint = monotonic()
             while True:
@@ -751,13 +982,13 @@ class RecordingService:
                                 self._event(session, "missing_tail", session.ended_monotonic,
                                             seconds=session.ended_monotonic - session.segments[-1]["last_capture_monotonic"])
                             session.state = "error" if session.error else "interrupted" if session.stop_reason == "shutdown" else (
-                                "degraded" if missing_tail or session.queue_dropped or any(s["status"] != "complete" for s in session.segments) else "complete")
+                                "degraded" if missing_tail or session.queue_dropped or session.evidence_warnings or any(s["status"] != "complete" for s in session.segments) else "complete")
                         self._manifest(session)
                         with self._lock:
                             self._last = deepcopy(self._summary(session))
                             self._sessions.remove(session)
-                if monotonic() - checkpoint >= 1:
-                    self._storage_check()
+                if monotonic() - checkpoint >= (1 if sessions else _QUOTA_RECHECK_SECONDS):
+                    self._storage_check(incremental=bool(sessions))
                     for session in sessions:
                         self._manifest(session)
                     checkpoint = monotonic()
@@ -768,6 +999,15 @@ class RecordingService:
             with self._lock:
                 self._last_error = type(exc).__name__ + ": " + str(exc)
                 self._ready = False
+                if isinstance(exc, RecordingError) and str(exc) == "recording_storage_budget_exhausted":
+                    self._last_quota_error = dict(error=self._last_error, at=_utc(),
+                                                 root=str(self.directory),
+                                                 budget_bytes=int(self.config.storage_budget_megabytes * 1024**2),
+                                                 measurement=deepcopy(self._storage_snapshot))
+                    self._quota_recovery_state = "waiting_for_finalization"
+                    self._next_quota_recheck = monotonic() + _QUOTA_RECHECK_SECONDS
+                else:
+                    self._quota_recovery_state = "blocked"
                 failed_sessions = list(self._sessions)
                 for session in failed_sessions:
                     session.error = self._last_error
@@ -787,13 +1027,15 @@ class RecordingService:
             # Best effort only; a failed disk must not block or affect control.
             try:
                 self._close_segment("storage_error")
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                with self._lock:
+                    self._quota_recovery_error = type(cleanup_exc).__name__ + ": " + str(cleanup_exc)
             for session in failed_sessions:
                 try:
                     self._manifest(session)
-                except Exception:
-                    pass  # Prior checkpoint and media remain recoverable.
+                except Exception as cleanup_exc:
+                    with self._lock:
+                        self._quota_recovery_error = type(cleanup_exc).__name__ + ": " + str(cleanup_exc)
             with self._lock:
                 if failed_sessions:
                     self._last = deepcopy(self._summary(failed_sessions[-1]))

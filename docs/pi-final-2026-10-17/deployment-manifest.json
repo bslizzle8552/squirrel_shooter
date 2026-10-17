@@ -1,0 +1,472 @@
+{
+  "captured_date": "2026-10-17",
+  "deployment_root": "/home/bslizzle8552/squirrel_collector_phase4_20260907",
+  "source": [
+    {
+      "path": "pyproject.toml",
+      "size": 985,
+      "sha256": "f1d4878ab992eb26cc9bf11cda385087635dad51c5a2cacca789523f99faf647"
+    },
+    {
+      "path": "README.md",
+      "size": 35370,
+      "sha256": "093d045e772f32d6d9f4deda9f3dd163f77e00db30dda99fa02ee94dd26ee72f"
+    },
+    {
+      "path": "scripts/validate_collector_phase47.py",
+      "size": 6042,
+      "sha256": "7c9a15b5a607557300092a982abe9db2ae35f157c67b9f243d0c47b4938d20ef"
+    },
+    {
+      "path": "scripts/measure_collector_usability.py",
+      "size": 9959,
+      "sha256": "1c3f3da88bbf0d4fd0faef81020a3ad8629bad0ab421360a34ef488dc2d1907e"
+    },
+    {
+      "path": "config/default.yaml",
+      "size": 12007,
+      "sha256": "e3170220c4af207a371ada43f8df211dec39cb8ea98f620b8008176052db3257"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_calibration.py",
+      "size": 13619,
+      "sha256": "e78482ee3fde4d644babfe8fb31729f55081fa9ab5fe566e21a66ed4067cfed3"
+    },
+    {
+      "path": "src/squirrel_shooter/safety.py",
+      "size": 4441,
+      "sha256": "8cdbd52f15a28ca2846a24a8b8786bea60ed3c94a3b0b387bd742ab4c00979dd"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_night.py",
+      "size": 4512,
+      "sha256": "094fd609b42e07dc2cd2bb3b7c229a37418a8870140d498f9dd8c78fa07325ea"
+    },
+    {
+      "path": "src/squirrel_shooter/runtime_provenance.py",
+      "size": 7144,
+      "sha256": "57523902e65624e7ff34d23cf11993a54bc1384c78e31fb548b172b35b2172d9"
+    },
+    {
+      "path": "src/squirrel_shooter/event_report.py",
+      "size": 12164,
+      "sha256": "3e17bcd56c7bbb5cc0d400615325d96060299c7346c18182657597fb2340a520"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_control_routes.py",
+      "size": 2620,
+      "sha256": "ca3901d1b3109770992241b2644687b455a819c0dbb342efa0cb3af387672add"
+    },
+    {
+      "path": "src/squirrel_shooter/config.py",
+      "size": 51245,
+      "sha256": "a9f7638377baec1b9f7eb64c61388451c43d398da16c58c49cc0555b38f7adfd"
+    },
+    {
+      "path": "src/squirrel_shooter/servo_bench.py",
+      "size": 6511,
+      "sha256": "3db102a2a84a20e091d24277dc6353c9cb2f58775d4219501a02b9ad3f343944"
+    },
+    {
+      "path": "src/squirrel_shooter/runtime_health.py",
+      "size": 18651,
+      "sha256": "843d8797a3f0ff1447869041e83b8f90736963a819751437418e988a81364e36"
+    },
+    {
+      "path": "src/squirrel_shooter/trip_evidence.py",
+      "size": 2506,
+      "sha256": "9a802fb4153ef0c54b79aab88fd5af3819ff4cf1404cb0dec9288277112cd157"
+    },
+    {
+      "path": "src/squirrel_shooter/motion_watch.py",
+      "size": 438,
+      "sha256": "f515f0990543de8f936218fb66c9f03819212f700cf050c068d42ced1ba0ae24"
+    },
+    {
+      "path": "src/squirrel_shooter/camera_diagnostic.py",
+      "size": 3853,
+      "sha256": "3a11eed9f38bff49248f4134d0b6743c992a9ecec8525881c5e093ecb0ad814c"
+    },
+    {
+      "path": "src/squirrel_shooter/manual_control.py",
+      "size": 75444,
+      "sha256": "bd59bb42534ce8f750f2420fd02b58100b07d51b29946022cd6002865a17f98f"
+    },
+    {
+      "path": "src/squirrel_shooter/camera_capture.py",
+      "size": 3419,
+      "sha256": "efa957af1e92004c9068e7f819e9fe05793e2ea91a68243d631b77326bee5a4c"
+    },
+    {
+      "path": "src/squirrel_shooter/pi_data_pull.py",
+      "size": 19494,
+      "sha256": "20c3ce4e374ad3445d96b63c2267194c463f4bd92cf11373d0229b1590c78f8a"
+    },
+    {
+      "path": "src/squirrel_shooter/mask_preview.py",
+      "size": 2534,
+      "sha256": "cc04299293911a7ba2c4ecd5ec4342edb1efa3adb6d1c0a55ab51c61538dd984"
+    },
+    {
+      "path": "src/squirrel_shooter/__init__.py",
+      "size": 76,
+      "sha256": "925b089616aad468cdd6db1894abe66ae2654539fb4ec6e206830d392ca699ee"
+    },
+    {
+      "path": "src/squirrel_shooter/motion.py",
+      "size": 747,
+      "sha256": "dcb7de8912d2126a3bb3bba57918fb63cef3daa66ee8f779ecc0902cfb8f8437"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_media.py",
+      "size": 5362,
+      "sha256": "52a4c1ce329c108cb74c2d86011b7df26fc5c7ef8c136b235961262bfdb3cb47"
+    },
+    {
+      "path": "src/squirrel_shooter/thread_names.py",
+      "size": 574,
+      "sha256": "46738a6db03362e5edf819d9ba66a92428cf79c402ca2b7ae77ab06e45eec539"
+    },
+    {
+      "path": "src/squirrel_shooter/performance.py",
+      "size": 6588,
+      "sha256": "6cf124812a00fd572bdb78379cdac4fd12c2e1f8d70b20030a45fdc4d1504242"
+    },
+    {
+      "path": "src/squirrel_shooter/files.py",
+      "size": 598,
+      "sha256": "11403cd794ed1a2065ec8e168f369a489c85919439498509109a726120db624e"
+    },
+    {
+      "path": "src/squirrel_shooter/classifier_labels.py",
+      "size": 447,
+      "sha256": "0435af9e16579638bc5c40d1e8a48f32f18da612c6bdb51aefc05e54bac115de"
+    },
+    {
+      "path": "src/squirrel_shooter/motion_categories.py",
+      "size": 1244,
+      "sha256": "eeb5f1d8edcca79680782eaefbd940f13b90b17da6f7ddf66cb147e52017339b"
+    },
+    {
+      "path": "src/squirrel_shooter/web_dashboard.py",
+      "size": 47753,
+      "sha256": "c745ff43749dcc3b54b2f73df3f85209c3b396d0571ccc6468b0a3b686067384"
+    },
+    {
+      "path": "src/squirrel_shooter/app.py",
+      "size": 18037,
+      "sha256": "02b53c7f56f53877311892328dd9746c398eb50163dc23b77e04a73f9fb26c16"
+    },
+    {
+      "path": "src/squirrel_shooter/detector.py",
+      "size": 8474,
+      "sha256": "226826279312a639dfea665dd92e573e6cd5c5c6e9d2c1502bd1a421fcc80395"
+    },
+    {
+      "path": "src/squirrel_shooter/target_association.py",
+      "size": 12282,
+      "sha256": "aaba1143eb26d423f76b835c222ea45effc1681be89d2e7bb5a3fe22dd8c03cf"
+    },
+    {
+      "path": "src/squirrel_shooter/classifier_setup.py",
+      "size": 2479,
+      "sha256": "0241e7fbd28d5247df05aacb4e3c5366f701fc52a0dfc22fe510939a464d2b63"
+    },
+    {
+      "path": "src/squirrel_shooter/media_roles.py",
+      "size": 1216,
+      "sha256": "88504ceb090773367694de12d4c2163e6dec87a1493cb3921b3845445c1a7f79"
+    },
+    {
+      "path": "src/squirrel_shooter/event_storage.py",
+      "size": 63022,
+      "sha256": "d2f729fb2845341dab1a36a40109db85fe0da4626edd8c4ff1b808acbbe0df67"
+    },
+    {
+      "path": "src/squirrel_shooter/recording.py",
+      "size": 61248,
+      "sha256": "8f8538d3d4392261f4857dbd86a78f5587ab2e049bb699e4dbd2a6ad0ed67833"
+    },
+    {
+      "path": "src/squirrel_shooter/detection.py",
+      "size": 12855,
+      "sha256": "082190cb67de324e17503d95a90764094417a89cc69172c2caff5080b8d24364"
+    },
+    {
+      "path": "src/squirrel_shooter/dataset_inventory.py",
+      "size": 49906,
+      "sha256": "852897c023eb96fdf1c7e8736cf39c0d92dfc1168f9133cbe4e88efb49f44c14"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_app.py",
+      "size": 10428,
+      "sha256": "af1e56087562d79349ff9b5234bb9e4652f65e9dda30d71b1ca4316e191f724b"
+    },
+    {
+      "path": "src/squirrel_shooter/pan_tilt.py",
+      "size": 17138,
+      "sha256": "016ebda8ce6f93079e48ea07e01c3422fc5af70b1ad19b237cc52a164af891f4"
+    },
+    {
+      "path": "src/squirrel_shooter/watch_detection.py",
+      "size": 36818,
+      "sha256": "10ffff9e17a04e3270032281ad0f39c3d54519c2d4ed2ba8343c5022f9be5cac"
+    },
+    {
+      "path": "src/squirrel_shooter/manual_fire_recording.py",
+      "size": 39599,
+      "sha256": "f6c93088573ea8ae6af7ac175c4220dc67c5e451dcff4c5bac1317d46e777490"
+    },
+    {
+      "path": "src/squirrel_shooter/vision_service.py",
+      "size": 15236,
+      "sha256": "5037e645de0e718dce3216f0c0d6a64d902f20ead022b2936a58b40c43f2e8d0"
+    },
+    {
+      "path": "src/squirrel_shooter/current_scene_safety.py",
+      "size": 5285,
+      "sha256": "5fef40d3ee74bced067ced746929490e77420519ab4c9d5dbbfb079c2971162f"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_firing_history.py",
+      "size": 4793,
+      "sha256": "9afdc2772b7dc4ff6a38abd8297e8738789791ebed9b1898905f8635a5f706a5"
+    },
+    {
+      "path": "src/squirrel_shooter/model_manifest.py",
+      "size": 5579,
+      "sha256": "c9a0df45bef2227775422170da472c8c1ab39dbcf7bd6d5101962fbe20457925"
+    },
+    {
+      "path": "src/squirrel_shooter/legacy_mobilenet_policy.py",
+      "size": 12644,
+      "sha256": "8a69738772847f12709c5e8571d97079e6bf660bab807a0d791925a78bb76a8d"
+    },
+    {
+      "path": "src/squirrel_shooter/frame_selection.py",
+      "size": 5677,
+      "sha256": "01d14ac19510cac2fdbbe50636624dc0a40b814fc5c0d30b1a11f5e1d8f0fd05"
+    },
+    {
+      "path": "src/squirrel_shooter/diagnostics.py",
+      "size": 4533,
+      "sha256": "63a0d6309ed30c1e2bc3f7009c432fa5451d230eb3008b4faf67489f644dd5e7"
+    },
+    {
+      "path": "src/squirrel_shooter/motion_runtime.py",
+      "size": 73293,
+      "sha256": "1c86bbe65cd90f2885e022a576d50ad9ee07c3404c7aecf4ca937f0974971cdc"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_control.py",
+      "size": 30560,
+      "sha256": "9b1f7bc414e8caf634925fa226ea87b965ce3f871385d5835d8c66005ba08b16"
+    },
+    {
+      "path": "src/squirrel_shooter/watch_zone.py",
+      "size": 3601,
+      "sha256": "73580a7258e574332a32e4bf3611b102df6158e8085e1afb323343ad2b294db8"
+    },
+    {
+      "path": "src/squirrel_shooter/valve.py",
+      "size": 4432,
+      "sha256": "694cde1d22781e7a95df4299b5930b90629821e0c707ef0fe31214db569bcd73"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_policy.py",
+      "size": 6977,
+      "sha256": "b9bd9ef19e0c7cb9844fb6f52feb05c8a46f45e38438a34ec1154ad420d130fa"
+    },
+    {
+      "path": "src/squirrel_shooter/collector_control_config.py",
+      "size": 6329,
+      "sha256": "94f338ce3f4556a4c5130c54a2e52253d6fc7a2897476640b67368cde14dac43"
+    },
+    {
+      "path": "src/squirrel_shooter/camera_common.py",
+      "size": 18410,
+      "sha256": "402dce3c5717d706b074d644df60fe88de56670cbb757be64a7501f9c7353742"
+    },
+    {
+      "path": "src/squirrel_shooter/camera_preview.py",
+      "size": 3177,
+      "sha256": "715f20717ac1a0e0bfa88557a70fe27876931a38a29514c454544e9704e9c586"
+    },
+    {
+      "path": "src/squirrel_shooter/auto_fire.py",
+      "size": 97752,
+      "sha256": "185728931dd1aba4c58f95cae5ca0006bcf8ff14b7467a54dc959a97c648176f"
+    },
+    {
+      "path": "src/squirrel_shooter/classifier.py",
+      "size": 95599,
+      "sha256": "c9c62b5dd2e1feef50c1537f072f0b8a34d74c2bbdb86d3bfede3243dc222b5c"
+    },
+    {
+      "path": "src/squirrel_shooter/inference_worker.py",
+      "size": 13227,
+      "sha256": "006ffd9ea0645634bb71314ea2ea73e269d9258240c13d4ab595f3bde8652751"
+    },
+    {
+      "path": "src/squirrel_shooter/camera_service.py",
+      "size": 39333,
+      "sha256": "d4a7673e69e19d9b31050f8610d49a63417cd872db3d302d8ad02c5d947d30ff"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector.html",
+      "size": 16421,
+      "sha256": "2d6ea2a1a8eee5a195897bc3654d44fb4106359ec9f2a7d8871fec91ee4995f6"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/captures.html",
+      "size": 1294,
+      "sha256": "f18524b871f4e0b8c856f47dd2047d3001e3527f377185f6109581ca621d53cd"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/base.html",
+      "size": 2295,
+      "sha256": "ff7c7627cb85d8fa6919e80e0740a87239424019ae357da7c2ea9e611bb8ccf4"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/events.html",
+      "size": 3278,
+      "sha256": "323452374bcdc79996256cf35d1a907826e18d2794aef1f6b9cd745d43a0077c"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/_gallery.html",
+      "size": 997,
+      "sha256": "4aab94b3b7a0111ed63ed44f5a0659c7d6014847b1dd90a536d7ee1d710266a7"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector_clip.html",
+      "size": 1319,
+      "sha256": "3570bdd7a1e5ff8c18be35b7299095f0233aa442bb9370679cf0f4a90a77d529"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/dashboard.html",
+      "size": 22907,
+      "sha256": "af48ca43ff62ae6848dae616128894dc2d40e9e5e90332ae2b1d38b389a3adf7"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/classifier_review.html",
+      "size": 11846,
+      "sha256": "bee26158798b690c6dd549b275185149fe8a6c9dba0d20146a09cfd5286b2a53"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector_calibration.html",
+      "size": 5679,
+      "sha256": "b158e34a3972d0c7ebba56e204f03f9268e5dec55b9059cb26835b9488709792"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector_control_setup.html",
+      "size": 1037,
+      "sha256": "00204e46d461abd67d8ebb2e63def3c7ced095fd8842dae636c0aae26e3d5479"
+    },
+    {
+      "path": "src/squirrel_shooter/templates/manual_control.html",
+      "size": 14476,
+      "sha256": "7caa1dfa694b8fb8a4ad12fe1c73f1e92ee7ee7055771bb2c1ead6335c0140e8"
+    },
+    {
+      "path": "src/squirrel_shooter/static/console.css",
+      "size": 28824,
+      "sha256": "46a8a6e4c40464147479290c1e4ea038cc8714481c33939ca4d299c97e6b2d00"
+    },
+    {
+      "path": "src/squirrel_shooter/static/manual_control.css",
+      "size": 13259,
+      "sha256": "42c0b1c1f3952ff2aaab51b762a30c414c2661e3271a08eaf7a91a4d4c772895"
+    },
+    {
+      "path": "src/squirrel_shooter/static/collector_player.js",
+      "size": 2638,
+      "sha256": "b41e916a24c2582eabc697db7ae6e2c3cc59f0bb12511b71acc506085194e10a"
+    },
+    {
+      "path": "src/squirrel_shooter/static/console.js",
+      "size": 39575,
+      "sha256": "fd0a96a56ea45a7f3ee908f1b3b69c3a0678b598db28b07bd4f43c5973f08cf0"
+    },
+    {
+      "path": "src/squirrel_shooter/static/squirrel-squirter-logo.png",
+      "size": 2271633,
+      "sha256": "3d252386509ba7c6f7ca07d99b8239b1340593788dbbee8b5eb082a2fb703248"
+    },
+    {
+      "path": "src/squirrel_shooter/static/recording_controls.js",
+      "size": 2309,
+      "sha256": "66f1ca8dc1bab9f46879113a7fd804523c6d0915a5a680985d3dfe3c6041b3f8"
+    },
+    {
+      "path": "src/squirrel_shooter/static/manual_control.js",
+      "size": 23499,
+      "sha256": "3bbc060584060ff5914d26aa3b9ecfa5e026ff3bfa0939052a5c8218a60eed45"
+    },
+    {
+      "path": "src/squirrel_shooter/static/collector_calibration.js",
+      "size": 15772,
+      "sha256": "3127ff40cd2364ac5e4490b7a7f75862947772cb7b39b9c2d6738764e747a290"
+    },
+    {
+      "path": "src/squirrel_shooter/static/collector_calibration.css",
+      "size": 3438,
+      "sha256": "845c92ad15b1f469117c5e19ebe7ea3727c7c529733473a47c79e44068a635e6"
+    },
+    {
+      "path": "src/squirrel_shooter/static/dashboard.css",
+      "size": 16496,
+      "sha256": "87b73f6a81e527e01e4267c5ed86d68082bf5b30876be3c629a8cdfe3927be78"
+    }
+  ],
+  "private_state_and_models": [
+    {
+      "path": "squirrel_collector_phase4_20260907/collector-calibration-deer-feeder-20260918.firing.sqlite3",
+      "size": 17584128,
+      "sha256": "9e46aa8db5e9cc027f49120bfaf1a4e1200a5f5a755688478798d7889211add9",
+      "mtime_ns": 1791049284212247690
+    },
+    {
+      "path": "squirrel_collector_phase4_20260907/collector.yaml",
+      "size": 8821,
+      "sha256": "8e2d0314d21ca66b6f93e03a362964273189db537d3204ddca24715bf9817853",
+      "mtime_ns": 1790483923398893268
+    },
+    {
+      "path": "squirrel_collector_phase4_20260907/collector-calibration-deer-feeder-20260918.json",
+      "size": 1176,
+      "sha256": "a16b4af2ba4ce1dac2f77dd9788a97999a12d0134473e583235dde8fbed03758",
+      "mtime_ns": 1789764691726509629
+    },
+    {
+      "path": "squirrel_collector_phase4_20260907/v5-epoch148-fp32-416-r1/equivalence.json",
+      "size": 69860,
+      "sha256": "593f3e8304dac5ae5882f9b160dfb97964f4dcca0f828c97ba6179e123a45a92",
+      "mtime_ns": 1789598253726528926
+    },
+    {
+      "path": "squirrel_collector_phase4_20260907/v5-epoch148-fp32-416-r1/model.ncnn.param",
+      "size": 24722,
+      "sha256": "18f83f0d8450e65f3adc131d2633036cef51a3d872b99058f6e284d2bce93620",
+      "mtime_ns": 1789598256510518286
+    },
+    {
+      "path": "squirrel_collector_phase4_20260907/v5-epoch148-fp32-416-r1/model.ncnn.bin",
+      "size": 3557264,
+      "sha256": "c4ec638c85bf8d611bd5e237b8ddde81dcd1fa43e95cf1ba52f2820ade762e74",
+      "mtime_ns": 1789598256370518825
+    },
+    {
+      "path": "squirrel_collector_phase4_20260907/v5-epoch148-fp32-416-r1/manifest.sha256",
+      "size": 81,
+      "sha256": "899d6aea35be7756bb9bc1d5b421ac60ea66ca8ae6f7b3ea4248307cdaab8b65",
+      "mtime_ns": 1789598254022527803
+    },
+    {
+      "path": "squirrel_collector_phase4_20260907/v5-epoch148-fp32-416-r1/manifest.json",
+      "size": 2383,
+      "sha256": "324192fe92246c8cb2c893455392f6be43b32ab0107953ff779c52c66059a9d7",
+      "mtime_ns": 1789598253878528349
+    }
+  ],
+  "source_note": "Raw deployed bytes are in the private backup. Git normalizes text line endings. Root README stays current; the older installed README is archived, not substituted."
+}

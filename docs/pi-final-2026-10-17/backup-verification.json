@@ -1,0 +1,29 @@
+{
+  "completed_at": "2026-10-17T22:13:21.377130+00:00",
+  "pi_pull_complete": true,
+  "verified_files": 13304,
+  "verified_bytes": 4391396134,
+  "verified_symlinks": 12,
+  "archive": "pi-projects.tar",
+  "archive_sha256": "8143b3015275945c472504bef1999ee165ca591ab37a52bd6a4980f338b8ea14",
+  "archive_bytes": 4411422720,
+  "excluded": [
+    "Misc"
+  ],
+  "special_files": [
+    {
+      "path": "squirrel_collector_phase4_20260907/.lgd-nfy0",
+      "mode": 4532
+    },
+    {
+      "path": "squirrel_shooter/.lgd-nfy0",
+      "mode": 4532
+    }
+  ],
+  "pi_files_deleted": false,
+  "pi_inventory_unchanged": true,
+  "firing_database_integrity": "ok",
+  "squirrel_services": "inactive and disabled",
+  "git_branch": "squirrel-runtime-v2",
+  "git_tag": "pi-final-2026-10-17"
+}

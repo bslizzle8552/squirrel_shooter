@@ -41,7 +41,8 @@ def test_collector_constructs_default_services_without_controls(tmp_path,monkeyp
                    auto_fire=replace(config.auto_fire,enabled=legacy_controls_enabled))
     runtime=CollectorRuntime(config)  # Construction never starts a camera.
     try:
-        assert set(runtime.__dict__) == {'config','camera','detector','worker','recording','observer','media','night','_closed'}
+        assert runtime.control is None
+        assert set(runtime.__dict__) == {'config','camera','detector','worker','recording','observer','media','night','control','_closed'}
         client=create_collector_app(runtime).test_client()
         state=client.get('/api/status').json
         assert state['physical_control_available'] is False
@@ -129,3 +130,22 @@ def test_intended_recording_extension_uses_source_time_without_inventing_visits(
                                              observed_monotonic=observation,reason='offline_contract_test')
     assert result['automatic_reasons'][0]['until']==103.0
     assert result['source_identities'][0]['visit_id'] is None
+
+
+def test_storage_snapshot_available_through_existing_status_endpoints(tmp_path):
+    runtime = CollectorRuntime(load_config(write_test_config(tmp_path)))
+    try:
+        runtime.recording.directory.mkdir(parents=True, exist_ok=True)
+        (runtime.recording.directory / 'existing.png').write_bytes(b'evidence')
+        runtime.recording._storage_check()
+        client = create_collector_app(runtime).test_client()
+        for route in ('/api/status', '/api/recording'):
+            payload = client.get(route).json
+            recording = payload['recording'] if route == '/api/status' else payload
+            assert recording['storage_bytes'] == recording['storage']['bytes'] == 8
+            assert recording['storage']['root'] == str(runtime.recording.directory.absolute())
+            assert recording['storage']['budget_bytes'] == int(runtime.recording.config.storage_budget_megabytes * 1024**2)
+            assert recording['storage']['measured_at']
+            assert not recording['storage']['measurement_stale']
+    finally:
+        runtime.stop()

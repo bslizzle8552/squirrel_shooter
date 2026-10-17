@@ -17,7 +17,7 @@ def preserve_trip(directory, session_id, packet, observation, *, event_id, reaso
         or packet.received_monotonic!=observation['source_monotonic'] or packet.received_at!=observation['source_wall_time']
         or list(image.shape[:2][::-1])!=observation['image_dimensions'] or not observation['watch_zone_inside']):
         raise RecordingError('trip_evidence_source_mismatch')
-    ok,png=cv2.imencode('.png',image,[cv2.IMWRITE_PNG_COMPRESSION,0])
+    ok,png=cv2.imencode('.png',image,[cv2.IMWRITE_PNG_COMPRESSION,1])
     if not ok:raise RecordingError('trip_evidence_encode_failed')
     dest=directory/session_id
     dest.mkdir(parents=True,exist_ok=True)

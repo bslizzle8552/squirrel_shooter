@@ -1,0 +1,498 @@
+{
+  "verified_source_files": 82,
+  "excluded_source_readme": "Historical installed README retained byte-for-byte in private backup",
+  "files": [
+    {
+      "path": "pyproject.toml",
+      "deployed_sha256": "f1d4878ab992eb26cc9bf11cda385087635dad51c5a2cacca789523f99faf647",
+      "git_sha256": "f1d4878ab992eb26cc9bf11cda385087635dad51c5a2cacca789523f99faf647",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "scripts/validate_collector_phase47.py",
+      "deployed_sha256": "7c9a15b5a607557300092a982abe9db2ae35f157c67b9f243d0c47b4938d20ef",
+      "git_sha256": "3ac94af8bd6d8241cae2456a8f817b4d908b59bcd21ba8e2f033e8c894c02fd4",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "scripts/measure_collector_usability.py",
+      "deployed_sha256": "1c3f3da88bbf0d4fd0faef81020a3ad8629bad0ab421360a34ef488dc2d1907e",
+      "git_sha256": "1c3f3da88bbf0d4fd0faef81020a3ad8629bad0ab421360a34ef488dc2d1907e",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "config/default.yaml",
+      "deployed_sha256": "e3170220c4af207a371ada43f8df211dec39cb8ea98f620b8008176052db3257",
+      "git_sha256": "e3170220c4af207a371ada43f8df211dec39cb8ea98f620b8008176052db3257",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_calibration.py",
+      "deployed_sha256": "e78482ee3fde4d644babfe8fb31729f55081fa9ab5fe566e21a66ed4067cfed3",
+      "git_sha256": "e78482ee3fde4d644babfe8fb31729f55081fa9ab5fe566e21a66ed4067cfed3",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/safety.py",
+      "deployed_sha256": "8cdbd52f15a28ca2846a24a8b8786bea60ed3c94a3b0b387bd742ab4c00979dd",
+      "git_sha256": "8cdbd52f15a28ca2846a24a8b8786bea60ed3c94a3b0b387bd742ab4c00979dd",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_night.py",
+      "deployed_sha256": "094fd609b42e07dc2cd2bb3b7c229a37418a8870140d498f9dd8c78fa07325ea",
+      "git_sha256": "094fd609b42e07dc2cd2bb3b7c229a37418a8870140d498f9dd8c78fa07325ea",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/runtime_provenance.py",
+      "deployed_sha256": "57523902e65624e7ff34d23cf11993a54bc1384c78e31fb548b172b35b2172d9",
+      "git_sha256": "57523902e65624e7ff34d23cf11993a54bc1384c78e31fb548b172b35b2172d9",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/event_report.py",
+      "deployed_sha256": "3e17bcd56c7bbb5cc0d400615325d96060299c7346c18182657597fb2340a520",
+      "git_sha256": "3e17bcd56c7bbb5cc0d400615325d96060299c7346c18182657597fb2340a520",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_control_routes.py",
+      "deployed_sha256": "ca3901d1b3109770992241b2644687b455a819c0dbb342efa0cb3af387672add",
+      "git_sha256": "ca3901d1b3109770992241b2644687b455a819c0dbb342efa0cb3af387672add",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/config.py",
+      "deployed_sha256": "a9f7638377baec1b9f7eb64c61388451c43d398da16c58c49cc0555b38f7adfd",
+      "git_sha256": "a75b4b51e3f2f3d8b617192669de5e8585dbafd57ad8332cc48a3336680e65a5",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/servo_bench.py",
+      "deployed_sha256": "3db102a2a84a20e091d24277dc6353c9cb2f58775d4219501a02b9ad3f343944",
+      "git_sha256": "3db102a2a84a20e091d24277dc6353c9cb2f58775d4219501a02b9ad3f343944",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/runtime_health.py",
+      "deployed_sha256": "843d8797a3f0ff1447869041e83b8f90736963a819751437418e988a81364e36",
+      "git_sha256": "843d8797a3f0ff1447869041e83b8f90736963a819751437418e988a81364e36",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/trip_evidence.py",
+      "deployed_sha256": "9a802fb4153ef0c54b79aab88fd5af3819ff4cf1404cb0dec9288277112cd157",
+      "git_sha256": "667da5f500182e67dcffd027edc96f736882e49a23f3a968bf53982cde8a7920",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/motion_watch.py",
+      "deployed_sha256": "f515f0990543de8f936218fb66c9f03819212f700cf050c068d42ced1ba0ae24",
+      "git_sha256": "f515f0990543de8f936218fb66c9f03819212f700cf050c068d42ced1ba0ae24",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/camera_diagnostic.py",
+      "deployed_sha256": "3a11eed9f38bff49248f4134d0b6743c992a9ecec8525881c5e093ecb0ad814c",
+      "git_sha256": "3a11eed9f38bff49248f4134d0b6743c992a9ecec8525881c5e093ecb0ad814c",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/manual_control.py",
+      "deployed_sha256": "bd59bb42534ce8f750f2420fd02b58100b07d51b29946022cd6002865a17f98f",
+      "git_sha256": "bd59bb42534ce8f750f2420fd02b58100b07d51b29946022cd6002865a17f98f",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/camera_capture.py",
+      "deployed_sha256": "efa957af1e92004c9068e7f819e9fe05793e2ea91a68243d631b77326bee5a4c",
+      "git_sha256": "efa957af1e92004c9068e7f819e9fe05793e2ea91a68243d631b77326bee5a4c",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/pi_data_pull.py",
+      "deployed_sha256": "20c3ce4e374ad3445d96b63c2267194c463f4bd92cf11373d0229b1590c78f8a",
+      "git_sha256": "20c3ce4e374ad3445d96b63c2267194c463f4bd92cf11373d0229b1590c78f8a",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/mask_preview.py",
+      "deployed_sha256": "cc04299293911a7ba2c4ecd5ec4342edb1efa3adb6d1c0a55ab51c61538dd984",
+      "git_sha256": "cc04299293911a7ba2c4ecd5ec4342edb1efa3adb6d1c0a55ab51c61538dd984",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/__init__.py",
+      "deployed_sha256": "925b089616aad468cdd6db1894abe66ae2654539fb4ec6e206830d392ca699ee",
+      "git_sha256": "925b089616aad468cdd6db1894abe66ae2654539fb4ec6e206830d392ca699ee",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/motion.py",
+      "deployed_sha256": "dcb7de8912d2126a3bb3bba57918fb63cef3daa66ee8f779ecc0902cfb8f8437",
+      "git_sha256": "dcb7de8912d2126a3bb3bba57918fb63cef3daa66ee8f779ecc0902cfb8f8437",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_media.py",
+      "deployed_sha256": "52a4c1ce329c108cb74c2d86011b7df26fc5c7ef8c136b235961262bfdb3cb47",
+      "git_sha256": "f74659477fb9022fe94795bd7c7c79a3bbe17c86ce6c9bc54c6ffa4a20ffac84",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/thread_names.py",
+      "deployed_sha256": "46738a6db03362e5edf819d9ba66a92428cf79c402ca2b7ae77ab06e45eec539",
+      "git_sha256": "46738a6db03362e5edf819d9ba66a92428cf79c402ca2b7ae77ab06e45eec539",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/performance.py",
+      "deployed_sha256": "6cf124812a00fd572bdb78379cdac4fd12c2e1f8d70b20030a45fdc4d1504242",
+      "git_sha256": "6cf124812a00fd572bdb78379cdac4fd12c2e1f8d70b20030a45fdc4d1504242",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/files.py",
+      "deployed_sha256": "11403cd794ed1a2065ec8e168f369a489c85919439498509109a726120db624e",
+      "git_sha256": "11403cd794ed1a2065ec8e168f369a489c85919439498509109a726120db624e",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/classifier_labels.py",
+      "deployed_sha256": "0435af9e16579638bc5c40d1e8a48f32f18da612c6bdb51aefc05e54bac115de",
+      "git_sha256": "0435af9e16579638bc5c40d1e8a48f32f18da612c6bdb51aefc05e54bac115de",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/motion_categories.py",
+      "deployed_sha256": "eeb5f1d8edcca79680782eaefbd940f13b90b17da6f7ddf66cb147e52017339b",
+      "git_sha256": "eeb5f1d8edcca79680782eaefbd940f13b90b17da6f7ddf66cb147e52017339b",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/web_dashboard.py",
+      "deployed_sha256": "c745ff43749dcc3b54b2f73df3f85209c3b396d0571ccc6468b0a3b686067384",
+      "git_sha256": "c745ff43749dcc3b54b2f73df3f85209c3b396d0571ccc6468b0a3b686067384",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/app.py",
+      "deployed_sha256": "02b53c7f56f53877311892328dd9746c398eb50163dc23b77e04a73f9fb26c16",
+      "git_sha256": "02b53c7f56f53877311892328dd9746c398eb50163dc23b77e04a73f9fb26c16",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/detector.py",
+      "deployed_sha256": "226826279312a639dfea665dd92e573e6cd5c5c6e9d2c1502bd1a421fcc80395",
+      "git_sha256": "226826279312a639dfea665dd92e573e6cd5c5c6e9d2c1502bd1a421fcc80395",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/target_association.py",
+      "deployed_sha256": "aaba1143eb26d423f76b835c222ea45effc1681be89d2e7bb5a3fe22dd8c03cf",
+      "git_sha256": "aaba1143eb26d423f76b835c222ea45effc1681be89d2e7bb5a3fe22dd8c03cf",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/classifier_setup.py",
+      "deployed_sha256": "0241e7fbd28d5247df05aacb4e3c5366f701fc52a0dfc22fe510939a464d2b63",
+      "git_sha256": "0241e7fbd28d5247df05aacb4e3c5366f701fc52a0dfc22fe510939a464d2b63",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/media_roles.py",
+      "deployed_sha256": "88504ceb090773367694de12d4c2163e6dec87a1493cb3921b3845445c1a7f79",
+      "git_sha256": "88504ceb090773367694de12d4c2163e6dec87a1493cb3921b3845445c1a7f79",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/event_storage.py",
+      "deployed_sha256": "d2f729fb2845341dab1a36a40109db85fe0da4626edd8c4ff1b808acbbe0df67",
+      "git_sha256": "d2f729fb2845341dab1a36a40109db85fe0da4626edd8c4ff1b808acbbe0df67",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/recording.py",
+      "deployed_sha256": "8f8538d3d4392261f4857dbd86a78f5587ab2e049bb699e4dbd2a6ad0ed67833",
+      "git_sha256": "b8f2f25b6c2aa26fac272577109311ca49fb002cb934bc87409341988ff45328",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/detection.py",
+      "deployed_sha256": "082190cb67de324e17503d95a90764094417a89cc69172c2caff5080b8d24364",
+      "git_sha256": "082190cb67de324e17503d95a90764094417a89cc69172c2caff5080b8d24364",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/dataset_inventory.py",
+      "deployed_sha256": "852897c023eb96fdf1c7e8736cf39c0d92dfc1168f9133cbe4e88efb49f44c14",
+      "git_sha256": "852897c023eb96fdf1c7e8736cf39c0d92dfc1168f9133cbe4e88efb49f44c14",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_app.py",
+      "deployed_sha256": "af1e56087562d79349ff9b5234bb9e4652f65e9dda30d71b1ca4316e191f724b",
+      "git_sha256": "5d601aced64a0724cd642b8923232cd370a43ab7c531e502aa7e1265d01474f5",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/pan_tilt.py",
+      "deployed_sha256": "016ebda8ce6f93079e48ea07e01c3422fc5af70b1ad19b237cc52a164af891f4",
+      "git_sha256": "016ebda8ce6f93079e48ea07e01c3422fc5af70b1ad19b237cc52a164af891f4",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/watch_detection.py",
+      "deployed_sha256": "10ffff9e17a04e3270032281ad0f39c3d54519c2d4ed2ba8343c5022f9be5cac",
+      "git_sha256": "10ffff9e17a04e3270032281ad0f39c3d54519c2d4ed2ba8343c5022f9be5cac",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/manual_fire_recording.py",
+      "deployed_sha256": "f6c93088573ea8ae6af7ac175c4220dc67c5e451dcff4c5bac1317d46e777490",
+      "git_sha256": "f6c93088573ea8ae6af7ac175c4220dc67c5e451dcff4c5bac1317d46e777490",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/vision_service.py",
+      "deployed_sha256": "5037e645de0e718dce3216f0c0d6a64d902f20ead022b2936a58b40c43f2e8d0",
+      "git_sha256": "5037e645de0e718dce3216f0c0d6a64d902f20ead022b2936a58b40c43f2e8d0",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/current_scene_safety.py",
+      "deployed_sha256": "5fef40d3ee74bced067ced746929490e77420519ab4c9d5dbbfb079c2971162f",
+      "git_sha256": "5fef40d3ee74bced067ced746929490e77420519ab4c9d5dbbfb079c2971162f",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_firing_history.py",
+      "deployed_sha256": "9afdc2772b7dc4ff6a38abd8297e8738789791ebed9b1898905f8635a5f706a5",
+      "git_sha256": "9afdc2772b7dc4ff6a38abd8297e8738789791ebed9b1898905f8635a5f706a5",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/model_manifest.py",
+      "deployed_sha256": "c9a0df45bef2227775422170da472c8c1ab39dbcf7bd6d5101962fbe20457925",
+      "git_sha256": "c9a0df45bef2227775422170da472c8c1ab39dbcf7bd6d5101962fbe20457925",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/legacy_mobilenet_policy.py",
+      "deployed_sha256": "8a69738772847f12709c5e8571d97079e6bf660bab807a0d791925a78bb76a8d",
+      "git_sha256": "8a69738772847f12709c5e8571d97079e6bf660bab807a0d791925a78bb76a8d",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/frame_selection.py",
+      "deployed_sha256": "01d14ac19510cac2fdbbe50636624dc0a40b814fc5c0d30b1a11f5e1d8f0fd05",
+      "git_sha256": "01d14ac19510cac2fdbbe50636624dc0a40b814fc5c0d30b1a11f5e1d8f0fd05",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/diagnostics.py",
+      "deployed_sha256": "63a0d6309ed30c1e2bc3f7009c432fa5451d230eb3008b4faf67489f644dd5e7",
+      "git_sha256": "63a0d6309ed30c1e2bc3f7009c432fa5451d230eb3008b4faf67489f644dd5e7",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/motion_runtime.py",
+      "deployed_sha256": "1c86bbe65cd90f2885e022a576d50ad9ee07c3404c7aecf4ca937f0974971cdc",
+      "git_sha256": "1c86bbe65cd90f2885e022a576d50ad9ee07c3404c7aecf4ca937f0974971cdc",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_control.py",
+      "deployed_sha256": "9b1f7bc414e8caf634925fa226ea87b965ce3f871385d5835d8c66005ba08b16",
+      "git_sha256": "9b1f7bc414e8caf634925fa226ea87b965ce3f871385d5835d8c66005ba08b16",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/watch_zone.py",
+      "deployed_sha256": "73580a7258e574332a32e4bf3611b102df6158e8085e1afb323343ad2b294db8",
+      "git_sha256": "0e8c33f9cab26c1faf3907cc69d5bbb917d8b04bc175887cfe730fe96fe1bafa",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/valve.py",
+      "deployed_sha256": "694cde1d22781e7a95df4299b5930b90629821e0c707ef0fe31214db569bcd73",
+      "git_sha256": "694cde1d22781e7a95df4299b5930b90629821e0c707ef0fe31214db569bcd73",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_policy.py",
+      "deployed_sha256": "b9bd9ef19e0c7cb9844fb6f52feb05c8a46f45e38438a34ec1154ad420d130fa",
+      "git_sha256": "8e269db2515d7c48a8d6e52ba63a0bc8eed51de38c820a0847f5e0ce233f9bc1",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/collector_control_config.py",
+      "deployed_sha256": "94f338ce3f4556a4c5130c54a2e52253d6fc7a2897476640b67368cde14dac43",
+      "git_sha256": "94f338ce3f4556a4c5130c54a2e52253d6fc7a2897476640b67368cde14dac43",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/camera_common.py",
+      "deployed_sha256": "402dce3c5717d706b074d644df60fe88de56670cbb757be64a7501f9c7353742",
+      "git_sha256": "402dce3c5717d706b074d644df60fe88de56670cbb757be64a7501f9c7353742",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/camera_preview.py",
+      "deployed_sha256": "715f20717ac1a0e0bfa88557a70fe27876931a38a29514c454544e9704e9c586",
+      "git_sha256": "715f20717ac1a0e0bfa88557a70fe27876931a38a29514c454544e9704e9c586",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/auto_fire.py",
+      "deployed_sha256": "185728931dd1aba4c58f95cae5ca0006bcf8ff14b7467a54dc959a97c648176f",
+      "git_sha256": "185728931dd1aba4c58f95cae5ca0006bcf8ff14b7467a54dc959a97c648176f",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/classifier.py",
+      "deployed_sha256": "c9c62b5dd2e1feef50c1537f072f0b8a34d74c2bbdb86d3bfede3243dc222b5c",
+      "git_sha256": "c9c62b5dd2e1feef50c1537f072f0b8a34d74c2bbdb86d3bfede3243dc222b5c",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/inference_worker.py",
+      "deployed_sha256": "006ffd9ea0645634bb71314ea2ea73e269d9258240c13d4ab595f3bde8652751",
+      "git_sha256": "0beab3b055ce8ae6e16e4e9fcd4dfd1804ba57507248ef054191f076291a6bbf",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/camera_service.py",
+      "deployed_sha256": "d4a7673e69e19d9b31050f8610d49a63417cd872db3d302d8ad02c5d947d30ff",
+      "git_sha256": "bee62f3b8b4305021959576dbbe9a32f138a90a2dda07f7c84dd68f45efb485c",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector.html",
+      "deployed_sha256": "2d6ea2a1a8eee5a195897bc3654d44fb4106359ec9f2a7d8871fec91ee4995f6",
+      "git_sha256": "621b5d45b580ab2d312977640345ba530e0363f29f2cb69225ba12dec49f7fed",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/captures.html",
+      "deployed_sha256": "f18524b871f4e0b8c856f47dd2047d3001e3527f377185f6109581ca621d53cd",
+      "git_sha256": "f18524b871f4e0b8c856f47dd2047d3001e3527f377185f6109581ca621d53cd",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/base.html",
+      "deployed_sha256": "ff7c7627cb85d8fa6919e80e0740a87239424019ae357da7c2ea9e611bb8ccf4",
+      "git_sha256": "ff7c7627cb85d8fa6919e80e0740a87239424019ae357da7c2ea9e611bb8ccf4",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/events.html",
+      "deployed_sha256": "323452374bcdc79996256cf35d1a907826e18d2794aef1f6b9cd745d43a0077c",
+      "git_sha256": "323452374bcdc79996256cf35d1a907826e18d2794aef1f6b9cd745d43a0077c",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/_gallery.html",
+      "deployed_sha256": "4aab94b3b7a0111ed63ed44f5a0659c7d6014847b1dd90a536d7ee1d710266a7",
+      "git_sha256": "4aab94b3b7a0111ed63ed44f5a0659c7d6014847b1dd90a536d7ee1d710266a7",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector_clip.html",
+      "deployed_sha256": "3570bdd7a1e5ff8c18be35b7299095f0233aa442bb9370679cf0f4a90a77d529",
+      "git_sha256": "3570bdd7a1e5ff8c18be35b7299095f0233aa442bb9370679cf0f4a90a77d529",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/dashboard.html",
+      "deployed_sha256": "af48ca43ff62ae6848dae616128894dc2d40e9e5e90332ae2b1d38b389a3adf7",
+      "git_sha256": "af48ca43ff62ae6848dae616128894dc2d40e9e5e90332ae2b1d38b389a3adf7",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/classifier_review.html",
+      "deployed_sha256": "bee26158798b690c6dd549b275185149fe8a6c9dba0d20146a09cfd5286b2a53",
+      "git_sha256": "bee26158798b690c6dd549b275185149fe8a6c9dba0d20146a09cfd5286b2a53",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector_calibration.html",
+      "deployed_sha256": "b158e34a3972d0c7ebba56e204f03f9268e5dec55b9059cb26835b9488709792",
+      "git_sha256": "b158e34a3972d0c7ebba56e204f03f9268e5dec55b9059cb26835b9488709792",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/collector_control_setup.html",
+      "deployed_sha256": "00204e46d461abd67d8ebb2e63def3c7ced095fd8842dae636c0aae26e3d5479",
+      "git_sha256": "00204e46d461abd67d8ebb2e63def3c7ced095fd8842dae636c0aae26e3d5479",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/templates/manual_control.html",
+      "deployed_sha256": "7caa1dfa694b8fb8a4ad12fe1c73f1e92ee7ee7055771bb2c1ead6335c0140e8",
+      "git_sha256": "7caa1dfa694b8fb8a4ad12fe1c73f1e92ee7ee7055771bb2c1ead6335c0140e8",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/console.css",
+      "deployed_sha256": "46a8a6e4c40464147479290c1e4ea038cc8714481c33939ca4d299c97e6b2d00",
+      "git_sha256": "46a8a6e4c40464147479290c1e4ea038cc8714481c33939ca4d299c97e6b2d00",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/manual_control.css",
+      "deployed_sha256": "42c0b1c1f3952ff2aaab51b762a30c414c2661e3271a08eaf7a91a4d4c772895",
+      "git_sha256": "42c0b1c1f3952ff2aaab51b762a30c414c2661e3271a08eaf7a91a4d4c772895",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/collector_player.js",
+      "deployed_sha256": "b41e916a24c2582eabc697db7ae6e2c3cc59f0bb12511b71acc506085194e10a",
+      "git_sha256": "b41e916a24c2582eabc697db7ae6e2c3cc59f0bb12511b71acc506085194e10a",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/console.js",
+      "deployed_sha256": "fd0a96a56ea45a7f3ee908f1b3b69c3a0678b598db28b07bd4f43c5973f08cf0",
+      "git_sha256": "75f15ed593320e41611eb86969d5e97a8e6471427bcc97a265e238aab0397f72",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/squirrel-squirter-logo.png",
+      "deployed_sha256": "3d252386509ba7c6f7ca07d99b8239b1340593788dbbee8b5eb082a2fb703248",
+      "git_sha256": "3d252386509ba7c6f7ca07d99b8239b1340593788dbbee8b5eb082a2fb703248",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/recording_controls.js",
+      "deployed_sha256": "66f1ca8dc1bab9f46879113a7fd804523c6d0915a5a680985d3dfe3c6041b3f8",
+      "git_sha256": "4b8966567b66646b11a499c001f93ee4eeaf21f62e926d1e413dfdda3d101378",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/manual_control.js",
+      "deployed_sha256": "3bbc060584060ff5914d26aa3b9ecfa5e026ff3bfa0939052a5c8218a60eed45",
+      "git_sha256": "2bce190e92631c347ba1caa42619dd1eeefd6468130778c000c243ad748adc25",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/collector_calibration.js",
+      "deployed_sha256": "3127ff40cd2364ac5e4490b7a7f75862947772cb7b39b9c2d6738764e747a290",
+      "git_sha256": "3127ff40cd2364ac5e4490b7a7f75862947772cb7b39b9c2d6738764e747a290",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/collector_calibration.css",
+      "deployed_sha256": "845c92ad15b1f469117c5e19ebe7ea3727c7c529733473a47c79e44068a635e6",
+      "git_sha256": "845c92ad15b1f469117c5e19ebe7ea3727c7c529733473a47c79e44068a635e6",
+      "matches_after_line_ending_normalization": true
+    },
+    {
+      "path": "src/squirrel_shooter/static/dashboard.css",
+      "deployed_sha256": "87b73f6a81e527e01e4267c5ed86d68082bf5b30876be3c629a8cdfe3927be78",
+      "git_sha256": "87b73f6a81e527e01e4267c5ed86d68082bf5b30876be3c629a8cdfe3927be78",
+      "matches_after_line_ending_normalization": true
+    }
+  ]
+}

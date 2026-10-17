@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,8 @@ from .detector import DetectorConfig
 from .watch_zone import WatchZoneConfig
 from .collector_night import CollectorNightConfig
 from .collector_policy import AutomaticRecordingConfig, CollectorPreviewConfig
+from .collector_control_config import (PhysicalControlConfig, AutomaticFireConfig,
+                                       parse_physical_control, parse_automatic_fire)
 from .pan_tilt import PanTiltConfig
 from .valve import ValveConfig
 
@@ -297,6 +299,8 @@ class AppConfig:
     collector_preview: CollectorPreviewConfig = CollectorPreviewConfig()
     watch_zone: WatchZoneConfig = WatchZoneConfig()
     collector_night: CollectorNightConfig = CollectorNightConfig()
+    physical_control: PhysicalControlConfig = PhysicalControlConfig()
+    automatic_fire: AutomaticFireConfig = AutomaticFireConfig()
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -716,6 +720,16 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         collector_preview = CollectorPreviewConfig(**raw.get('collector_preview', {}))
         watch_zone = WatchZoneConfig(**raw.get('watch_zone', {}))
         collector_night = CollectorNightConfig(**raw.get('collector_night', {}))
+        physical_control = parse_physical_control(raw.get('physical_control', {}))
+        automatic_fire = parse_automatic_fire(raw.get('automatic_fire', {}))
+        calibration_file = physical_control.calibration_file.expanduser()
+        if not calibration_file.is_absolute():
+            calibration_file = config_path.resolve().parent / calibration_file
+        physical_control = replace(physical_control, calibration_file=calibration_file)
+        if automatic_fire.enabled and (not physical_control.enabled or not detector_config.enabled):
+            raise ValueError('automatic_fire requires enabled physical_control and detector')
+        if automatic_fire.enabled and not automatic_fire.dry_run and not physical_control.valve_enabled:
+            raise ValueError('live automatic_fire requires physical_control.valve_enabled')
         if automatic_recording.enabled and (not detector_config.enabled or not recording_config.enabled):
             raise ValueError('automatic recording requires enabled detector and recording')
         if automatic_recording.enabled and automatic_recording.squirrel_confidence < detector_config.diagnostic_confidence_floor:
@@ -1086,4 +1100,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         collector_preview=collector_preview,
         watch_zone=watch_zone,
         collector_night=collector_night,
+        physical_control=physical_control,
+        automatic_fire=automatic_fire,
     )
